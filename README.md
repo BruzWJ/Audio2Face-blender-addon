@@ -203,6 +203,12 @@ python tools/build_runtime.py --platform windows-x64
 python tools/build_extension.py --blender "C:\Program Files\Blender Foundation\Blender 5.2\blender.exe" --platform windows-x64
 ```
 
+Run these commands from an ordinary PowerShell session. The runtime builder
+uses Visual Studio Installer's `vswhere.exe` to locate Visual Studio 2022 or
+Build Tools, selects the exact compiler pinned by `runtime-lock.json`, and
+initializes `vcvars64.bat` itself. A Developer Command Prompt and manual
+environment setup are not required.
+
 On Linux x64:
 
 ```sh

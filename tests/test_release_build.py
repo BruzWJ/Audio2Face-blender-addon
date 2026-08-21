@@ -355,7 +355,10 @@ def test_release_environment_removes_ambient_gpu_search_paths(
     monkeypatch.setenv("CUDA_PATH_V12_9", "/ambient/cuda")
     monkeypatch.setenv("TENSORRT_ROOT_DIR", "/ambient/tensorrt")
 
-    environment = runtime_tool.release_environment(tmp_path)
+    environment = runtime_tool.release_environment(
+        tmp_path,
+        runtime_tool.load_lock(),
+    )
 
     assert set(environment) == {
         "GIT_CONFIG_GLOBAL",
@@ -497,6 +500,247 @@ def test_windows_release_environment_is_an_exact_vcvars_allowlist(
     assert environment["USERPROFILE"] == environment["HOME"]
     assert environment["TEMP"] == str(tmp_path / "producer-tmp")
     assert environment["TMP"] == environment["TEMP"]
+
+
+def test_windows_vcvars_discovery_selects_newest_exact_pinned_toolchain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    program_files = tmp_path / "Program Files (x86)"
+    vswhere = (
+        program_files
+        / "Microsoft Visual Studio"
+        / "Installer"
+        / "vswhere.exe"
+    )
+    newer_without_pin = tmp_path / "Visual Studio" / "2022" / "Newer"
+    newest_with_pin = tmp_path / "Visual Studio" / "2022" / "Community"
+    older_with_pin = tmp_path / "Visual Studio" / "2022" / "BuildTools"
+    toolchain = runtime_tool.load_lock()["windows_toolchain"]
+    vcvars_relative = Path("VC/Auxiliary/Build/vcvars64.bat")
+    compiler_relative = (
+        Path("VC/Tools/MSVC")
+        / toolchain["vctools_version"]
+        / "bin"
+        / "Hostx64"
+        / "x64"
+        / "cl.exe"
+    )
+    files = (
+        vswhere,
+        newer_without_pin / vcvars_relative,
+        newest_with_pin / vcvars_relative,
+        newest_with_pin / compiler_relative,
+        older_with_pin / vcvars_relative,
+        older_with_pin / compiler_relative,
+    )
+    for path in files:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"test")
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def run(command: list[str], **kwargs: object) -> object:
+        calls.append((command, kwargs))
+        installations = [
+            {
+                "installationPath": str(newer_without_pin),
+                "installationVersion": "17.14.10000.1",
+            },
+            {
+                "installationPath": str(newest_with_pin),
+                "installationVersion": "17.13.35931.197",
+            },
+            {
+                "installationPath": str(older_with_pin),
+                "installationVersion": "17.11.35327.3",
+            },
+        ]
+        return runtime_tool.subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps(installations).encode("utf-8"),
+        )
+
+    monkeypatch.setattr(runtime_tool.subprocess, "run", run)
+    source = {
+        "ProgramFiles(x86)": str(program_files),
+    }
+
+    vcvars = runtime_tool._discover_windows_vcvars(source, toolchain)
+
+    assert vcvars == newest_with_pin / vcvars_relative
+    assert len(calls) == 1
+    command, options = calls[0]
+    assert Path(command[0]) == vswhere
+    assert command[1:] == [
+        "-products",
+        "*",
+        "-version",
+        "[17.0,18.0)",
+        "-requires",
+        "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+        "-sort",
+        "-format",
+        "json",
+        "-utf8",
+    ]
+    assert options["check"] is True
+    assert options["stdout"] is runtime_tool.subprocess.PIPE
+    assert options["stderr"] is runtime_tool.subprocess.PIPE
+
+
+def test_windows_vcvars_discovery_rejects_missing_pinned_toolset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    program_files = tmp_path / "Program Files (x86)"
+    vswhere = (
+        program_files
+        / "Microsoft Visual Studio"
+        / "Installer"
+        / "vswhere.exe"
+    )
+    vswhere.parent.mkdir(parents=True)
+    vswhere.write_bytes(b"test")
+    installation = tmp_path / "Visual Studio" / "2022" / "Community"
+    vcvars = installation / "VC" / "Auxiliary" / "Build" / "vcvars64.bat"
+    vcvars.parent.mkdir(parents=True)
+    vcvars.write_bytes(b"test")
+    output = json.dumps([{"installationPath": str(installation)}]).encode()
+    monkeypatch.setattr(
+        runtime_tool.subprocess,
+        "run",
+        lambda *_args, **_kwargs: runtime_tool.subprocess.CompletedProcess(
+            [],
+            0,
+            stdout=output,
+        ),
+    )
+
+    with pytest.raises(runtime_tool.BuildError, match="locked MSVC toolset"):
+        runtime_tool._discover_windows_vcvars(
+            {"ProgramFiles(x86)": str(program_files)},
+            runtime_tool.load_lock()["windows_toolchain"],
+        )
+
+
+def test_windows_vcvars_capture_uses_pinned_versions_and_sanitized_shell(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runtime_tool.os, "pathsep", ";")
+    toolchain = runtime_tool.load_lock()["windows_toolchain"]
+    vcvars = Path(
+        "C:/Program Files/Microsoft Visual Studio/2022/Community/"
+        "VC/Auxiliary/Build/vcvars64.bat"
+    )
+    source = {
+        "A2F_VCVARS64": "C:/hostile.bat",
+        "COMSPEC": "C:/Windows/System32/cmd.exe",
+        "CUDA_PATH": "C:/ambient/cuda",
+        "INCLUDE": "C:/ambient/include",
+        "LIB": "C:/ambient/lib",
+        "PATH": "C:/Windows/System32;;C:/host/git/bin;",
+        "PATHEXT": ".COM;.EXE;.BAT;.CMD",
+        "ProgramFiles(x86)": "C:/Program Files (x86)",
+        "SystemRoot": "C:/Windows",
+        "VCToolsInstallDir": "C:/ambient/vctools",
+    }
+    monkeypatch.setattr(
+        runtime_tool,
+        "_discover_windows_vcvars",
+        lambda discovered_source, discovered_toolchain: (
+            vcvars
+            if discovered_source is source and discovered_toolchain is toolchain
+            else pytest.fail("capture changed its discovery inputs")
+        ),
+    )
+    captured_text = (
+        "COMSPEC=C:\\Windows\\System32\\cmd.exe\r\n"
+        "INCLUDE=C:\\Visual Studio\\include;C:\\Windows Kits\\Include\r\n"
+        "LIB=C:\\Visual Studio\\lib\r\n"
+        "PATH=C:\\Visual Studio\\bin;C:\\Windows\\System32\r\n"
+        "A2F_TEST_VALUE=left=right\r\n"
+    )
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def run(command: list[str], **kwargs: object) -> object:
+        calls.append((command, kwargs))
+        return runtime_tool.subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=captured_text.encode("utf-16le"),
+        )
+
+    monkeypatch.setattr(runtime_tool.subprocess, "run", run)
+
+    environment = runtime_tool._capture_windows_vcvars_environment(
+        source,
+        toolchain,
+    )
+
+    assert environment["A2F_TEST_VALUE"] == "left=right"
+    assert environment["INCLUDE"] == (
+        "C:\\Visual Studio\\include;C:\\Windows Kits\\Include"
+    )
+    assert len(calls) == 1
+    command, options = calls[0]
+    assert command == (
+        '"C:/Windows/System32/cmd.exe" /d /u /s /c '
+        '"call "%A2F_VCVARS64%" 10.0.22621.0 '
+        '-vcvars_ver=14.43.34808 >nul && set"'
+    )
+    assert options["env"] == {
+        "A2F_VCVARS64": str(vcvars),
+        "COMSPEC": source["COMSPEC"],
+        "CUDA_PATH": source["CUDA_PATH"],
+        "PATH": "C:/Windows/System32;C:/host/git/bin",
+        "PATHEXT": source["PATHEXT"],
+        "ProgramFiles(x86)": source["ProgramFiles(x86)"],
+        "SystemRoot": source["SystemRoot"],
+    }
+    assert options["check"] is True
+    assert options["stdout"] is runtime_tool.subprocess.PIPE
+    assert options["stderr"] is runtime_tool.subprocess.PIPE
+
+
+def test_windows_command_output_rejects_invalid_utf16() -> None:
+    with pytest.raises(runtime_tool.BuildError, match="truncated UTF-16"):
+        runtime_tool._decode_windows_command_output(b"x", "vcvars64")
+    with pytest.raises(runtime_tool.BuildError, match="invalid UTF-16"):
+        runtime_tool._decode_windows_command_output(b"\x00\xd8", "vcvars64")
+
+
+def test_windows_vcvars_capture_rejects_duplicate_environment_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runtime_tool.os, "pathsep", ";")
+    monkeypatch.setattr(
+        runtime_tool,
+        "_discover_windows_vcvars",
+        lambda *_args: Path("C:/Visual Studio/vcvars64.bat"),
+    )
+    output = "PATH=C:\\Windows\r\nPath=C:\\Visual Studio\r\n".encode("utf-16le")
+    monkeypatch.setattr(
+        runtime_tool.subprocess,
+        "run",
+        lambda *_args, **_kwargs: runtime_tool.subprocess.CompletedProcess(
+            [],
+            0,
+            stdout=output,
+        ),
+    )
+    source = {
+        "COMSPEC": "C:/Windows/System32/cmd.exe",
+        "PATH": "C:/Windows/System32",
+        "PATHEXT": ".EXE;.BAT",
+        "SystemRoot": "C:/Windows",
+    }
+
+    with pytest.raises(runtime_tool.BuildError, match="duplicate environment name"):
+        runtime_tool._capture_windows_vcvars_environment(
+            source,
+            runtime_tool.load_lock()["windows_toolchain"],
+        )
 
 
 def test_windows_release_environment_rejects_case_colliding_keys(

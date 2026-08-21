@@ -131,6 +131,8 @@ WINDOWS_REQUIRED_ENVIRONMENT_KEYS = frozenset(
         "WindowsSDKVersion",
     }
 )
+WINDOWS_VSWHERE_COMPONENT = "Microsoft.VisualStudio.Component.VC.Tools.x86.x64"
+WINDOWS_VCVARS_PATH_VARIABLE = "A2F_VCVARS64"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:")
@@ -1759,6 +1761,226 @@ def _windows_environment_value(
     return value
 
 
+def _discover_windows_vcvars(
+    source: Mapping[str, str], toolchain: Mapping[str, Any]
+) -> Path:
+    """Locate the newest complete VS 2022 instance with the locked compiler."""
+
+    program_files = _windows_environment_value(source, "ProgramFiles(x86)")
+    if program_files is None:
+        raise BuildError(
+            "Windows release cannot locate Visual Studio because "
+            "ProgramFiles(x86) is missing"
+        )
+    program_files_root = Path(program_files)
+    if not program_files_root.is_absolute():
+        raise BuildError("ProgramFiles(x86) must be an absolute path")
+    vswhere = (
+        program_files_root
+        / "Microsoft Visual Studio"
+        / "Installer"
+        / "vswhere.exe"
+    )
+    if not vswhere.is_file():
+        raise BuildError(f"Visual Studio Installer is missing vswhere.exe: {vswhere}")
+
+    command = [
+        os.fspath(vswhere),
+        "-products",
+        "*",
+        "-version",
+        "[17.0,18.0)",
+        "-requires",
+        WINDOWS_VSWHERE_COMPONENT,
+        "-sort",
+        "-format",
+        "json",
+        "-utf8",
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            env=dict(source),
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        stderr = getattr(exc, "stderr", b"")
+        if isinstance(stderr, bytes):
+            detail = stderr.decode("utf-8", errors="replace").strip()
+        else:
+            detail = str(stderr).strip()
+        suffix = f": {detail}" if detail else ""
+        raise BuildError(f"Visual Studio discovery failed{suffix}") from exc
+    try:
+        output = result.stdout.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise BuildError("vswhere returned non-UTF-8 output") from exc
+    try:
+        installations = json.loads(
+            output,
+            object_pairs_hook=duplicate_key_hook(
+                BuildError,
+                "vswhere installation",
+            ),
+            parse_constant=invalid_constant_hook(
+                BuildError,
+                "vswhere installation",
+            ),
+        )
+    except json.JSONDecodeError as exc:
+        raise BuildError("vswhere returned invalid JSON") from exc
+    if not isinstance(installations, list):
+        raise BuildError("vswhere result must be a JSON array")
+
+    vctools_version = _string(
+        _field(toolchain, "vctools_version", "windows_toolchain"),
+        "windows_toolchain.vctools_version",
+    )
+    for index, raw_installation in enumerate(installations):
+        label = f"vswhere installation {index}"
+        installation = _object(raw_installation, label)
+        raw_path = _field(installation, "installationPath", label)
+        installation_path = Path(_string(raw_path, f"{label}.installationPath"))
+        if not installation_path.is_absolute():
+            raise BuildError(f"{label}.installationPath must be absolute")
+        vcvars = installation_path / "VC" / "Auxiliary" / "Build" / "vcvars64.bat"
+        compiler = (
+            installation_path
+            / "VC"
+            / "Tools"
+            / "MSVC"
+            / vctools_version
+            / "bin"
+            / "Hostx64"
+            / "x64"
+            / "cl.exe"
+        )
+        if vcvars.is_file() and compiler.is_file():
+            return vcvars
+    raise BuildError(
+        "Visual Studio 2022 has no complete x64 C++ installation containing "
+        f"the locked MSVC toolset {vctools_version}"
+    )
+
+
+def _decode_windows_command_output(value: bytes, label: str) -> str:
+    if len(value) % 2:
+        raise BuildError(f"{label} returned truncated UTF-16 output")
+    try:
+        return value.decode("utf-16-le")
+    except UnicodeDecodeError as exc:
+        raise BuildError(f"{label} returned invalid UTF-16 output") from exc
+
+
+def _capture_windows_vcvars_environment(
+    source: Mapping[str, str], toolchain: Mapping[str, Any]
+) -> dict[str, str]:
+    """Run the locked vcvars64 producer and capture its exact environment."""
+
+    vcvars = _discover_windows_vcvars(source, toolchain)
+    comspec_value = _windows_environment_value(source, "COMSPEC")
+    system_root_value = _windows_environment_value(source, "SystemRoot")
+    if comspec_value is None or system_root_value is None:
+        raise BuildError("Windows release requires COMSPEC and SystemRoot")
+    comspec = PureWindowsPath(comspec_value)
+    expected_comspec = (
+        PureWindowsPath(system_root_value) / "System32" / "cmd.exe"
+    )
+    if not comspec.is_absolute() or comspec != expected_comspec:
+        raise BuildError(
+            "COMSPEC must be the SystemRoot command processor: "
+            f"{expected_comspec}"
+        )
+
+    source_path = _windows_environment_value(source, "PATH")
+    if source_path is None:
+        raise BuildError("Windows release requires PATH")
+    search_paths = [entry for entry in source_path.split(os.pathsep) if entry]
+    if not search_paths:
+        raise BuildError("Windows release PATH has no search directories")
+    relative_search_paths = [
+        entry for entry in search_paths if not PureWindowsPath(entry).is_absolute()
+    ]
+    if relative_search_paths:
+        raise BuildError(
+            "Windows release PATH contains non-absolute directories: "
+            + ", ".join(relative_search_paths)
+        )
+    canonical_source_path = os.pathsep.join(search_paths)
+
+    preserved_vcvars_keys = {"comspec", "path", "pathext", "systemroot"}
+    generated_vcvars_keys = {
+        key.casefold()
+        for key in WINDOWS_VCVARS_ENVIRONMENT_KEYS
+        if key.casefold() not in preserved_vcvars_keys
+    }
+    capture_environment = {
+        key: value
+        for key, value in source.items()
+        if key.casefold() not in generated_vcvars_keys
+        and key.casefold() != WINDOWS_VCVARS_PATH_VARIABLE.casefold()
+    }
+    capture_path_key = next(
+        key for key in capture_environment if key.casefold() == "path"
+    )
+    capture_environment[capture_path_key] = canonical_source_path
+    capture_environment[WINDOWS_VCVARS_PATH_VARIABLE] = os.fspath(vcvars)
+
+    vctools_version = _string(
+        _field(toolchain, "vctools_version", "windows_toolchain"),
+        "windows_toolchain.vctools_version",
+    )
+    windows_sdk_version = _string(
+        _field(toolchain, "windows_sdk_version", "windows_toolchain"),
+        "windows_toolchain.windows_sdk_version",
+    )
+    if not windows_sdk_version.endswith("\\"):
+        raise BuildError(
+            "windows_toolchain.windows_sdk_version must end in a backslash"
+        )
+    sdk_argument = windows_sdk_version[:-1]
+    command_body = (
+        f'call "%{WINDOWS_VCVARS_PATH_VARIABLE}%" {sdk_argument} '
+        f"-vcvars_ver={vctools_version} >nul && set"
+    )
+    command_line = f'"{comspec_value}" /d /u /s /c "{command_body}"'
+    try:
+        result = subprocess.run(
+            command_line,
+            env=capture_environment,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        stderr = getattr(exc, "stderr", b"")
+        if isinstance(stderr, bytes):
+            detail = _decode_windows_command_output(stderr, "vcvars64").strip()
+        else:
+            detail = str(stderr).strip()
+        suffix = f": {detail}" if detail else ""
+        raise BuildError(f"vcvars64 initialization failed{suffix}") from exc
+    output = _decode_windows_command_output(result.stdout, "vcvars64")
+    environment: dict[str, str] = {}
+    casefolded_names: set[str] = set()
+    for line in output.splitlines():
+        if not line or line.startswith("="):
+            continue
+        if "=" not in line:
+            raise BuildError(f"vcvars64 returned malformed environment line: {line!r}")
+        name, value = line.split("=", 1)
+        if not name or not value:
+            raise BuildError(f"vcvars64 returned an empty environment value: {line!r}")
+        casefolded = name.casefold()
+        if casefolded in casefolded_names:
+            raise BuildError(f"vcvars64 returned duplicate environment name {name!r}")
+        casefolded_names.add(casefolded)
+        environment[name] = value
+    return environment
+
+
 def _windows_release_environment(
     source: Mapping[str, str], work_root: Path
 ) -> dict[str, str]:
@@ -1817,11 +2039,17 @@ def _windows_release_environment(
     return environment
 
 
-def release_environment(work_root: Path) -> dict[str, str]:
+def release_environment(
+    work_root: Path, lock: Mapping[str, Any]
+) -> dict[str, str]:
     """Create the exact host-command environment for one release build."""
 
     if os.name == "nt":
-        return _windows_release_environment(os.environ, work_root)
+        vcvars_environment = _capture_windows_vcvars_environment(
+            os.environ,
+            lock["windows_toolchain"],
+        )
+        return _windows_release_environment(vcvars_environment, work_root)
 
     home = work_root / "producer-home"
     temporary = work_root / "producer-tmp"
@@ -3125,7 +3353,7 @@ def build_runtime(platform_id: str, work_root: Path) -> Path:
     require_native_target(platform_id)
     lock = load_lock()
     host_runner = CommandRunner(work_root)
-    environment = release_environment(work_root)
+    environment = release_environment(work_root, lock)
     git = require_host_program(
         "git.exe" if platform_id == "windows-x64" else "git",
         environment,

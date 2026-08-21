@@ -32,6 +32,12 @@ system headers are installed from locked RPMs in the locked Rocky producer
 image. The script acquires every CUDA, TensorRT, CMake, SDK, Windows CRT, and
 Linux GNU runtime input from the lock into an isolated work directory.
 
+On Windows, run the command from ordinary PowerShell. The builder locates
+Visual Studio 2022 or Build Tools with Visual Studio Installer's `vswhere.exe`,
+selects the exact locked toolset, and initializes `vcvars64.bat` automatically.
+It does not require a Developer Command Prompt or caller-provided Visual Studio
+environment variables.
+
 Windows is pinned to VCToolsVersion 14.43.34808, `cl` 19.43.34810, and Windows
 SDK 10.0.22621.0. Linux is pinned to the Rocky Linux 8.9 amd64 image digest,
 glibc 2.28, GCC Toolset 11.2.1, the old libstdc++ ABI, and generic x86-64 code
