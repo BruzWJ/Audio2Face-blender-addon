@@ -1,21 +1,27 @@
 name: Release platform extensions
 
 on:
-  push:
-    tags:
-      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag matching blender_manifest.toml (for example v0.1.0)
+        required: true
+        type: string
 
 concurrency:
-  group: audio2face-release-${{ github.ref }}
+  group: audio2face-release-${{ inputs.tag }}
   cancel-in-progress: false
 
 permissions:
   contents: read
 
+env:
+  RELEASE_TAG: ${{ inputs.tag }}
+
 jobs:
   prepare:
     name: Validate source and prepare draft
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       contents: write
@@ -23,9 +29,13 @@ jobs:
       version: ${{ steps.identity.outputs.version }}
       windows_asset: ${{ steps.identity.outputs.windows_asset }}
       linux_asset: ${{ steps.identity.outputs.linux_asset }}
+      source_sha: ${{ steps.identity.outputs.source_sha }}
+      tag_ref_sha: ${{ steps.identity.outputs.tag_ref_sha }}
     steps:
       - name: Check out tagged source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: refs/tags/${{ inputs.tag }}
 
       - name: Select release Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
@@ -38,7 +48,9 @@ jobs:
         run: |
           python - <<'PY'
           import os
+          import json
           import re
+          import subprocess
           import tomllib
           from pathlib import Path
 
@@ -51,18 +63,40 @@ jobs:
               raise SystemExit(f"unexpected extension id: {extension_id!r}")
           if not isinstance(version, str) or re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version) is None:
               raise SystemExit(f"invalid extension version: {version!r}")
-          if os.environ.get("GITHUB_REF_TYPE") != "tag":
-              raise SystemExit("release workflow requires a Git tag")
           expected_tag = f"v{version}"
-          actual_tag = os.environ.get("GITHUB_REF_NAME")
+          actual_tag = os.environ.get("RELEASE_TAG")
           if actual_tag != expected_tag:
               raise SystemExit(
                   f"release tag must equal manifest version {expected_tag!r}; got {actual_tag!r}"
               )
+          event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
+          default_branch = event.get("repository", {}).get("default_branch")
+          expected_workflow_ref = f"refs/heads/{default_branch}"
+          if not isinstance(default_branch, str) or os.environ.get("GITHUB_REF") != expected_workflow_ref:
+              raise SystemExit(
+                  "manual releases must run the workflow definition from the default branch; "
+                  f"expected {expected_workflow_ref!r}, got {os.environ.get('GITHUB_REF')!r}"
+              )
+          source_sha = subprocess.run(
+              ["git", "rev-parse", "--verify", "HEAD^{commit}"],
+              check=True,
+              text=True,
+              stdout=subprocess.PIPE,
+          ).stdout.strip()
+          tag_ref_sha = subprocess.run(
+              ["git", "rev-parse", "--verify", f"refs/tags/{actual_tag}"],
+              check=True,
+              text=True,
+              stdout=subprocess.PIPE,
+          ).stdout.strip()
+          if re.fullmatch(r"[0-9a-f]{40}", source_sha) is None or re.fullmatch(r"[0-9a-f]{40}", tag_ref_sha) is None:
+              raise SystemExit("Git did not resolve canonical SHA-1 release identities")
           outputs = {
               "version": version,
               "windows_asset": f"{extension_id}-{version}-windows-x64.zip",
               "linux_asset": f"{extension_id}-{version}-linux-x64.zip",
+              "source_sha": source_sha,
+              "tag_ref_sha": tag_ref_sha,
           }
           with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as stream:
               for name, value in outputs.items():
@@ -81,13 +115,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.identity.outputs.version }}
         run: |
-          if state="$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null)"; then
+          if state="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null)"; then
             if [[ "$state" != "true" ]]; then
-              echo "Release $GITHUB_REF_NAME already exists and is not a draft." >&2
+              echo "Release $RELEASE_TAG already exists and is not a draft." >&2
               exit 1
             fi
           else
-            gh release create "$GITHUB_REF_NAME" \
+            gh release create "$RELEASE_TAG" \
               --repo "$GITHUB_REPOSITORY" \
               --draft \
               --generate-notes \
@@ -98,7 +132,7 @@ jobs:
   build_windows:
     name: Build Windows x64 extension
     needs: prepare
-    runs-on: audio2face-windows-x64
+    runs-on: windows-latest
     timeout-minutes: 360
     permissions:
       contents: write
@@ -109,28 +143,100 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           clean: true
+          ref: ${{ needs.prepare.outputs.source_sha }}
+
+      - name: Reclaim standard Windows runner disk
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $separator = [System.IO.Path]::DirectorySeparatorChar
+          $expectedToolCache = [System.IO.Path]::GetFullPath("C:\hostedtoolcache\windows").TrimEnd($separator)
+          $actualToolCache = [System.IO.Path]::GetFullPath($env:RUNNER_TOOL_CACHE).TrimEnd($separator)
+          if ($actualToolCache -cne $expectedToolCache) {
+            throw "Unexpected Windows runner tool cache: $actualToolCache"
+          }
+          $targets = @(
+            "C:\Program Files (x86)\Android\android-sdk",
+            "C:\ghcup",
+            "C:\Miniconda",
+            "C:\msys64",
+            "C:\vcpkg",
+            "C:\Program Files\dotnet",
+            $actualToolCache
+          )
+          foreach ($target in $targets) {
+            if (Test-Path -LiteralPath $target) {
+              Remove-Item -LiteralPath $target -Recurse -Force
+            }
+          }
+          $drive = [System.IO.DriveInfo]::new(
+            [System.IO.Path]::GetPathRoot([System.IO.Path]::GetFullPath($env:GITHUB_WORKSPACE))
+          )
+          Write-Host "Windows runner free bytes after cleanup: $($drive.AvailableFreeSpace)"
 
       - name: Select release Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.11.9"
 
-      - name: Verify Windows release host
+      - name: Install locked Visual Studio 2022 build tools
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $required = 64GB
+          $bootstrapper = Join-Path $env:RUNNER_TEMP "vs_buildtools.exe"
+          $installPath = "C:\a2f-vs2022"
+          Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vs_buildtools.exe" -OutFile $bootstrapper
+          $arguments = @(
+            "--quiet",
+            "--wait",
+            "--norestart",
+            "--nocache",
+            "--installPath", $installPath,
+            "--add", "Microsoft.VisualStudio.Component.VC.14.43.17.13.x86.x64",
+            "--add", "Microsoft.VisualStudio.Component.Windows11SDK.22621"
+          )
+          $process = Start-Process -FilePath $bootstrapper -ArgumentList $arguments -Wait -PassThru
+          if ($process.ExitCode -notin @(0, 3010)) {
+            throw "Visual Studio Build Tools installation failed with exit code $($process.ExitCode)"
+          }
+          Remove-Item -LiteralPath $bootstrapper -Force
+          $compiler = Join-Path $installPath "VC\Tools\MSVC\14.43.34808\bin\Hostx64\x64\cl.exe"
+          $sdk = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\Lib\10.0.22621.0"
+          if (-not (Test-Path -LiteralPath $compiler -PathType Leaf)) {
+            throw "Locked MSVC compiler is missing after installation: $compiler"
+          }
+          if (-not (Test-Path -LiteralPath $sdk -PathType Container)) {
+            throw "Locked Windows SDK is missing after installation: $sdk"
+          }
+
+      - name: Verify standard Windows release host
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ($env:RUNNER_ENVIRONMENT -cne "github-hosted") {
+            throw "Release requires a standard GitHub-hosted Windows runner"
+          }
+          if ($env:PROCESSOR_ARCHITECTURE -cne "AMD64") {
+            throw "Release requires Windows x64; got $env:PROCESSOR_ARCHITECTURE"
+          }
+          $required = 12GB
           $roots = @($env:GITHUB_WORKSPACE, $env:RUNNER_TEMP) |
             ForEach-Object { [System.IO.Path]::GetPathRoot([System.IO.Path]::GetFullPath($_)) } |
             Sort-Object -Unique
           foreach ($root in $roots) {
             $drive = [System.IO.DriveInfo]::new($root)
             if ($drive.AvailableFreeSpace -lt $required) {
-              throw "$root has $($drive.AvailableFreeSpace) free bytes; Windows release build requires at least $required"
+              throw "$root has $($drive.AvailableFreeSpace) free bytes after cleanup; the release build requires at least $required"
             }
           }
           Get-Command git.exe -ErrorAction Stop | Out-Null
           Get-Command gh.exe -ErrorAction Stop | Out-Null
+
+      - name: Build pinned Windows runtime
+        shell: pwsh
+        run: |
+          python tools/build_runtime.py --platform windows-x64
+          if ($LASTEXITCODE -ne 0) { throw "Windows runtime build failed with exit code $LASTEXITCODE" }
 
       - name: Download verified Blender 5.2.0
         shell: pwsh
@@ -139,7 +245,6 @@ jobs:
           $name = "blender-5.2.0-windows-x64"
           $archive = Join-Path $env:RUNNER_TEMP "$name-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT.zip"
           $destination = Join-Path $env:RUNNER_TEMP "$name-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
-          "BLENDER_ARCHIVE=$archive" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "BLENDER_DIRECTORY=$destination" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Invoke-WebRequest -Uri "https://download.blender.org/release/Blender5.2/$name.zip" -OutFile $archive
           $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -152,6 +257,7 @@ jobs:
           if (-not (Test-Path -LiteralPath $blender -PathType Leaf)) {
             throw "Blender executable is missing after extraction: $blender"
           }
+          Remove-Item -LiteralPath $archive -Force
           "BLENDER_EXECUTABLE=$blender" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Run Blender source smoke test
@@ -159,12 +265,6 @@ jobs:
         run: |
           & $env:BLENDER_EXECUTABLE --factory-startup --background --python tests/blender_smoke.py
           if ($LASTEXITCODE -ne 0) { throw "Blender smoke test failed with exit code $LASTEXITCODE" }
-
-      - name: Build pinned Windows runtime
-        shell: pwsh
-        run: |
-          python tools/build_runtime.py --platform windows-x64
-          if ($LASTEXITCODE -ne 0) { throw "Windows runtime build failed with exit code $LASTEXITCODE" }
 
       - name: Build Windows extension
         shell: pwsh
@@ -186,7 +286,7 @@ jobs:
           if ($size -lt 1 -or $size -ge 2147483648) {
             throw "GitHub release asset must be non-empty and smaller than 2 GiB; got $size bytes"
           }
-          gh release upload $env:GITHUB_REF_NAME $asset --repo $env:GITHUB_REPOSITORY --clobber
+          gh release upload $env:RELEASE_TAG $asset --repo $env:GITHUB_REPOSITORY --clobber
           if ($LASTEXITCODE -ne 0) { throw "GitHub release upload failed with exit code $LASTEXITCODE" }
 
       - name: Remove native build workspace
@@ -202,14 +302,11 @@ jobs:
           if ($env:BLENDER_DIRECTORY) {
             Remove-Item -LiteralPath $env:BLENDER_DIRECTORY -Recurse -Force -ErrorAction SilentlyContinue
           }
-          if ($env:BLENDER_ARCHIVE) {
-            Remove-Item -LiteralPath $env:BLENDER_ARCHIVE -Force -ErrorAction SilentlyContinue
-          }
 
   build_linux:
     name: Build Linux x64 extension
     needs: prepare
-    runs-on: audio2face-linux-x64
+    runs-on: ubuntu-latest
     timeout-minutes: 360
     permissions:
       contents: write
@@ -220,21 +317,57 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           clean: true
+          ref: ${{ needs.prepare.outputs.source_sha }}
+
+      - name: Reclaim standard Ubuntu runner disk
+        shell: bash
+        run: |
+          set -euo pipefail
+          tool_cache="$(readlink --canonicalize -- "$RUNNER_TOOL_CACHE")"
+          if [[ "$tool_cache" != "/opt/hostedtoolcache" ]]; then
+            echo "Unexpected Ubuntu runner tool cache: $tool_cache" >&2
+            exit 1
+          fi
+          targets=(
+            /usr/local/lib/android
+            /usr/local/.ghcup
+            /usr/share/dotnet
+            /usr/share/swift
+            /usr/local/share/vcpkg
+            /usr/share/miniconda
+            /home/linuxbrew/.linuxbrew
+            "$tool_cache"
+          )
+          for target in "${targets[@]}"; do
+            if [[ -e "$target" || -L "$target" ]]; then
+              sudo rm -rf -- "$target"
+            fi
+          done
+          sudo install --directory --owner="$(id --user)" --group="$(id --group)" --mode=0755 "$tool_cache"
+          df --human-readable "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
 
       - name: Select release Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.11.9"
 
-      - name: Verify Linux release host
+      - name: Verify standard Ubuntu release host
         shell: bash
         run: |
           set -euo pipefail
-          required=$((96 * 1024 * 1024 * 1024))
+          if [[ "$RUNNER_ENVIRONMENT" != "github-hosted" ]]; then
+            echo "Release requires a standard GitHub-hosted Ubuntu runner" >&2
+            exit 1
+          fi
+          if [[ "$(uname --machine)" != "x86_64" ]]; then
+            echo "Release requires Linux x64; got $(uname --machine)" >&2
+            exit 1
+          fi
+          required=$((12 * 1024 * 1024 * 1024))
           while IFS= read -r path; do
             available="$(df --output=avail --block-size=1 "$path" | tail -n 1 | tr -d ' ')"
             if [[ ! "$available" =~ ^[0-9]+$ ]] || (( available < required )); then
-              echo "$path has ${available:-unknown} free bytes; Linux release build requires at least $required" >&2
+              echo "$path has ${available:-unknown} free bytes after cleanup; the release build requires at least $required" >&2
               exit 1
             fi
           done < <(printf '%s\n' "$GITHUB_WORKSPACE" "$RUNNER_TEMP" | sort -u)
@@ -243,6 +376,10 @@ jobs:
           command -v gh
           docker version
 
+      - name: Build pinned Linux runtime
+        shell: bash
+        run: python tools/build_runtime.py --platform linux-x64
+
       - name: Download verified Blender 5.2.0
         shell: bash
         run: |
@@ -250,7 +387,6 @@ jobs:
           name="blender-5.2.0-linux-x64"
           archive="$RUNNER_TEMP/$name-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.tar.xz"
           destination="$RUNNER_TEMP/$name-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-          printf 'BLENDER_ARCHIVE=%s\n' "$archive" >> "$GITHUB_ENV"
           printf 'BLENDER_DIRECTORY=%s\n' "$destination" >> "$GITHUB_ENV"
           curl --fail --location --retry 5 --output "$archive" \
             "https://download.blender.org/release/Blender5.2/$name.tar.xz"
@@ -259,6 +395,7 @@ jobs:
             "$archive" | sha256sum --check --strict
           mkdir "$destination"
           tar --extract --xz --file "$archive" --directory "$destination"
+          rm -f -- "$archive"
           blender="$destination/$name/blender"
           test -x "$blender"
           printf 'BLENDER_EXECUTABLE=%s\n' "$blender" >> "$GITHUB_ENV"
@@ -266,10 +403,6 @@ jobs:
       - name: Run Blender source smoke test
         shell: bash
         run: "$BLENDER_EXECUTABLE --factory-startup --background --python tests/blender_smoke.py"
-
-      - name: Build pinned Linux runtime
-        shell: bash
-        run: python tools/build_runtime.py --platform linux-x64
 
       - name: Build Linux extension
         shell: bash
@@ -288,7 +421,7 @@ jobs:
             echo "GitHub release asset must be non-empty and smaller than 2 GiB; got $size bytes" >&2
             exit 1
           fi
-          gh release upload "$GITHUB_REF_NAME" "$asset" --repo "$GITHUB_REPOSITORY" --clobber
+          gh release upload "$RELEASE_TAG" "$asset" --repo "$GITHUB_REPOSITORY" --clobber
 
       - name: Remove native build workspace
         if: always()
@@ -303,7 +436,6 @@ jobs:
           rm -rf -- "$workspace/build"
           rm -f -- "$workspace/dist/$ASSET_NAME"
           if [[ -n "${BLENDER_DIRECTORY:-}" ]]; then rm -rf -- "$BLENDER_DIRECTORY"; fi
-          if [[ -n "${BLENDER_ARCHIVE:-}" ]]; then rm -f -- "$BLENDER_ARCHIVE"; fi
 
   publish:
     name: Verify and publish release
@@ -311,7 +443,7 @@ jobs:
       - prepare
       - build_windows
       - build_linux
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: write
@@ -324,14 +456,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" > "$RUNNER_TEMP/release.json"
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > "$RUNNER_TEMP/release.json"
           python - <<'PY'
           import json
           import os
           from pathlib import Path
 
           release = json.loads(Path(os.environ["RUNNER_TEMP"], "release.json").read_text())
-          if release.get("tag_name") != os.environ["GITHUB_REF_NAME"]:
+          if release.get("tag_name") != os.environ["RELEASE_TAG"]:
               raise SystemExit("draft release tag does not match the workflow tag")
           if release.get("draft") is not True:
               raise SystemExit("release is no longer a draft")
@@ -354,6 +486,18 @@ jobs:
                   )
           PY
 
+      - name: Verify release tag has not moved
+        shell: bash
+        env:
+          PREPARED_TAG_REF_SHA: ${{ needs.prepare.outputs.tag_ref_sha }}
+        run: |
+          set -euo pipefail
+          current="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq .object.sha)"
+          if [[ "$current" != "$PREPARED_TAG_REF_SHA" ]]; then
+            echo "Release tag moved during the workflow: expected $PREPARED_TAG_REF_SHA, got $current" >&2
+            exit 1
+          fi
+
       - name: Publish verified release
         shell: bash
-        run: gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false
+        run: gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false

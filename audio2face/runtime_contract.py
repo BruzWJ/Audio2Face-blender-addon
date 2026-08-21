@@ -30,7 +30,6 @@ PACKAGE_SOURCE_ROLES = frozenset(
         "sdk_cuda_license",
         "sdk_tensorrt_license",
         "sdk_tensorrt_acknowledgements",
-        "trtexec_source_license",
         "trtexec_provenance",
         "platform_runtime_metadata",
         "platform_runtime_provenance",
@@ -68,10 +67,6 @@ _COMMON_NOTICE_FILES = (
     RuntimePackagedFile(
         "licenses/tensorrt-ACKNOWLEDGEMENTS.txt",
         "sdk_tensorrt_acknowledgements",
-    ),
-    RuntimePackagedFile(
-        "licenses/trtexec-source-LICENSE.txt",
-        "trtexec_source_license",
     ),
     RuntimePackagedFile(
         "licenses/trtexec-PROVENANCE.txt",
@@ -251,7 +246,8 @@ RUNTIME_CONTRACTS: Mapping[str, RuntimePlatformContract] = MappingProxyType(
                     "lib/libnvonnxparser.so.10", "tensorrt_runtime"
                 ),
                 RuntimePackagedFile(
-                    "lib/libnvinfer_builder_resource.so.10", "tensorrt_runtime"
+                    "lib/libnvinfer_builder_resource.so.10.13.3",
+                    "tensorrt_runtime",
                 ),
                 RuntimePackagedFile("lib/libstdc++.so.6", "platform_runtime"),
                 RuntimePackagedFile("lib/libgcc_s.so.1", "platform_runtime"),

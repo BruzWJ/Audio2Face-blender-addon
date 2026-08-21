@@ -19,7 +19,7 @@ supported.
 
 [`runtime-lock.json`](runtime-lock.json) is the complete release-input
 contract. It pins the Audio2Face-3D SDK revision, CUDA 12.9 component archives,
-TensorRT 10.13 binary archive and source revision, CMake distribution, Windows
+the platform's TensorRT 10.13 binary inputs, CMake distribution, Windows
 CRT package, Rocky Linux producer image and toolchain RPMs, and Rocky BaseOS
 GNU runtime RPMs. Artifact size and SHA-256 values are part of that lock.
 
@@ -47,10 +47,11 @@ reproducible native binaries.
 
 The release build never discovers or consumes a host CUDA Toolkit, TensorRT
 SDK, Audio2Face installation, worker executable, or GPU development
-environment. It builds the worker and `trtexec` from the pinned sources, checks
-source revisions and native paths, stages only the reviewed runtime dependency
-closure, and records the required notices. CUDA compiler files, headers,
-import/static libraries, driver stubs, and TensorRT development sources are
+environment. It builds the worker, selects the exact `trtexec` shipped in the
+pinned TensorRT ZIP or Linux RPM set, checks source revisions and native paths,
+stages only
+the reviewed runtime dependency closure, and records the required notices.
+CUDA compiler files, headers, import/static libraries, and driver stubs are
 build inputs and are not shipped.
 
 Build on the native target host:

@@ -31,7 +31,7 @@ import urllib.parse
 import urllib.request
 import zipfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any, Iterator, Mapping, Sequence
+from typing import Any, BinaryIO, Iterator, Mapping, Sequence
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -63,9 +63,44 @@ CUDA_COMPONENTS = (
     "libcublas",
     "libcurand",
 )
+CUDA_EXCLUDED_BUILD_INPUTS = frozenset(
+    {
+        "libnvptxcompiler_static.a",
+        "libnvrtc-builtins_static.a",
+        "libnvrtc_static.a",
+        "nvptxcompiler_static.lib",
+        "nvrtc-builtins_static.lib",
+        "nvrtc64_120_0.alt.dll",
+        "nvrtc_static.lib",
+    }
+)
 CUDA_MANIFEST_PLATFORMS = {
     "windows-x64": "windows-x86_64",
     "linux-x64": "linux-x86_64",
+}
+NVIDIA_TENSORRT_RHEL8_BASE_URL = (
+    "https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/"
+)
+LINUX_TENSORRT_PACKAGE_ROLES = (
+    "headers",
+    "plugin_headers",
+    "runtime",
+    "plugin_runtime",
+    "parser_runtime",
+    "trtexec",
+)
+LINUX_TENSORRT_PACKAGE_NAMES = {
+    "headers": "libnvinfer-headers-devel",
+    "plugin_headers": "libnvinfer-headers-plugin-devel",
+    "runtime": "libnvinfer10",
+    "plugin_runtime": "libnvinfer-plugin10",
+    "parser_runtime": "libnvonnxparsers10",
+    "trtexec": "libnvinfer-bin",
+}
+LINUX_TENSORRT_LINKER_HARDLINKS = {
+    "lib/libnvinfer.so": "lib/libnvinfer.so.10",
+    "lib/libnvinfer_plugin.so": "lib/libnvinfer_plugin.so.10",
+    "lib/libnvonnxparser.so": "lib/libnvonnxparser.so.10",
 }
 MSVC_RUNTIME_FILES = tuple(
     PurePosixPath(entry.path).name
@@ -131,7 +166,6 @@ WINDOWS_REQUIRED_ENVIRONMENT_KEYS = frozenset(
         "WindowsSDKVersion",
     }
 )
-WINDOWS_VSWHERE_COMPONENT = "Microsoft.VisualStudio.Component.VC.Tools.x86.x64"
 WINDOWS_VCVARS_PATH_VARIABLE = "A2F_VCVARS64"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -286,11 +320,41 @@ def _validate_artifact(value: Any, label: str) -> dict[str, Any]:
     return artifact
 
 
+def _validate_rooted_artifact(value: Any, label: str) -> dict[str, Any]:
+    artifact = _object(value, label)
+    _keys(artifact, {"url", "size", "sha256", "archive_root"}, label)
+    _https_url(artifact["url"], f"{label}.url")
+    _size(artifact["size"], f"{label}.size")
+    _sha256(artifact["sha256"], f"{label}.sha256")
+    root = _safe_member_path(
+        _string(artifact["archive_root"], f"{label}.archive_root"),
+        f"{label}.archive_root",
+    )
+    if len(root.parts) != 1:
+        raise BuildError(f"{label}.archive_root must be one directory name")
+    return artifact
+
+
+def _validate_relative_artifact(value: Any, label: str) -> dict[str, Any]:
+    artifact = _object(value, label)
+    _keys(artifact, {"relative_path", "size", "sha256"}, label)
+    relative_path = _archive_path(
+        artifact["relative_path"], f"{label}.relative_path"
+    )
+    if len(PurePosixPath(relative_path).parts) != 1:
+        raise BuildError(f"{label}.relative_path must be one filename")
+    _size(artifact["size"], f"{label}.size")
+    _sha256(artifact["sha256"], f"{label}.sha256")
+    return artifact
+
+
 def _validate_platform_artifacts(value: Any, label: str) -> dict[str, Any]:
     artifacts = _object(value, label)
     _keys(artifacts, set(SUPPORTED_PLATFORMS), label)
     for platform_id in SUPPORTED_PLATFORMS:
-        _validate_artifact(artifacts[platform_id], f"{label}.{platform_id}")
+        _validate_rooted_artifact(
+            artifacts[platform_id], f"{label}.{platform_id}"
+        )
     return artifacts
 
 
@@ -316,7 +380,6 @@ def load_lock() -> dict[str, Any]:
         {
             "schema",
             "audio2face_sdk",
-            "tensorrt_source",
             "cmake",
             "cuda",
             "tensorrt",
@@ -336,25 +399,6 @@ def load_lock() -> dict[str, Any]:
     _https_url(sdk["repository"], "audio2face_sdk.repository")
     if not COMMIT_RE.fullmatch(_string(sdk["commit"], "audio2face_sdk.commit")):
         raise BuildError("audio2face_sdk.commit must be a lowercase full commit ID")
-
-    source = _object(data["tensorrt_source"], "tensorrt_source")
-    _keys(
-        source,
-        {"version", "tag", "repository", "commit", "submodules"},
-        "tensorrt_source",
-    )
-    for field in ("version", "tag"):
-        _string(source[field], f"tensorrt_source.{field}")
-    _https_url(source["repository"], "tensorrt_source.repository")
-    if not COMMIT_RE.fullmatch(_string(source["commit"], "tensorrt_source.commit")):
-        raise BuildError("tensorrt_source.commit must be a lowercase full commit ID")
-    submodules = _object(source["submodules"], "tensorrt_source.submodules")
-    if not submodules:
-        raise BuildError("tensorrt_source.submodules cannot be empty")
-    for submodule_path, commit in submodules.items():
-        _archive_path(submodule_path, "TensorRT submodule path")
-        if not COMMIT_RE.fullmatch(_string(commit, f"submodule {submodule_path}")):
-            raise BuildError(f"submodule {submodule_path} needs a full commit ID")
 
     cmake = _object(data["cmake"], "cmake")
     _keys(cmake, {"version", "artifacts"}, "cmake")
@@ -384,10 +428,121 @@ def load_lock() -> dict[str, Any]:
             _sha256(artifact["sha256"], f"{artifact_label}.sha256")
 
     tensorrt = _object(data["tensorrt"], "tensorrt")
-    _keys(tensorrt, {"version", "cuda", "artifacts"}, "tensorrt")
-    _string(tensorrt["version"], "tensorrt.version")
-    _string(tensorrt["cuda"], "tensorrt.cuda")
-    _validate_platform_artifacts(tensorrt["artifacts"], "tensorrt.artifacts")
+    _keys(
+        tensorrt,
+        {"version", "cuda", "windows_artifact", "linux_packages"},
+        "tensorrt",
+    )
+    tensorrt_version = _string(tensorrt["version"], "tensorrt.version")
+    tensorrt_cuda = _string(tensorrt["cuda"], "tensorrt.cuda")
+    _validate_rooted_artifact(
+        tensorrt["windows_artifact"], "tensorrt.windows_artifact"
+    )
+    linux_tensorrt = _object(tensorrt["linux_packages"], "tensorrt.linux_packages")
+    _keys(
+        linux_tensorrt,
+        {"base_url", "source_rpm", "packages"},
+        "tensorrt.linux_packages",
+    )
+    if (
+        _https_url(
+            linux_tensorrt["base_url"],
+            "tensorrt.linux_packages.base_url",
+            directory=True,
+        )
+        != NVIDIA_TENSORRT_RHEL8_BASE_URL
+    ):
+        raise BuildError(
+            "tensorrt.linux_packages.base_url must be NVIDIA's RHEL8 x86_64 "
+            "repository"
+        )
+    source_rpm = _string(
+        linux_tensorrt["source_rpm"], "tensorrt.linux_packages.source_rpm"
+    )
+    if source_rpm != f"tensorrt-{tensorrt_version}-1.cuda{tensorrt_cuda}.src.rpm":
+        raise BuildError(
+            "tensorrt.linux_packages.source_rpm does not match the locked release"
+        )
+    packages = _object(
+        linux_tensorrt["packages"], "tensorrt.linux_packages.packages"
+    )
+    _keys(
+        packages,
+        set(LINUX_TENSORRT_PACKAGE_ROLES),
+        "tensorrt.linux_packages.packages",
+    )
+    runtime_outputs_by_role = {
+        "runtime": {
+            "lib/libnvinfer.so.10",
+            "lib/libnvinfer_builder_resource.so.10.13.3",
+        },
+        "plugin_runtime": {"lib/libnvinfer_plugin.so.10"},
+        "parser_runtime": {"lib/libnvonnxparser.so.10"},
+        "trtexec": {runtime_contract("linux-x64").trtexec},
+    }
+    selected_outputs: set[str] = set()
+    for role in LINUX_TENSORRT_PACKAGE_ROLES:
+        label = f"tensorrt.linux_packages.packages.{role}"
+        package = _object(packages[role], label)
+        _keys(package, {"artifact", "files"}, label)
+        artifact = _validate_relative_artifact(
+            package["artifact"], f"{label}.artifact"
+        )
+        expected_filename = (
+            f"{LINUX_TENSORRT_PACKAGE_NAMES[role]}-{tensorrt_version}-"
+            f"1.cuda{tensorrt_cuda}.x86_64.rpm"
+        )
+        if artifact["relative_path"] != expected_filename:
+            raise BuildError(f"{label}.artifact does not name the exact package")
+        files = _object(package["files"], f"{label}.files")
+        if not files:
+            raise BuildError(f"{label}.files must select at least one RPM member")
+        role_outputs = set(files)
+        if role in ("headers", "plugin_headers"):
+            for output in role_outputs:
+                output_path = PurePosixPath(_archive_path(output, f"{label}.files key"))
+                if (
+                    len(output_path.parts) != 2
+                    or output_path.parts[0] != "include"
+                    or output_path.suffix != ".h"
+                ):
+                    raise BuildError(f"{label}.files must contain flat include/*.h paths")
+        elif role_outputs != runtime_outputs_by_role[role]:
+            raise BuildError(f"{label}.files do not match the exact runtime contract")
+        repeated = selected_outputs & role_outputs
+        if repeated:
+            raise BuildError(f"TensorRT RPM outputs are repeated: {sorted(repeated)}")
+        selected_outputs.update(role_outputs)
+        for output, file_value in files.items():
+            file_label = f"{label}.files.{output}"
+            entry = _object(file_value, file_label)
+            _keys(entry, {"member", "size", "sha256", "mode"}, file_label)
+            member = _archive_path(entry["member"], f"{file_label}.member")
+            if role in ("headers", "plugin_headers") and member != (
+                f"usr/include/{PurePosixPath(output).name}"
+            ):
+                raise BuildError(f"{file_label}.member is not its canonical include path")
+            _size(entry["size"], f"{file_label}.size")
+            _sha256(entry["sha256"], f"{file_label}.sha256")
+            expected_mode = 0o644 if role in ("headers", "plugin_headers") else 0o755
+            if entry["mode"] != expected_mode:
+                raise BuildError(
+                    f"{file_label}.mode must be the exact regular-file mode "
+                    f"{expected_mode:o}"
+                )
+    expected_tensorrt_runtime = {
+        entry.path
+        for entry in runtime_contract("linux-x64").files_for_source(
+            "tensorrt_runtime"
+        )
+    }
+    selected_runtime = {
+        output for output in selected_outputs if output.startswith(("lib/", "bin/"))
+    }
+    if selected_runtime != expected_tensorrt_runtime | {
+        runtime_contract("linux-x64").trtexec
+    }:
+        raise BuildError("TensorRT RPM files do not match the Linux runtime contract")
 
     msvc = _object(data["msvc_runtime"], "msvc_runtime")
     _keys(
@@ -898,9 +1053,8 @@ def _archive_root_name(archive: Path) -> str:
     raise BuildError(f"locked archive has no canonical root rule: {archive.name}")
 
 
-def exact_archive_root(extracted: Path, archive: Path, label: str) -> Path:
+def exact_archive_root(extracted: Path, expected: str, label: str) -> Path:
     children = list(extracted.iterdir())
-    expected = _archive_root_name(archive)
     if (
         len(children) != 1
         or children[0].name != expected
@@ -915,20 +1069,19 @@ def exact_archive_root(extracted: Path, archive: Path, label: str) -> Path:
 
 
 def merge_component_tree(source: Path, destination: Path, label: str) -> None:
-    """Merge a CUDA component into one private toolkit without overwrites."""
+    """Move one CUDA component into the private single-copy toolkit."""
 
     destination.mkdir(parents=True, exist_ok=True)
     for item in sorted(source.rglob("*"), key=lambda path: path.as_posix()):
         relative = item.relative_to(source)
-        if relative == Path("LICENSE"):
+        if relative == Path("LICENSE") or item.name in CUDA_EXCLUDED_BUILD_INPUTS:
             continue
         target = destination / relative
         if item.is_symlink():
-            link_target = os.readlink(item)
             if target.exists() or target.is_symlink():
                 raise BuildError(f"{label} collides at {relative}")
             target.parent.mkdir(parents=True, exist_ok=True)
-            os.symlink(link_target, target)
+            item.replace(target)
         elif item.is_dir():
             if target.exists() and not target.is_dir():
                 raise BuildError(f"{label} collides at {relative}")
@@ -937,7 +1090,7 @@ def merge_component_tree(source: Path, destination: Path, label: str) -> None:
             if target.exists() or target.is_symlink():
                 raise BuildError(f"{label} collides at {relative}")
             target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(item, target, follow_symlinks=False)
+            item.replace(target)
         else:
             raise BuildError(f"{label} contains unsupported file {relative}")
 
@@ -1010,6 +1163,7 @@ def materialize_cuda(
     downloads = work_root / "downloads" / "cuda"
     manifest_path = download_artifact(cuda["manifest"], downloads, "CUDA manifest")
     validate_cuda_manifest(manifest_path, lock, platform_id)
+    manifest_path.unlink()
 
     toolkit = work_root / "inputs" / "cuda"
     for component_name in CUDA_COMPONENTS:
@@ -1022,13 +1176,15 @@ def materialize_cuda(
         archive = download_artifact(artifact, downloads, f"CUDA {component_name}")
         extracted = work_root / "extract" / "cuda" / component_name
         safe_extract(archive, extracted, platform_id)
+        archive.unlink()
         component_root = exact_archive_root(
-            extracted, archive, f"CUDA {component_name}"
+            extracted, _archive_root_name(archive), f"CUDA {component_name}"
         )
         license_file = component_root / "LICENSE"
         if not license_file.is_file() or license_file.is_symlink():
             raise BuildError(f"CUDA {component_name} archive has no regular LICENSE")
         merge_component_tree(component_root, toolkit, f"CUDA {component_name}")
+        shutil.rmtree(extracted)
 
     nvcc_name = "nvcc.exe" if platform_id == "windows-x64" else "nvcc"
     nvcc = toolkit / "bin" / nvcc_name
@@ -1046,7 +1202,117 @@ def materialize_archive_root(
     archive = download_artifact(artifact, work_root / "downloads" / label, label)
     extracted = work_root / "extract" / label
     safe_extract(archive, extracted, platform_id)
-    return exact_archive_root(extracted, archive, label)
+    archive.unlink()
+    return exact_archive_root(extracted, str(artifact["archive_root"]), label)
+
+
+def _windows_tensorrt_files(
+    lock: Mapping[str, Any],
+) -> dict[str, str]:
+    """Map exact Windows archive members to the private build layout."""
+
+    artifact = lock["tensorrt"]["windows_artifact"]
+    archive_root = PurePosixPath(artifact["archive_root"])
+    contract = runtime_contract("windows-x64")
+    files: dict[str, str] = {
+        (archive_root / PurePosixPath(contract.trtexec)).as_posix(): (
+            contract.trtexec
+        )
+    }
+    runtime_names = {
+        PurePosixPath(entry.path).name
+        for entry in contract.files_for_source("tensorrt_runtime")
+    }
+    for name in runtime_names:
+        files[(archive_root / "lib" / name).as_posix()] = f"lib/{name}"
+    for name in runtime_names:
+        if "builder_resource" in name:
+            continue
+        import_name = PurePosixPath(name).with_suffix(".lib").name
+        files[(archive_root / "lib" / import_name).as_posix()] = (
+            f"lib/{import_name}"
+        )
+    linux_packages = lock["tensorrt"]["linux_packages"]["packages"]
+    header_outputs = {
+        output
+        for role in ("headers", "plugin_headers")
+        for output in linux_packages[role]["files"]
+    }
+    for output in header_outputs:
+        name = PurePosixPath(output).name
+        files[(archive_root / "include" / name).as_posix()] = f"include/{name}"
+    return files
+
+
+def materialize_windows_tensorrt(
+    lock: Mapping[str, Any], work_root: Path
+) -> Path:
+    """Extract only the exact Windows TensorRT compile/runtime closure."""
+
+    artifact = lock["tensorrt"]["windows_artifact"]
+    archive_path = download_artifact(
+        artifact,
+        work_root / "downloads" / "tensorrt",
+        "NVIDIA TensorRT Windows archive",
+    )
+    root = work_root / "inputs" / "tensorrt"
+    root.mkdir(parents=True, exist_ok=False)
+    selection = _windows_tensorrt_files(lock)
+    expected_archive_root = str(artifact["archive_root"])
+    try:
+        with zipfile.ZipFile(archive_path) as archive:
+            infos = _validated_zip_infos(archive, case_insensitive=True)
+            by_name: dict[str, zipfile.ZipInfo] = {}
+            for info, member in infos:
+                if member.parts[0] != expected_archive_root:
+                    raise BuildError(
+                        "TensorRT Windows archive contains a file outside its "
+                        f"locked root: {member.as_posix()}"
+                    )
+                by_name[member.as_posix()] = info
+            for member, output_name in selection.items():
+                info = by_name.get(member)
+                if info is None or info.is_dir() or info.file_size < 1:
+                    raise BuildError(
+                        f"TensorRT Windows archive is missing regular member {member}"
+                    )
+                target = _member_destination(
+                    root,
+                    _safe_member_path(output_name, "TensorRT Windows output"),
+                )
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with archive.open(info, "r") as source, target.open("xb") as output:
+                    shutil.copyfileobj(source, output, length=1024 * 1024)
+    except (OSError, zipfile.BadZipFile, NotImplementedError) as exc:
+        raise BuildError(
+            f"cannot extract pinned TensorRT Windows archive: {exc}"
+        ) from exc
+    finally:
+        try:
+            archive_path.unlink()
+        except OSError as exc:
+            raise BuildError(
+                f"cannot delete consumed TensorRT archive {archive_path}: {exc}"
+            ) from exc
+    actual_files = {
+        entry.relative_to(root).as_posix()
+        for entry in root.rglob("*")
+        if entry.is_file()
+    }
+    actual_directories = {
+        entry.relative_to(root).as_posix()
+        for entry in root.rglob("*")
+        if entry.is_dir()
+    }
+    expected_files = set(selection.values())
+    expected_directories = {
+        PurePosixPath(path).parent.as_posix() for path in expected_files
+    }
+    if actual_files != expected_files or actual_directories != expected_directories:
+        raise BuildError(
+            "materialized TensorRT Windows root does not match the exact closure"
+        )
+    return root
 
 
 def materialize_msvc_runtime(
@@ -1115,6 +1381,7 @@ def materialize_msvc_runtime(
             manifest_output.write_bytes(manifest_bytes)
     except (OSError, zipfile.BadZipFile, NotImplementedError) as exc:
         raise BuildError(f"cannot extract pinned MSVC CRT archive: {exc}") from exc
+    archive_path.unlink()
     return runtime, manifest_output
 
 
@@ -1286,6 +1553,332 @@ def _verify_locked_bytes(content: bytes, entry: Mapping[str, Any], label: str) -
         )
 
 
+def _read_exact(source: BinaryIO, size: int, label: str) -> bytes:
+    chunks: list[bytes] = []
+    remaining = size
+    while remaining:
+        chunk = source.read(min(remaining, 1024 * 1024))
+        if not chunk:
+            raise BuildError(f"{label} is truncated")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def _rpm_stream_header(
+    source: BinaryIO, label: str
+) -> tuple[dict[int, tuple[int, int, int]], bytes]:
+    header = _read_exact(source, 16, f"{label} RPM header")
+    if header[:4] != b"\x8e\xad\xe8\x01" or header[4:8] != b"\0\0\0\0":
+        raise BuildError(f"{label} RPM header is invalid")
+    index_count, store_size = struct.unpack_from(">II", header, 8)
+    if index_count > 100_000 or store_size > 64 * 1024 * 1024:
+        raise BuildError(f"{label} RPM header bounds are invalid")
+    index = _read_exact(source, index_count * 16, f"{label} RPM index")
+    store = _read_exact(source, store_size, f"{label} RPM store")
+    entries: dict[int, tuple[int, int, int]] = {}
+    for position in range(index_count):
+        tag, value_type, value_offset, count = struct.unpack_from(
+            ">IIII", index, position * 16
+        )
+        if tag in entries:
+            raise BuildError(f"{label} RPM header repeats tag {tag}")
+        if value_offset >= store_size:
+            raise BuildError(f"{label} RPM tag {tag} points outside its store")
+        entries[tag] = (value_type, value_offset, count)
+    return entries, store
+
+
+@contextlib.contextmanager
+def _rpm_xz_payload(
+    archive_path: Path,
+    artifact_url: str,
+    source_rpm: str,
+) -> Iterator[BinaryIO]:
+    label = archive_path.name
+    try:
+        with archive_path.open("rb") as source:
+            lead = _read_exact(source, 96, f"{label} RPM lead")
+            if lead[:4] != b"\xed\xab\xee\xdb" or lead[4:6] != b"\x03\x00":
+                raise BuildError(f"{label} is not a version 3 RPM package")
+            _rpm_stream_header(source, f"{label} signature")
+            alignment = (-source.tell()) & 7
+            if alignment and any(
+                _read_exact(source, alignment, f"{label} RPM alignment")
+            ):
+                raise BuildError(f"{label} RPM alignment bytes are nonzero")
+            entries, store = _rpm_stream_header(source, label)
+            name = _rpm_string(entries, store, 1000, label)
+            version = _rpm_string(entries, store, 1001, label)
+            release = _rpm_string(entries, store, 1002, label)
+            architecture = _rpm_string(entries, store, 1022, label)
+            nevra = f"{name}-{version}-{release}.{architecture}.rpm"
+            expected_filename = PurePosixPath(
+                urllib.parse.urlsplit(artifact_url).path
+            ).name
+            if nevra != expected_filename:
+                raise BuildError(
+                    f"locked RPM identity mismatch: expected {expected_filename}, "
+                    f"got {nevra}"
+                )
+            if _rpm_string(entries, store, 1044, label) != source_rpm:
+                raise BuildError(f"locked RPM source tag mismatch: {label}")
+            if _rpm_string(entries, store, 1124, label) != "cpio":
+                raise BuildError(f"{label} payload format is not cpio")
+            if _rpm_string(entries, store, 1125, label) != "xz":
+                raise BuildError(f"{label} payload compressor is not xz")
+            with lzma.LZMAFile(source, mode="rb", format=lzma.FORMAT_XZ) as payload:
+                yield payload
+            if source.read(1):
+                raise BuildError(f"{label} has bytes after its XZ payload")
+    except BuildError:
+        raise
+    except (OSError, EOFError, lzma.LZMAError) as exc:
+        raise BuildError(f"cannot read locked TensorRT RPM {label}: {exc}") from exc
+
+
+def _consume_stream(
+    source: BinaryIO,
+    size: int,
+    label: str,
+    output: BinaryIO | None = None,
+) -> str | None:
+    digest = hashlib.sha256() if output is not None else None
+    remaining = size
+    while remaining:
+        chunk = source.read(min(remaining, 1024 * 1024))
+        if not chunk:
+            raise BuildError(f"{label} is truncated")
+        remaining -= len(chunk)
+        if output is not None:
+            output.write(chunk)
+            assert digest is not None
+            digest.update(chunk)
+    return digest.hexdigest() if digest is not None else None
+
+
+def _consume_zero_padding(source: BinaryIO, size: int, label: str) -> None:
+    if size and any(_read_exact(source, size, label)):
+        raise BuildError(f"{label} contains nonzero bytes")
+
+
+def _extract_linux_tensorrt_rpm(
+    archive_path: Path,
+    artifact_url: str,
+    source_rpm: str,
+    files: Mapping[str, Mapping[str, Any]],
+    destination: Path,
+) -> None:
+    wanted: dict[str, tuple[str, Mapping[str, Any]]] = {}
+    for output, entry in files.items():
+        member = str(entry["member"])
+        if member in wanted:
+            raise BuildError(f"TensorRT RPM selection repeats member {member}")
+        wanted[member] = (output, entry)
+    found: set[str] = set()
+    seen: set[str] = set()
+    position = 0
+    with _rpm_xz_payload(archive_path, artifact_url, source_rpm) as payload:
+        while True:
+            header = _read_exact(payload, 110, f"{archive_path.name} cpio header")
+            position += 110
+            if header[:6] != b"070701":
+                raise BuildError(
+                    f"{archive_path.name} cpio member does not use newc format"
+                )
+            try:
+                fields = [
+                    int(header[6 + index * 8 : 14 + index * 8], 16)
+                    for index in range(13)
+                ]
+            except ValueError as exc:
+                raise BuildError(
+                    f"{archive_path.name} cpio header has invalid fields"
+                ) from exc
+            mode = fields[1]
+            file_size = fields[6]
+            name_size = fields[11]
+            if name_size < 2 or name_size > 4096 or file_size > 16 * 1024**3:
+                raise BuildError(f"{archive_path.name} cpio member bounds are invalid")
+            name_bytes = _read_exact(
+                payload, name_size, f"{archive_path.name} cpio member name"
+            )
+            position += name_size
+            _consume_zero_padding(
+                payload,
+                (-position) & 3,
+                f"{archive_path.name} cpio name padding",
+            )
+            position = (position + 3) & ~3
+            if name_bytes[-1:] != b"\0":
+                raise BuildError(f"{archive_path.name} cpio name is not terminated")
+            try:
+                archive_name = name_bytes[:-1].decode("utf-8")
+            except UnicodeError as exc:
+                raise BuildError(
+                    f"{archive_path.name} cpio name is not UTF-8"
+                ) from exc
+            if archive_name == "TRAILER!!!":
+                if file_size != 0 or mode != 0:
+                    raise BuildError(f"{archive_path.name} cpio trailer is invalid")
+                if payload.read(1):
+                    raise BuildError(
+                        f"{archive_path.name} has data after its cpio trailer"
+                    )
+                break
+            if not archive_name.startswith("./"):
+                raise BuildError(
+                    f"{archive_path.name} cpio member lacks the canonical ./ prefix"
+                )
+            member = archive_name[2:]
+            member_path = _safe_member_path(
+                member, f"{archive_path.name} cpio member"
+            )
+            if member in seen:
+                raise BuildError(f"{archive_path.name} repeats cpio member {member}")
+            seen.add(member)
+            file_type = stat.S_IFMT(mode)
+            if file_type == stat.S_IFDIR:
+                if file_size:
+                    raise BuildError(
+                        f"{archive_path.name} cpio directory has content: {member}"
+                    )
+            elif file_type == stat.S_IFLNK:
+                if file_size > 4096:
+                    raise BuildError(
+                        f"{archive_path.name} cpio symlink is too large: {member}"
+                    )
+                target_bytes = _read_exact(
+                    payload, file_size, f"{archive_path.name} cpio symlink {member}"
+                )
+                try:
+                    link_target = target_bytes.decode("utf-8")
+                except UnicodeError as exc:
+                    raise BuildError(
+                        f"{archive_path.name} cpio symlink is not UTF-8: {member}"
+                    ) from exc
+                _normalized_link_target(member_path, link_target)
+            elif file_type == stat.S_IFREG:
+                selection = wanted.get(member)
+                if selection is None:
+                    _consume_stream(
+                        payload,
+                        file_size,
+                        f"{archive_path.name} cpio member {member}",
+                    )
+                else:
+                    output_name, entry = selection
+                    if file_size != entry["size"]:
+                        raise BuildError(f"locked TensorRT member size drifted: {member}")
+                    if mode & 0o777 != entry["mode"]:
+                        raise BuildError(f"locked TensorRT member mode drifted: {member}")
+                    target = _member_destination(
+                        destination, _safe_member_path(output_name, "TensorRT output")
+                    )
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    try:
+                        with target.open("xb") as output:
+                            digest = _consume_stream(
+                                payload,
+                                file_size,
+                                f"{archive_path.name} cpio member {member}",
+                                output,
+                            )
+                    except BaseException:
+                        target.unlink(missing_ok=True)
+                        raise
+                    if digest != entry["sha256"]:
+                        target.unlink(missing_ok=True)
+                        raise BuildError(f"locked TensorRT member SHA-256 drifted: {member}")
+                    target.chmod(entry["mode"])
+                    found.add(member)
+            else:
+                raise BuildError(
+                    f"{archive_path.name} contains a special cpio member: {member}"
+                )
+            position += file_size
+            _consume_zero_padding(
+                payload,
+                (-position) & 3,
+                f"{archive_path.name} cpio data padding",
+            )
+            position = (position + 3) & ~3
+    if found != set(wanted):
+        raise BuildError(
+            f"{archive_path.name} lacks locked TensorRT members: "
+            f"{sorted(set(wanted) - found)}"
+        )
+
+
+def materialize_linux_tensorrt(
+    lock: Mapping[str, Any], work_root: Path
+) -> Path:
+    locked = lock["tensorrt"]["linux_packages"]
+    root = work_root / "inputs" / "tensorrt"
+    root.mkdir(parents=True, exist_ok=False)
+    selected_outputs: set[str] = set()
+    for role in LINUX_TENSORRT_PACKAGE_ROLES:
+        package = locked["packages"][role]
+        relative_artifact = package["artifact"]
+        artifact = {
+            "url": locked["base_url"] + relative_artifact["relative_path"],
+            "size": relative_artifact["size"],
+            "sha256": relative_artifact["sha256"],
+        }
+        archive: Path | None = None
+        try:
+            archive = download_artifact(
+                artifact,
+                work_root / "downloads" / "tensorrt",
+                f"NVIDIA TensorRT Linux {role} RPM",
+            )
+            _extract_linux_tensorrt_rpm(
+                archive,
+                artifact["url"],
+                locked["source_rpm"],
+                package["files"],
+                root,
+            )
+        finally:
+            if archive is not None:
+                try:
+                    archive.unlink()
+                except OSError as exc:
+                    raise BuildError(
+                        f"cannot delete consumed TensorRT RPM {archive}: {exc}"
+                    ) from exc
+        selected_outputs.update(package["files"])
+    for link_name, target_name in LINUX_TENSORRT_LINKER_HARDLINKS.items():
+        link = _member_destination(root, _safe_member_path(link_name, "linker input"))
+        target = _member_destination(
+            root, _safe_member_path(target_name, "linker input target")
+        )
+        if not target.is_file() or target.is_symlink():
+            raise BuildError(f"TensorRT linker input target is not regular: {target}")
+        os.link(target, link)
+        if link.stat().st_ino != target.stat().st_ino:
+            raise BuildError(f"TensorRT linker input is not a hard link: {link}")
+    expected_files = selected_outputs | set(LINUX_TENSORRT_LINKER_HARDLINKS)
+    actual_files: set[str] = set()
+    actual_directories: set[str] = set()
+    for entry in root.rglob("*"):
+        relative = entry.relative_to(root).as_posix()
+        if entry.is_symlink():
+            raise BuildError(f"TensorRT root contains a filesystem alias: {relative}")
+        if entry.is_dir():
+            actual_directories.add(relative)
+        elif entry.is_file():
+            actual_files.add(relative)
+        else:
+            raise BuildError(f"TensorRT root contains a special file: {relative}")
+    expected_directories = {
+        PurePosixPath(path).parent.as_posix() for path in expected_files
+    }
+    if actual_files != expected_files or actual_directories != expected_directories:
+        raise BuildError("materialized TensorRT root does not match the exact closure")
+    return root
+
+
 def materialize_linux_runtime(
     lock: Mapping[str, Any], work_root: Path
 ) -> tuple[Path, Path]:
@@ -1295,7 +1888,7 @@ def materialize_linux_runtime(
     runtime.mkdir(parents=True, exist_ok=False)
     notices.mkdir(parents=True, exist_ok=False)
     source_url = locked["source_rpm"]["url"]
-    download_artifact(
+    source_archive = download_artifact(
         locked["source_rpm"],
         work_root / "downloads" / "linux-runtime",
         "Rocky Linux GNU runtime corresponding source RPM",
@@ -1332,6 +1925,8 @@ def materialize_linux_runtime(
             content = members[license_entry["member"]]
             _verify_locked_bytes(content, license_entry, output)
             (notices / PurePosixPath(output).name).write_bytes(content)
+        archive.unlink()
+    source_archive.unlink()
 
     provenance = notices / "gcc-runtime-PROVENANCE.txt"
     provenance_record = {
@@ -1698,7 +2293,6 @@ def checkout_exact(
     destination: Path,
     *,
     env: Mapping[str, str],
-    submodules: Mapping[str, str],
 ) -> None:
     destination.mkdir(parents=True, exist_ok=False)
     runner.run([git, "init", destination], env=env)
@@ -1712,39 +2306,6 @@ def checkout_exact(
     actual = runner.run([git, "-C", destination, "rev-parse", "HEAD"], env=env, capture=True)
     if actual != commit:
         raise BuildError(f"source checkout drift: expected {commit}, got {actual}")
-
-    if not submodules:
-        return
-    runner.run(
-        [
-            git,
-            "-C",
-            destination,
-            "submodule",
-            "update",
-            "--init",
-            "--recursive",
-            "--depth",
-            "1",
-        ],
-        env=env,
-    )
-    status = runner.run(
-        [git, "-C", destination, "submodule", "status", "--recursive"],
-        env=env,
-        capture=True,
-    )
-    actual_submodules: dict[str, str] = {}
-    for line in status.splitlines():
-        match = re.fullmatch(r" ([0-9a-f]{40}) ([^ ]+)(?: \(.+\))?", line)
-        if match is None:
-            raise BuildError(f"unexpected Git submodule status: {line!r}")
-        actual_submodules[match.group(2)] = match.group(1)
-    if actual_submodules != dict(submodules):
-        raise BuildError(
-            "TensorRT submodule commits differ from runtime-lock.json: "
-            f"expected {dict(submodules)}, got {actual_submodules}"
-        )
 
 
 def _windows_environment_value(
@@ -1764,7 +2325,7 @@ def _windows_environment_value(
 def _discover_windows_vcvars(
     source: Mapping[str, str], toolchain: Mapping[str, Any]
 ) -> Path:
-    """Locate the newest complete VS 2022 instance with the locked compiler."""
+    """Enumerate VS 2022 instances and select the newest locked compiler."""
 
     program_files = _windows_environment_value(source, "ProgramFiles(x86)")
     if program_files is None:
@@ -1790,8 +2351,6 @@ def _discover_windows_vcvars(
         "*",
         "-version",
         "[17.0,18.0)",
-        "-requires",
-        WINDOWS_VSWHERE_COMPONENT,
         "-sort",
         "-format",
         "json",
@@ -2519,92 +3078,30 @@ def audit_rpath_disabled(cache_path: Path) -> None:
         raise BuildError(f"CMake cache {cache_path} does not disable all RPATHs")
 
 
-def configure_and_build_trtexec(
-    runner: CommandRunner,
-    cmake: Path,
-    ninja: Path,
-    compiler: Path,
-    cuda_root: Path,
-    tensorrt_root: Path,
-    source: Path,
-    lock: Mapping[str, Any],
-    platform_id: str,
-    work_root: Path,
-    environment: Mapping[str, str],
-) -> Path:
-    build = work_root / "build" / "trtexec"
-    output = work_root / "build" / "trtexec-output"
-    nvcc = cuda_root / "bin" / (
-        "nvcc.exe" if platform_id == "windows-x64" else "nvcc"
-    )
-    command = [
-        cmake,
-        "-S",
-        source,
-        "-B",
-        build,
-        "-G",
-        "Ninja",
-        "-DCMAKE_BUILD_TYPE:STRING=Release",
-        "-DCMAKE_SKIP_RPATH:BOOL=ON",
-        f"-DCMAKE_MAKE_PROGRAM:FILEPATH={ninja}",
-        f"-DCMAKE_CXX_COMPILER:FILEPATH={compiler}",
-        f"-DCMAKE_CUDA_HOST_COMPILER:FILEPATH={compiler}",
-        f"-DCMAKE_CUDA_COMPILER:FILEPATH={nvcc}",
-        f"-DCUDA_TOOLKIT_ROOT_DIR:PATH={cuda_root}",
-        f"-DCUDA_VERSION:STRING={lock['tensorrt']['cuda']}",
-        f"-DTRT_LIB_DIR:PATH={tensorrt_root / 'lib'}",
-        f"-DTRT_OUT_DIR:PATH={output}",
-        "-DBUILD_PLUGINS:BOOL=OFF",
-        "-DBUILD_PARSERS:BOOL=OFF",
-        "-DBUILD_SAMPLES:BOOL=ON",
-    ]
-    if platform_id == "linux-x64":
-        cxx_flags, cuda_flags = linux_compile_flags(lock)
-        command.extend(
-            (
-                f"-DCMAKE_CXX_FLAGS:STRING={cxx_flags}",
-                f"-DCMAKE_CUDA_FLAGS:STRING={cuda_flags}",
-            )
+def pinned_trtexec(tensorrt_root: Path, platform_id: str) -> Path:
+    """Return the one trtexec shipped by the pinned TensorRT input."""
+
+    contract = runtime_contract(platform_id)
+    relative = PurePosixPath(contract.trtexec)
+    executable = tensorrt_root.joinpath(*relative.parts)
+    if (
+        not executable.is_file()
+        or executable.is_symlink()
+        or executable.stat().st_size < 1
+    ):
+        raise BuildError(
+            f"pinned TensorRT input is missing its regular {relative.as_posix()}: "
+            f"{executable}"
         )
-    runner.run(command, env=environment)
-    audit_cmake_paths(
-        build / "CMakeCache.txt",
-        work_root,
-        (
-            "CMAKE_CUDA_COMPILER",
-            "CUDA_TOOLKIT_ROOT_DIR",
-            "TRT_LIB_DIR",
-            "TRT_OUT_DIR",
-        ),
-    )
-    audit_ninja_paths(build / "build.ninja", work_root)
-    audit_rpath_disabled(build / "CMakeCache.txt")
-    if platform_id == "linux-x64":
-        audit_linux_compile_flags(build / "CMakeCache.txt", lock)
-    runner.run([cmake, "--build", build, "--target", "trtexec", "--parallel"], env=environment)
-    trtexec = output / ("trtexec.exe" if platform_id == "windows-x64" else "trtexec")
-    if not trtexec.is_file():
-        raise BuildError(f"source build did not produce canonical trtexec: {trtexec}")
-    return trtexec
-
-
-def _redacted_commands(runner: CommandRunner) -> list[list[str]]:
-    work = str(runner.work_root)
-    repository = str(REPOSITORY_ROOT)
-    return [
-        [
-            argument.replace(work, "<work>").replace(repository, "<repository>")
-            for argument in command
-        ]
-        for command in runner.commands
-    ]
+    if platform_id == "linux-x64" and not os.access(executable, os.X_OK):
+        raise BuildError(f"pinned TensorRT trtexec is not executable: {executable}")
+    return executable
 
 
 def write_provenance(
     lock: Mapping[str, Any],
     platform_id: str,
-    runner: CommandRunner,
+    trtexec: Path,
     work_root: Path,
     msvc_manifest: Path | None,
 ) -> tuple[Path, Path | None]:
@@ -2612,41 +3109,45 @@ def write_provenance(
     notices.mkdir(parents=True, exist_ok=True)
     lock_digest = file_sha256(LOCK_PATH)
     trtexec_provenance = notices / "trtexec-PROVENANCE.txt"
+    if platform_id == "windows-x64":
+        artifact = lock["tensorrt"]["windows_artifact"]
+        binary_input: dict[str, Any] = {"archive": artifact}
+        member_record = {
+            "archive_member": (
+                PurePosixPath(artifact["archive_root"])
+                / PurePosixPath(runtime_contract(platform_id).trtexec)
+            ).as_posix()
+        }
+    else:
+        linux_packages = lock["tensorrt"]["linux_packages"]
+        trtexec_package = linux_packages["packages"]["trtexec"]
+        trtexec_entry = trtexec_package["files"][
+            runtime_contract(platform_id).trtexec
+        ]
+        binary_input = {
+            "base_url": linux_packages["base_url"],
+            "source_rpm": linux_packages["source_rpm"],
+            "packages": linux_packages["packages"],
+        }
+        member_record = {
+            "rpm": trtexec_package["artifact"]["relative_path"],
+            "rpm_member": trtexec_entry["member"],
+        }
     record: dict[str, Any] = {
-        "schema": "audio2face-build-provenance/1",
+        "schema": "audio2face-trtexec-provenance/1",
         "platform": platform_id,
         "runtime_lock_sha256": lock_digest,
-        "audio2face_sdk": lock["audio2face_sdk"],
-        "tensorrt_source": lock["tensorrt_source"],
         "tensorrt_binary": {
             "version": lock["tensorrt"]["version"],
             "cuda": lock["tensorrt"]["cuda"],
-            "artifact": lock["tensorrt"]["artifacts"][platform_id],
+            "input": binary_input,
         },
-        "cuda": {
-            "version": lock["cuda"]["version"],
-            "manifest": lock["cuda"]["manifest"],
-            "components": {
-                name: {
-                    "version": lock["cuda"]["components"][name]["version"],
-                    "artifact": lock["cuda"]["components"][name]["artifacts"][platform_id],
-                }
-                for name in CUDA_COMPONENTS
-            },
+        "trtexec": {
+            **member_record,
+            "size": trtexec.stat().st_size,
+            "sha256": file_sha256(trtexec),
         },
-        "cmake": {
-            "version": lock["cmake"]["version"],
-            "artifact": lock["cmake"]["artifacts"][platform_id],
-        },
-        "commands_through_trtexec_build": _redacted_commands(runner),
     }
-    if platform_id == "windows-x64":
-        record["producer_toolchain"] = lock["windows_toolchain"]
-    else:
-        record["producer_toolchain"] = lock["linux_toolchain"]
-        record["reproducibility"] = (
-            "The pinned native producer does not imply bit-for-bit reproducible binaries."
-        )
     trtexec_provenance.write_text(
         json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
@@ -2701,7 +3202,6 @@ def _stage_source_for_file(
     platform_notices: Path | None,
     platform_metadata: Path | None,
     platform_provenance: Path | None,
-    trtexec_source: Path,
     trtexec_provenance: Path,
 ) -> Path:
     name = PurePosixPath(entry.path).name
@@ -2721,7 +3221,6 @@ def _stage_source_for_file(
         "sdk_tensorrt_acknowledgements": (
             sdk_source / "licenses" / "TensorRT-Acknowledgements.txt"
         ),
-        "trtexec_source_license": trtexec_source / "LICENSE",
         "trtexec_provenance": trtexec_provenance,
     }
     if platform_metadata is not None:
@@ -2749,7 +3248,6 @@ def runtime_stage_map(
     platform_metadata: Path | None,
     platform_provenance: Path | None,
     trtexec: Path,
-    trtexec_source: Path,
     trtexec_provenance: Path,
 ) -> tuple[str, tuple[Path, ...], tuple[str, ...]]:
     """Resolve the shared package contract to one CMake staging map."""
@@ -2775,7 +3273,6 @@ def runtime_stage_map(
                     platform_notices=platform_notices,
                     platform_metadata=platform_metadata,
                     platform_provenance=platform_provenance,
-                    trtexec_source=trtexec_source,
                     trtexec_provenance=trtexec_provenance,
                 ),
                 entry.path,
@@ -2823,7 +3320,6 @@ def configure_and_stage_worker(
     linux_notices: Path | None,
     trtexec: Path,
     trtexec_provenance: Path,
-    tensorrt_source: Path,
     lock: Mapping[str, Any],
     platform_id: str,
     work_root: Path,
@@ -2862,7 +3358,6 @@ def configure_and_stage_worker(
         platform_metadata=platform_metadata,
         platform_provenance=platform_provenance,
         trtexec=trtexec,
-        trtexec_source=tensorrt_source,
         trtexec_provenance=trtexec_provenance,
     )
     nvcc = cuda_root / "bin" / (
@@ -2914,7 +3409,15 @@ def configure_and_stage_worker(
     if platform_id == "linux-x64":
         audit_linux_compile_flags(build / "CMakeCache.txt", lock)
     runner.run(
-        [cmake, "--build", build, "--target", "audio2face_runtime_stage", "--parallel"],
+        [
+            cmake,
+            "--build",
+            build,
+            "--target",
+            "audio2face_runtime_stage",
+            "--parallel",
+            "2",
+        ],
         env=environment,
     )
     staged = build / "runtime" / platform_id
@@ -3343,9 +3846,19 @@ def publish_stage(staged: Path, platform_id: str) -> Path:
     partial = output.with_name(output.name + ".partial")
     if partial.exists() or partial.is_symlink():
         raise BuildError(f"stale runtime handoff exists: {partial}")
-    shutil.copytree(staged, partial, symlinks=False)
-    validate_staged_runtime(partial, platform_id)
-    partial.replace(output)
+    validate_staged_runtime(staged, platform_id)
+    try:
+        staged.replace(partial)
+        validate_staged_runtime(partial, platform_id)
+        partial.replace(output)
+    except BuildError:
+        if partial.is_dir() and not partial.is_symlink():
+            shutil.rmtree(partial)
+        raise
+    except OSError as exc:
+        if partial.is_dir() and not partial.is_symlink():
+            shutil.rmtree(partial)
+        raise BuildError(f"cannot publish runtime handoff: {exc}") from exc
     return output
 
 
@@ -3368,17 +3881,6 @@ def build_runtime(platform_id: str, work_root: Path) -> Path:
         lock["audio2face_sdk"]["commit"],
         sdk_source,
         env=environment,
-        submodules={},
-    )
-    tensorrt_source = source_root / "tensorrt"
-    checkout_exact(
-        host_runner,
-        git,
-        lock["tensorrt_source"]["repository"],
-        lock["tensorrt_source"]["commit"],
-        tensorrt_source,
-        submodules=lock["tensorrt_source"]["submodules"],
-        env=environment,
     )
 
     cmake_root = materialize_archive_root(
@@ -3388,12 +3890,11 @@ def build_runtime(platform_id: str, work_root: Path) -> Path:
         work_root,
     )
     cuda_root = materialize_cuda(lock, platform_id, work_root)
-    tensorrt_root = materialize_archive_root(
-        lock["tensorrt"]["artifacts"][platform_id],
-        "tensorrt",
-        platform_id,
-        work_root,
-    )
+    if platform_id == "windows-x64":
+        tensorrt_root = materialize_windows_tensorrt(lock, work_root)
+    else:
+        tensorrt_root = materialize_linux_tensorrt(lock, work_root)
+    trtexec = pinned_trtexec(tensorrt_root, platform_id)
     msvc_runtime: Path | None = None
     msvc_manifest: Path | None = None
     linux_runtime: Path | None = None
@@ -3441,21 +3942,8 @@ def build_runtime(platform_id: str, work_root: Path) -> Path:
             ninja,
             compiler,
         )
-        trtexec = configure_and_build_trtexec(
-            runner,
-            cmake,
-            ninja,
-            compiler,
-            cuda_root,
-            tensorrt_root,
-            tensorrt_source,
-            lock,
-            platform_id,
-            work_root,
-            build_environment,
-        )
         trtexec_provenance, msvc_provenance = write_provenance(
-            lock, platform_id, runner, work_root, msvc_manifest
+            lock, platform_id, trtexec, work_root, msvc_manifest
         )
         staged = configure_and_stage_worker(
             runner,
@@ -3472,7 +3960,6 @@ def build_runtime(platform_id: str, work_root: Path) -> Path:
             linux_notices,
             trtexec,
             trtexec_provenance,
-            tensorrt_source,
             lock,
             platform_id,
             work_root,
@@ -3504,8 +3991,10 @@ def create_argument_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = create_argument_parser().parse_args(argv)
     try:
+        work_parent = REPOSITORY_ROOT / "build"
+        work_parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(
-            prefix="audio2face-runtime-"
+            prefix="audio2face-runtime-", dir=work_parent
         ) as temporary:
             work_root = Path(temporary).resolve()
             staged = build_runtime(arguments.platform, work_root)

@@ -113,7 +113,7 @@ does not provide the native Blender child described by this architecture. A
 release therefore consists of two self-contained Blender extension ZIPs:
 
 - Windows x64, containing the project worker, Audio2X, the exact Windows
-  CUDA/TensorRT user-mode dependency closure, a project-built `trtexec`, and
+  CUDA/TensorRT user-mode dependency closure, TensorRT's pinned `trtexec`, and
   required notices; and
 - Linux x64, containing the corresponding ELF executables, shared objects,
   and required notices.
@@ -135,12 +135,12 @@ directory.
 
 A clean native release job uses [`tools/build_runtime.py`](../tools/build_runtime.py)
 and [`worker/runtime-lock.json`](../worker/runtime-lock.json) to acquire the
-exact Audio2Face SDK revision, CUDA 12.9 components, TensorRT 10.13 archive,
-matching TensorRT source tree, CMake, and Windows CRT inputs. It builds the
-worker and `trtexec` without consulting a workstation or runner CUDA or
-TensorRT installation. CUDA compiler files, headers, import/static libraries,
-driver stubs, and TensorRT development sources are build inputs only. The
-NVIDIA display driver is the one required host component.
+exact Audio2Face SDK revision, CUDA 12.9 components, TensorRT 10.13 inputs,
+CMake, and Windows CRT inputs. It builds the worker and stages the `trtexec`
+shipped in those exact TensorRT binary inputs without consulting a workstation or
+runner CUDA or TensorRT installation. CUDA compiler files, headers,
+import/static libraries, and driver stubs are build inputs only. The NVIDIA
+display driver is the one required host component.
 
 The Windows producer is pinned to VCToolsVersion 14.43.34808, `cl` 19.43.34810,
 and Windows SDK 10.0.22621.0. The Linux producer is pinned to the Rocky Linux
@@ -160,8 +160,10 @@ ZIP layout and bytes. The only outputs are
 `dist/audio2face-0.1.0-linux-x64.zip`. Native compilation never occurs inside
 Blender's extension command.
 
-`trtexec` is built from the matching locked TensorRT source. This preserves the
-model-defined `trt_info.json` command
+`trtexec` comes from the matching locked TensorRT binary input. Windows uses
+the official ZIP; Linux streams six pinned NVIDIA RHEL8 RPMs one at a time and
+keeps only the required headers, regular runtime libraries, and `trtexec`. This
+preserves the model-defined `trt_info.json` command
 contract used by NVIDIA's Audio2Face SDK without inventing a second option
 schema. TensorRT engines are generated later on the user's GPU because a
 serialized engine is not a generally portable model artifact.

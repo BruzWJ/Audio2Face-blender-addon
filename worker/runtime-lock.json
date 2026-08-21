@@ -5,33 +5,20 @@
     "repository": "https://github.com/NVIDIA/Audio2Face-3D-SDK.git",
     "commit": "1ca0f02535ed774f5dbcd724a31cd486368dc783"
   },
-  "tensorrt_source": {
-    "version": "10.13.3",
-    "tag": "v10.13.3",
-    "repository": "https://github.com/NVIDIA/TensorRT.git",
-    "commit": "94e2b9ef6d2cce74c76cdad499cca36cc4949197",
-    "submodules": {
-      "parsers/onnx": "9a9f7883dd7b8cb0a718395bac2075fab6f97da8",
-      "parsers/onnx/third_party/onnx": "e709452ef2bbc1d113faf678c24e6d3467696e83",
-      "parsers/onnx/third_party/onnx/third_party/pybind11": "a2e59f0e7065404b44dfe92a28aca47ba1378dc4",
-      "third_party/cub": "c3cceac115c072fb63df1836ff46d8c60d9eb304",
-      "third_party/protobuf": "aea4a275e28329f648e046469c095eef74254bb2",
-      "third_party/protobuf/third_party/benchmark": "5b7683f49e1e9223cf9927b24f6fd3d6bd82e3f8",
-      "third_party/protobuf/third_party/googletest": "5ec7f0c4a113e2f18ac2c6cc7df51ad6afc24081"
-    }
-  },
   "cmake": {
     "version": "3.31.8",
     "artifacts": {
       "windows-x64": {
         "url": "https://github.com/Kitware/CMake/releases/download/v3.31.8/cmake-3.31.8-windows-x86_64.zip",
         "size": 46709267,
-        "sha256": "81aa9964dbabd71fe02e7ec50472fd3ad56138c49944515ece9001efbff8d719"
+        "sha256": "81aa9964dbabd71fe02e7ec50472fd3ad56138c49944515ece9001efbff8d719",
+        "archive_root": "cmake-3.31.8-windows-x86_64"
       },
       "linux-x64": {
         "url": "https://github.com/Kitware/CMake/releases/download/v3.31.8/cmake-3.31.8-linux-x86_64.tar.gz",
         "size": 55012213,
-        "sha256": "630615d8e98ac33eba7fbe472626dff5c899c85af3c024585ae109166a6909d0"
+        "sha256": "630615d8e98ac33eba7fbe472626dff5c899c85af3c024585ae109166a6909d0",
+        "archive_root": "cmake-3.31.8-linux-x86_64"
       }
     }
   },
@@ -169,16 +156,166 @@
   "tensorrt": {
     "version": "10.13.3.9",
     "cuda": "12.9",
-    "artifacts": {
-      "windows-x64": {
-        "url": "https://developer.download.nvidia.com/compute/machine-learning/tensorrt/10.13.3/zip/TensorRT-10.13.3.9.Windows.win10.cuda-12.9.zip",
-        "size": 1741539421,
-        "sha256": "d7fd63dc111dc68bc7bdf3b0b494c669ed50315502b016ec3022ac7cb3ba0615"
-      },
-      "linux-x64": {
-        "url": "https://developer.download.nvidia.com/compute/machine-learning/tensorrt/10.13.3/tars/TensorRT-10.13.3.9.Linux.x86_64-gnu.cuda-12.9.tar.gz",
-        "size": 6933500463,
-        "sha256": "a40650fd51f096969db072edf216a5026e61c71157bc87f475a8549681e09d34"
+    "windows_artifact": {
+      "url": "https://developer.download.nvidia.com/compute/machine-learning/tensorrt/10.13.3/zip/TensorRT-10.13.3.9.Windows.win10.cuda-12.9.zip",
+      "size": 1741539421,
+      "sha256": "d7fd63dc111dc68bc7bdf3b0b494c669ed50315502b016ec3022ac7cb3ba0615",
+      "archive_root": "TensorRT-10.13.3.9"
+    },
+    "linux_packages": {
+      "base_url": "https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/",
+      "source_rpm": "tensorrt-10.13.3.9-1.cuda12.9.src.rpm",
+      "packages": {
+        "headers": {
+          "artifact": {
+            "relative_path": "libnvinfer-headers-devel-10.13.3.9-1.cuda12.9.x86_64.rpm",
+            "size": 133712,
+            "sha256": "2dd8525e5133849222f564fa01ef5afcd3a1fe72554b3cb23694f2e82cb192fc"
+          },
+          "files": {
+            "include/NvInfer.h": {
+              "member": "usr/include/NvInfer.h",
+              "size": 369385,
+              "sha256": "68ecc6f78404dbc934333f27459e664d1cdce10df87689665850bcf2640a9deb",
+              "mode": 420
+            },
+            "include/NvInferImpl.h": {
+              "member": "usr/include/NvInferImpl.h",
+              "size": 58091,
+              "sha256": "3ecbc49c649e6044c565bbc946e7e87e4842a3e9f0f3ba151e8cb067ba247d28",
+              "mode": 420
+            },
+            "include/NvInferLegacyDims.h": {
+              "member": "usr/include/NvInferLegacyDims.h",
+              "size": 4008,
+              "sha256": "3e10fe5b85545f2e956e6935271badf0b1c72553b698000a61d46d69c5d53030",
+              "mode": 420
+            },
+            "include/NvInferPluginBase.h": {
+              "member": "usr/include/NvInferPluginBase.h",
+              "size": 8962,
+              "sha256": "774e457b2e80f27502ea1aed8132949f6e0788251b5374948e1bfdc9de9fb0ee",
+              "mode": 420
+            },
+            "include/NvInferRuntime.h": {
+              "member": "usr/include/NvInferRuntime.h",
+              "size": 230079,
+              "sha256": "c6ef78bbd8d12c8affa22961d136951e87e7b4c2a405fe44aef40b35264e3686",
+              "mode": 420
+            },
+            "include/NvInferRuntimeBase.h": {
+              "member": "usr/include/NvInferRuntimeBase.h",
+              "size": 26563,
+              "sha256": "cf979038f28817ebee3b2899322aadda4566dafcd8a060c18bf2bdff511dfc8a",
+              "mode": 420
+            },
+            "include/NvInferRuntimeCommon.h": {
+              "member": "usr/include/NvInferRuntimeCommon.h",
+              "size": 13229,
+              "sha256": "9461c9d07403c5dd1f8a6dea17fa5c3fe5cef7c4290c6768370a1d8139d4ac5d",
+              "mode": 420
+            },
+            "include/NvInferRuntimePlugin.h": {
+              "member": "usr/include/NvInferRuntimePlugin.h",
+              "size": 44820,
+              "sha256": "d337b34b7b7efc1c65ba3405a6551389063669cb0c51704f91578b5f817999fc",
+              "mode": 420
+            },
+            "include/NvInferVersion.h": {
+              "member": "usr/include/NvInferVersion.h",
+              "size": 1839,
+              "sha256": "b80217d27f09a25be0fb753a7aa832834f2def9cd91d2a5562d278b76c5388c2",
+              "mode": 420
+            }
+          }
+        },
+        "plugin_headers": {
+          "artifact": {
+            "relative_path": "libnvinfer-headers-plugin-devel-10.13.3.9-1.cuda12.9.x86_64.rpm",
+            "size": 12988,
+            "sha256": "b46d7b7a4dca2784dd213c559acf8ba0f029052090f72fe3fe327993fe7dcd51"
+          },
+          "files": {
+            "include/NvInferPlugin.h": {
+              "member": "usr/include/NvInferPlugin.h",
+              "size": 1540,
+              "sha256": "b3290404a076f3492dc627ffdfc3b1fa803ea0eccc49f23986d645a2d23a63c7",
+              "mode": 420
+            },
+            "include/NvInferPluginUtils.h": {
+              "member": "usr/include/NvInferPluginUtils.h",
+              "size": 10152,
+              "sha256": "c1aeed090422a0f214aa3dc334d3e435f3dd3a6cf14caece9fe9ef4daeeb50ec",
+              "mode": 420
+            }
+          }
+        },
+        "runtime": {
+          "artifact": {
+            "relative_path": "libnvinfer10-10.13.3.9-1.cuda12.9.x86_64.rpm",
+            "size": 1377737088,
+            "sha256": "446f79f2a092d515a2a3a5afccdae4da430006eb7ca2ff4f0211b33b8d50beab"
+          },
+          "files": {
+            "lib/libnvinfer.so.10": {
+              "member": "usr/lib64/libnvinfer.so.10.13.3",
+              "size": 672982480,
+              "sha256": "be58984425f6b50acaf6da68eb74517f1f3e287167fcb4eb7afd84f9fefe044e",
+              "mode": 493
+            },
+            "lib/libnvinfer_builder_resource.so.10.13.3": {
+              "member": "usr/lib64/libnvinfer_builder_resource.so.10.13.3",
+              "size": 2122361568,
+              "sha256": "277f180eb35f7557ad6598f1677c9e379f6c7b77e83fee26fa2a21492437ef25",
+              "mode": 493
+            }
+          }
+        },
+        "plugin_runtime": {
+          "artifact": {
+            "relative_path": "libnvinfer-plugin10-10.13.3.9-1.cuda12.9.x86_64.rpm",
+            "size": 17239780,
+            "sha256": "9bf2288549902e09876618f924dd34f725ebba8a470c80ddd99dd3d278a7a648"
+          },
+          "files": {
+            "lib/libnvinfer_plugin.so.10": {
+              "member": "usr/lib64/libnvinfer_plugin.so.10.13.3",
+              "size": 59816312,
+              "sha256": "f366e03a4cb9f0b75761da673291084a2171606a91c99d3cfebed1c7492ff9f8",
+              "mode": 493
+            }
+          }
+        },
+        "parser_runtime": {
+          "artifact": {
+            "relative_path": "libnvonnxparsers10-10.13.3.9-1.cuda12.9.x86_64.rpm",
+            "size": 1560256,
+            "sha256": "e07f471e1074806bf938b3fb940dc7c36452710612d7829feb1d7c536b80737e"
+          },
+          "files": {
+            "lib/libnvonnxparser.so.10": {
+              "member": "usr/lib64/libnvonnxparser.so.10.13.3",
+              "size": 4606744,
+              "sha256": "c4ee18db3a2a9c8a7addeddf0e6a858ed36da990ffd9e80a77b754408f4324a6",
+              "mode": 493
+            }
+          }
+        },
+        "trtexec": {
+          "artifact": {
+            "relative_path": "libnvinfer-bin-10.13.3.9-1.cuda12.9.x86_64.rpm",
+            "size": 673972,
+            "sha256": "4e33a6c61ee7a7ed051a8efac675618f45e68315f82eb3716a0ba4f623bfdd74"
+          },
+          "files": {
+            "bin/trtexec": {
+              "member": "usr/src/tensorrt/bin/trtexec",
+              "size": 1852664,
+              "sha256": "5f2b97fd396daef641a9382b9095b5a908cb7413682e968807b5523d604000b7",
+              "mode": 493
+            }
+          }
+        }
       }
     }
   },

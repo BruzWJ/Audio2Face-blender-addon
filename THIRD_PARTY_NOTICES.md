@@ -10,7 +10,7 @@ licensed components in its bundled runtime:
 - NVIDIA Audio2Face-3D SDK and Audio2X runtime;
 - NVIDIA CUDA user-mode runtime libraries;
 - NVIDIA TensorRT user-mode runtime libraries;
-- NVIDIA TensorRT `trtexec`, built from the release's pinned TensorRT source,
+- NVIDIA TensorRT `trtexec` from the release's pinned binary input,
   and its dependencies;
 - on Linux, the exact Rocky Linux 8.9 `libstdc++.so.6` and `libgcc_s.so.1`
   runtime files pinned in `worker/runtime-lock.json`.
@@ -19,8 +19,8 @@ The extension contains no Audio2Face or Audio2Emotion model files and no
 serialized TensorRT engines. Each platform runtime must contain only files
 approved for redistribution and must reproduce every license, copyright
 notice, and third-party acknowledgement required by those exact files. The
-runtime notices must identify the exact TensorRT source revision, version,
-license, and build provenance for the bundled `trtexec`. Windows and Linux
+runtime notices must identify the exact TensorRT archive or RPM, version, member,
+license, and binary digest for the bundled `trtexec`. Windows and Linux
 native files are packaged only in their corresponding extension ZIP. Linux
 packages preserve the five GCC runtime license texts from the locked Rocky
 `libgcc` RPM and generated provenance for both binary RPMs and the matching
@@ -54,7 +54,7 @@ Relevant upstream terms include:
 - [Audio2Emotion v3.0 model license](https://huggingface.co/nvidia/Audio2Emotion-v3.0/blob/main/LICENSE)
 - [NVIDIA Open Model License](https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/)
 - [NVIDIA Software License Agreement](https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-software-license-agreement/)
-- [TensorRT source and license](https://github.com/NVIDIA/TensorRT)
+- [NVIDIA TensorRT](https://developer.nvidia.com/tensorrt)
 - [Rocky Linux 8.9 Vault](https://dl.rockylinux.org/vault/rocky/8.9/)
 - [GNU GCC runtime-library exception](https://www.gnu.org/licenses/gcc-exception-3.1.html)
 - [Blender licensing](https://www.blender.org/about/license/)

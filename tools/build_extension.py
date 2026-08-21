@@ -409,10 +409,19 @@ def build_extension(blender: Path, platform_id: str) -> Path:
     runtime = REPOSITORY_ROOT / "build" / "runtime" / platform_id
     validate_runtime(runtime, platform_id)
 
-    with tempfile.TemporaryDirectory(prefix="audio2face-extension-") as temporary:
+    work_directory = REPOSITORY_ROOT / "build"
+    work_directory.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix="audio2face-extension-", dir=work_directory
+    ) as temporary:
         staged_addon = Path(temporary) / "audio2face"
         _copy_addon_source(staged_addon)
-        shutil.copytree(runtime, staged_addon / "runtime", symlinks=False)
+        shutil.copytree(
+            runtime,
+            staged_addon / "runtime",
+            symlinks=False,
+            copy_function=os.link,
+        )
         extension_id, version = rewrite_manifest_platform(
             staged_addon / "blender_manifest.toml", platform_id
         )

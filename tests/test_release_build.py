@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import copy
+import contextlib
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import stat
@@ -40,24 +42,25 @@ def test_runtime_lock_has_exact_release_inputs() -> None:
     assert lock["audio2face_sdk"]["commit"] == (
         "1ca0f02535ed774f5dbcd724a31cd486368dc783"
     )
-    assert lock["tensorrt_source"]["commit"] == (
-        "94e2b9ef6d2cce74c76cdad499cca36cc4949197"
+    assert "tensorrt_source" not in lock
+    assert lock["tensorrt"]["windows_artifact"]["archive_root"] == (
+        "TensorRT-10.13.3.9"
     )
-    assert lock["tensorrt_source"]["submodules"] == {
-        "parsers/onnx": "9a9f7883dd7b8cb0a718395bac2075fab6f97da8",
-        "parsers/onnx/third_party/onnx": (
-            "e709452ef2bbc1d113faf678c24e6d3467696e83"
-        ),
-        "parsers/onnx/third_party/onnx/third_party/pybind11": (
-            "a2e59f0e7065404b44dfe92a28aca47ba1378dc4"
-        ),
-        "third_party/cub": "c3cceac115c072fb63df1836ff46d8c60d9eb304",
-        "third_party/protobuf": "aea4a275e28329f648e046469c095eef74254bb2",
-        "third_party/protobuf/third_party/benchmark": (
-            "5b7683f49e1e9223cf9927b24f6fd3d6bd82e3f8"
-        ),
-        "third_party/protobuf/third_party/googletest": (
-            "5ec7f0c4a113e2f18ac2c6cc7df51ad6afc24081"
+    linux_tensorrt = lock["tensorrt"]["linux_packages"]
+    assert linux_tensorrt["base_url"] == (
+        runtime_tool.NVIDIA_TENSORRT_RHEL8_BASE_URL
+    )
+    assert linux_tensorrt["source_rpm"] == (
+        "tensorrt-10.13.3.9-1.cuda12.9.src.rpm"
+    )
+    assert tuple(linux_tensorrt["packages"]) == (
+        runtime_tool.LINUX_TENSORRT_PACKAGE_ROLES
+    )
+    assert linux_tensorrt["packages"]["runtime"]["artifact"] == {
+        "relative_path": "libnvinfer10-10.13.3.9-1.cuda12.9.x86_64.rpm",
+        "size": 1377737088,
+        "sha256": (
+            "446f79f2a092d515a2a3a5afccdae4da430006eb7ca2ff4f0211b33b8d50beab"
         ),
     }
     assert set(lock["cuda"]["components"]) == set(runtime_tool.CUDA_COMPONENTS)
@@ -215,6 +218,117 @@ def test_linux_runtime_materialization_uses_contract_notice_roles(
     }
 
 
+def test_linux_tensorrt_materialization_is_sequential_and_exact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lock = runtime_tool.load_lock()
+    downloaded: list[Path] = []
+
+    def download(
+        artifact: dict[str, object], destination: Path, _label: str
+    ) -> Path:
+        if downloaded:
+            assert not downloaded[-1].exists()
+        destination.mkdir(parents=True, exist_ok=True)
+        archive = destination / PurePosixPath(str(artifact["url"])).name
+        archive.write_bytes(b"rpm")
+        downloaded.append(archive)
+        return archive
+
+    def extract(
+        _archive: Path,
+        _url: str,
+        _source_rpm: str,
+        files: dict[str, dict[str, object]],
+        destination: Path,
+    ) -> None:
+        for output_name, entry in files.items():
+            output = destination.joinpath(*PurePosixPath(output_name).parts)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_bytes(output_name.encode("utf-8"))
+            output.chmod(int(entry["mode"]))
+
+    monkeypatch.setattr(runtime_tool, "download_artifact", download)
+    monkeypatch.setattr(runtime_tool, "_extract_linux_tensorrt_rpm", extract)
+
+    root = runtime_tool.materialize_linux_tensorrt(lock, tmp_path / "work")
+
+    assert len(downloaded) == len(runtime_tool.LINUX_TENSORRT_PACKAGE_ROLES)
+    assert all(not archive.exists() for archive in downloaded)
+    for link_name, target_name in (
+        runtime_tool.LINUX_TENSORRT_LINKER_HARDLINKS.items()
+    ):
+        link = root.joinpath(*PurePosixPath(link_name).parts)
+        target = root.joinpath(*PurePosixPath(target_name).parts)
+        assert link.stat().st_ino == target.stat().st_ino
+        assert not link.is_symlink()
+
+
+def test_linux_tensorrt_cpio_selection_streams_exact_regular_member(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    content = b"locked-header"
+
+    def member(name: str, mode: int, data: bytes) -> bytes:
+        name_bytes = name.encode("utf-8") + b"\0"
+        fields = (
+            1,
+            mode,
+            0,
+            0,
+            1,
+            0,
+            len(data),
+            0,
+            0,
+            0,
+            0,
+            len(name_bytes),
+            0,
+        )
+        header = b"070701" + b"".join(
+            f"{value:08x}".encode("ascii") for value in fields
+        )
+        result = header + name_bytes
+        result += b"\0" * ((-len(result)) & 3)
+        result += data
+        result += b"\0" * ((-len(result)) & 3)
+        return result
+
+    payload_bytes = member("./usr/include/Test.h", stat.S_IFREG | 0o644, content)
+    payload_bytes += member("TRAILER!!!", 0, b"")
+
+    @contextlib.contextmanager
+    def payload(*_args: object) -> object:
+        yield io.BytesIO(payload_bytes)
+
+    monkeypatch.setattr(runtime_tool, "_rpm_xz_payload", payload)
+    archive = tmp_path / "test.rpm"
+    archive.write_bytes(b"not-read-by-the-mocked-payload")
+    destination = tmp_path / "output"
+    destination.mkdir()
+    runtime_tool._extract_linux_tensorrt_rpm(
+        archive,
+        "https://example.invalid/test.rpm",
+        "test.src.rpm",
+        {
+            "include/Test.h": {
+                "member": "usr/include/Test.h",
+                "size": len(content),
+                "sha256": hashlib.sha256(content).hexdigest(),
+                "mode": 0o644,
+            }
+        },
+        destination,
+    )
+
+    output = destination / "include" / "Test.h"
+    assert output.read_bytes() == content
+    assert stat.S_IMODE(output.stat().st_mode) == 0o644
+
+
 def test_runtime_lock_rejects_unknown_or_missing_fields(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -273,70 +387,53 @@ def test_host_platform_matching_is_exact(monkeypatch: pytest.MonkeyPatch) -> Non
         runtime_tool.detect_host_platform()
 
 
-def test_command_runner_preserves_leading_capture_protocol_whitespace(
+@pytest.mark.parametrize(
+    ("platform_id", "filename"),
+    (("windows-x64", "trtexec.exe"), ("linux-x64", "trtexec")),
+)
+def test_pinned_trtexec_uses_the_exact_binary_input_member(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    platform_id: str,
+    filename: str,
 ) -> None:
-    commit = "a" * 40
+    executable = tmp_path / "bin" / filename
+    executable.parent.mkdir()
+    executable.write_bytes(b"pinned-trtexec")
+    if platform_id == "linux-x64":
+        executable.chmod(0o755)
 
-    def run(command: list[str], **_kwargs: object) -> object:
-        return runtime_tool.subprocess.CompletedProcess(
-            command,
-            0,
-            stdout=f" {commit} third_party/example (heads/main)\r\n",
-        )
+    assert runtime_tool.pinned_trtexec(tmp_path, platform_id) == executable
 
-    monkeypatch.setattr(runtime_tool.subprocess, "run", run)
+    executable.unlink()
+    with pytest.raises(runtime_tool.BuildError, match="pinned TensorRT input"):
+        runtime_tool.pinned_trtexec(tmp_path, platform_id)
 
-    output = runtime_tool.CommandRunner(tmp_path).run(
-        ["git", "submodule", "status"],
-        env={},
-        capture=True,
+
+def test_trtexec_provenance_identifies_pinned_linux_rpm_member(tmp_path: Path) -> None:
+    trtexec = tmp_path / "tensorrt" / "bin" / "trtexec"
+    trtexec.parent.mkdir(parents=True)
+    trtexec.write_bytes(b"prebuilt-trtexec")
+    trtexec.chmod(0o755)
+    work = tmp_path / "work"
+
+    provenance, msvc_provenance = runtime_tool.write_provenance(
+        runtime_tool.load_lock(),
+        "linux-x64",
+        trtexec,
+        work,
+        None,
     )
 
-    assert output == f" {commit} third_party/example (heads/main)"
-
-
-@pytest.mark.parametrize("prefix", ["-", "+", "U"])
-def test_checkout_exact_rejects_nonclean_submodule_status(
-    tmp_path: Path,
-    prefix: str,
-) -> None:
-    source_commit = "a" * 40
-    submodule_commit = "b" * 40
-
-    class Runner:
-        def run(
-            self,
-            command: list[Path | str],
-            *,
-            env: dict[str, str],
-            cwd: Path | None = None,
-            capture: bool = False,
-        ) -> str:
-            del env, cwd, capture
-            if command[-2:] == ["rev-parse", "HEAD"]:
-                return source_commit
-            if command[-3:] == ["submodule", "status", "--recursive"]:
-                return (
-                    f"{prefix}{submodule_commit} third_party/example "
-                    "(heads/main)"
-                )
-            return ""
-
-    with pytest.raises(
-        runtime_tool.BuildError,
-        match="unexpected Git submodule status",
-    ):
-        runtime_tool.checkout_exact(
-            Runner(),
-            Path("git"),
-            "https://example.invalid/source.git",
-            source_commit,
-            tmp_path / "source",
-            env={},
-            submodules={"third_party/example": submodule_commit},
-        )
+    record = json.loads(provenance.read_text(encoding="utf-8"))
+    assert record["schema"] == "audio2face-trtexec-provenance/1"
+    assert record["trtexec"] == {
+        "rpm": "libnvinfer-bin-10.13.3.9-1.cuda12.9.x86_64.rpm",
+        "rpm_member": "usr/src/tensorrt/bin/trtexec",
+        "size": len(b"prebuilt-trtexec"),
+        "sha256": hashlib.sha256(b"prebuilt-trtexec").hexdigest(),
+    }
+    assert "tensorrt_source" not in record
+    assert msvc_provenance is None
 
 
 def test_extension_release_requires_native_platform(
@@ -585,7 +682,7 @@ def test_windows_release_environment_is_an_exact_vcvars_allowlist(
     assert environment["TMP"] == environment["TEMP"]
 
 
-def test_windows_vcvars_discovery_selects_newest_exact_pinned_toolchain(
+def test_windows_vcvars_discovery_enumerates_all_instances_for_exact_pin(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -660,8 +757,6 @@ def test_windows_vcvars_discovery_selects_newest_exact_pinned_toolchain(
         "*",
         "-version",
         "[17.0,18.0)",
-        "-requires",
-        "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
         "-sort",
         "-format",
         "json",
@@ -923,7 +1018,7 @@ def test_archive_root_and_cuda_merge_require_exact_members(
     wrong = extracted / "renamed-root"
     wrong.mkdir(parents=True)
     with pytest.raises(runtime_tool.BuildError, match="archive root must be"):
-        runtime_tool.exact_archive_root(extracted, archive, "component")
+        runtime_tool.exact_archive_root(extracted, "payload", "component")
 
     source = tmp_path / "source"
     destination = tmp_path / "destination"

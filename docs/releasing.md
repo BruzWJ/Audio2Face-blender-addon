@@ -1,9 +1,10 @@
 # Release automation
 
-`.github/workflows/release.yml` is the only GitHub release path. Pushing the
-exact version tag from `audio2face/blender_manifest.toml` starts two native
-builds, uploads the two complete platform extension ZIPs to one draft release,
-verifies that the draft contains exactly those assets, and then publishes it.
+`.github/workflows/release.yml` is the only GitHub release path. It runs only
+when started manually with an existing version tag that exactly matches
+`audio2face/blender_manifest.toml`. The workflow starts two native builds,
+uploads the two complete platform extension ZIPs to one draft release, verifies
+that the draft contains exactly those assets, and then publishes it.
 For manifest version `0.1.0`, the only accepted tag is `v0.1.0` and the assets
 are:
 
@@ -17,35 +18,41 @@ rerun without deleting the draft. It refuses an already-published release.
 Native uploads use `--clobber`; the final job publishes only after both jobs
 succeed and the draft contains exactly the two expected, non-empty assets.
 
-## Native runner labels
+## Standard GitHub-hosted runners
 
-Configure one native x64 GitHub Actions runner for each literal workflow label:
+The two native jobs use only GitHub's standard `windows-latest` and
+`ubuntu-latest` x64 labels. There are no custom, larger, or self-hosted runner
+labels to configure. The `-latest` names intentionally follow GitHub's current
+stable images; the Windows job installs its locked compiler and SDK instead of
+depending on the compiler version preinstalled on that moving image.
 
-- `audio2face-windows-x64`
-- `audio2face-linux-x64`
+GitHub specifies 14 GB of SSD storage for a standard runner. The standard
+images also contain development stacks that this release never consumes, so
+each native job removes an explicit allowlist before selecting its one Python:
 
-Each label may name a GitHub-hosted larger runner or a dedicated self-hosted
-runner. Standard GitHub-hosted runners are not release builders for this
-project: GitHub guarantees only 14 GB of SSD space, while the locked compressed
-inputs alone total approximately 2.66 GiB on Windows and 7.77 GiB on Linux,
-before extraction, compilation, staging, Blender, and the final extension ZIP.
-The workflow requires at least 64 GiB free on every Windows workspace/temp
-volume and 96 GiB free on every Linux workspace/temp filesystem.
+- Windows removes the hosted tool cache, Android SDK, GHCup, .NET, Miniconda,
+  MSYS2, and vcpkg trees.
+- Ubuntu removes the hosted tool cache, Android SDK, GHCup, .NET, Swift,
+  Miniconda, Homebrew, and vcpkg trees.
 
-The Windows runner requires:
+The cleanup does not remove Git, GitHub CLI, Docker on Ubuntu, the Windows
+installer, Windows Kits, or the Ubuntu swap file. Workspace and temporary
+locations still come from `GITHUB_WORKSPACE` and `RUNNER_TEMP`; the workflow
+does not assume a `D:` drive or `/mnt` scratch disk. Both native jobs require at
+least 12 GiB free after cleanup and use two-way build parallelism. See GitHub's
+[standard runner specifications](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)
+and [six-hour hosted-job limit](https://docs.github.com/en/actions/reference/limits).
 
-- Windows x64;
-- current GitHub Actions Runner, Git for Windows, and GitHub CLI on `PATH`;
-- Visual Studio 2022 or Build Tools with component
-  `Microsoft.VisualStudio.Component.VC.14.43.17.13.x86.x64`;
-- MSVC toolset `14.43.34808` / compiler `19.43.34810`; and
-- Windows SDK `10.0.22621.0`.
+The Windows job downloads Microsoft's official Visual Studio 2022 Build Tools
+bootstrapper and installs only the components required by the locked build:
 
-The Linux runner requires:
+- `Microsoft.VisualStudio.Component.VC.14.43.17.13.x86.x64`; and
+- `Microsoft.VisualStudio.Component.Windows11SDK.22621`.
 
-- x86-64 Linux;
-- current GitHub Actions Runner, Git, `curl`, `tar`, `xz`, and GitHub CLI; and
-- Docker Engine, with the runner account authorized to run Docker containers.
+It then verifies MSVC toolset `14.43.34808` and Windows SDK
+`10.0.22621.0` before invoking the runtime builder. The Ubuntu image supplies
+Git, `curl`, `tar`, `xz`, GitHub CLI, and Docker Engine; the locked Rocky Linux
+producer container supplies the compiler and system headers.
 
 Neither runner needs an NVIDIA GPU, CUDA Toolkit, TensorRT installation,
 Audio2Face installation, or either model repository. The runtime builder
@@ -57,13 +64,21 @@ files are deliberately not part of the extension package.
 1. Update `version` in `audio2face/blender_manifest.toml` and merge the complete
    release source.
 2. Create and push the exact `v<version>` tag.
-3. The prepare job runs the Python tests and creates or verifies a draft.
-4. The native jobs download the official portable Blender 5.2.0 archives,
-   verify their pinned SHA-256 digests, run Blender smoke tests, build the
-   locked runtime, package the platform extension, enforce GitHub's per-asset
-   size limit, and upload directly to the draft.
-5. The final job requires exactly the Windows and Linux asset names, verifies
-   each upload state and size, and publishes the draft.
+3. In GitHub Actions, open **Release platform extensions**, keep the workflow
+   selector on the repository's default branch, choose **Run workflow**, enter
+   that exact tag, and start the workflow. The prepare job resolves
+   `refs/tags/<tag>` once; both native jobs build that frozen commit.
+4. The prepare job runs the Python tests and creates or verifies a draft.
+5. Each native job reclaims its standard runner, selects Python 3.11.9, and
+   builds the locked runtime. Windows first installs and verifies the exact
+   Visual Studio 2022 components listed above.
+6. The native jobs download the official portable Blender 5.2.0 archives,
+   verify their pinned SHA-256 digests, discard the downloaded archives after
+   extraction, run Blender smoke tests, package the platform extensions,
+   enforce GitHub's per-asset size limit, and upload directly to the draft.
+7. The final job requires exactly the Windows and Linux asset names, verifies
+   each upload state and size, confirms that the tag was not moved during the
+   run, and publishes the draft.
 
 GitHub Releases requires every individual asset to be smaller than 2 GiB. The
 workflow enforces that limit before upload and again before publication. If a

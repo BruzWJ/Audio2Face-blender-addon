@@ -92,29 +92,28 @@ foreach(_a2f_index RANGE 0 ${_a2f_last_index})
   list(APPEND _a2f_seen_paths "${_a2f_path}")
 endforeach()
 
-# The stage directory is build-local and exact. Python validates the complete
-# contract immediately after this target finishes.
+# The release work tree and stage directory share one filesystem. Hard links
+# keep the multi-gigabyte native payload single-copy until Blender writes the
+# extension ZIP. Python validates the complete contract immediately afterward.
 file(REMOVE_RECURSE "${_a2f_stage_directory}")
 foreach(_a2f_index RANGE 0 ${_a2f_last_index})
   list(GET _a2f_sources ${_a2f_index} _a2f_source)
   list(GET _a2f_paths ${_a2f_index} _a2f_path)
+  file(REAL_PATH "${_a2f_source}" _a2f_real_source)
   get_filename_component(_a2f_parent "${_a2f_path}" DIRECTORY)
   if(NOT _a2f_parent STREQUAL "")
     file(MAKE_DIRECTORY "${_a2f_stage_directory}/${_a2f_parent}")
   endif()
-  configure_file("${_a2f_source}"
-    "${_a2f_stage_directory}/${_a2f_path}" COPYONLY)
+  file(CREATE_LINK
+    "${_a2f_real_source}"
+    "${_a2f_stage_directory}/${_a2f_path}"
+    RESULT _a2f_link_result)
+  if(NOT _a2f_link_result STREQUAL "0")
+    message(FATAL_ERROR
+      "Cannot hard-link runtime package file ${_a2f_path}: "
+      "${_a2f_link_result}")
+  endif()
 endforeach()
-
-if(A2F_PLATFORM STREQUAL "linux-x64")
-  file(CHMOD
-    "${_a2f_stage_directory}/${A2F_WORKER_PATH}"
-    "${_a2f_stage_directory}/${A2F_TRTEXEC_PATH}"
-    PERMISSIONS
-      OWNER_READ OWNER_WRITE OWNER_EXECUTE
-      GROUP_READ GROUP_EXECUTE
-      WORLD_READ WORLD_EXECUTE)
-endif()
 
 message(STATUS
   "Staged contract-defined ${A2F_PLATFORM} Audio2Face runtime at "
