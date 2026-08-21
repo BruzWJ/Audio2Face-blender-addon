@@ -3,7 +3,8 @@
 Audio2Face is a Blender 5.2 extension that runs NVIDIA Audio2Face-3D v3.0 and
 Audio2Emotion v3.0 locally on an NVIDIA GPU. Blender owns one managed native
 worker process. Users do not host a service or choose an executable, SDK,
-model, CUDA installation, or working directory.
+CUDA installation, or working directory. They select the exact root folders
+of the two complete NVIDIA model repositories they downloaded separately.
 
 The extension produces 52-channel ARKit coefficients from a selected WAV or
 incremental mono float32 PCM. It drives existing Shape Key `value`
@@ -14,9 +15,23 @@ Actions, F-curves, or baked animation.
 
 - Blender 5.2.x on Linux x64 or Windows x64
 - A supported NVIDIA GPU and display driver
-- Blender Online Access during managed installation
-- Space for the runtime, both model inputs, and two GPU-specific TensorRT
-  engines
+- Blender Online Access while downloading the native worker package
+- Complete Audio2Face-3D v3.0 and Audio2Emotion v3.0 Hugging Face repository
+  roots on a writable local filesystem
+- Space in each selected root for its GPU-specific `network.trt` engine
+
+NVIDIA publishes the Audio2Face-3D SDK source and the Audio2Face and
+Audio2Emotion model inputs on Hugging Face. It does not publish a ready-to-run
+Blender worker package. Each production release of this add-on must therefore
+publish its own reviewed native GPU worker packages for Windows x64 and Linux
+x64. Those packages contain the project-built worker, Audio2X and CUDA/TensorRT
+user-mode libraries, and the project-built `trtexec` used during setup.
+
+The operating-system and architecture checks are part of that native package
+contract: Windows requires PE executables and DLLs, while Linux requires ELF
+executables and shared objects. Removing those checks would not make either
+binary format load on another platform. This CUDA-only design does not support
+macOS or ARM systems.
 
 ## Runtime setup
 
@@ -25,23 +40,36 @@ box contains:
 
 - one [NVIDIA terms](https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/)
   link and one acceptance checkbox;
-- source buttons for
+- download buttons for
   [Audio2Face-3D v3.0](https://huggingface.co/nvidia/Audio2Face-3D-v3.0) and
-  [Audio2Emotion v3.0](https://huggingface.co/nvidia/Audio2Emotion-v3.0); and
-- **Install Runtime & Models**.
+  gated [Audio2Emotion v3.0](https://huggingface.co/nvidia/Audio2Emotion-v3.0);
+- two persistent folder selectors for the complete downloaded repository
+  roots; and
+- **Install Worker & Optimize Models**.
 
-The install action downloads one catalog-pinned artifact containing the worker,
-runtime libraries, model inputs for both models, TensorRT engine builder, and
-notices. It then builds both model engines for the local GPU. The source
-buttons identify the model sources; they are not separate install steps. The
-3D View sidebar only reports runtime readiness and directs setup to Add-on
-Preferences.
+Clone or download and extract both complete model repositories yourself. Each
+folder selector may point to its exact repository root anywhere on disk. The
+root must contain the repository's top-level `model.json`; the add-on derives
+that exact path and performs no recursive search or fallback. It does not sign
+in to Hugging Face, download, copy, relocate, or delete model files.
+
+The setup action downloads the catalog-pinned native worker package for the
+current OS and architecture. That add-on-owned package contains the worker,
+runtime libraries, TensorRT engine builder, licenses, and notices, but no
+models. Setup validates `model.json`, `network.onnx`, and `trt_info.json` in
+each selected root, rejects unresolved model references and Git LFS pointer
+files, then runs the bundled `trtexec` on CUDA device 0. It atomically creates
+or replaces `<selected-root>/network.trt`; both roots must therefore be
+writable. The 3D View sidebar only reports readiness and directs setup to
+Add-on Preferences.
 
 The checked-in [`runtime_catalog.json`](audio2face/runtime_catalog.json) has no
-published artifacts. **Install Runtime & Models** therefore remains disabled
-in this source release. It becomes available only after release maintainers
-publish reviewed Linux and Windows archives with immutable HTTPS URLs, exact
-sizes, and SHA-256 digests. No URL, checksum, or model payload is inferred.
+published worker packages. This is therefore a development package:
+**Install Worker & Optimize Models** remains disabled and managed GPU inference
+is not installable from it. Installation becomes available only after release
+maintainers publish reviewed Linux x64 and Windows x64 archives with immutable
+HTTPS URLs, exact sizes, and SHA-256 digests. No URL, checksum, native payload,
+or model location is inferred.
 
 The top of Add-on Preferences includes the same right-aligned **Uninstall**
 action used for Blender 5.2 Legacy (User) add-ons. It opens Blender's two-line
@@ -49,9 +77,10 @@ action used for Blender 5.2 Legacy (User) add-ons. It opens Blender's two-line
 After confirmation it delegates to Blender's extension uninstaller, which
 first disables the add-on and stops its worker, streams, and playback, then
 removes the extension and its complete managed data directory: runtime
-libraries, both models and TensorRT engines, installer leftovers, logs, and
-generated results. Selected WAV files, `.blend` files, meshes, and shared
-NVIDIA driver caches are not managed by the add-on and are not removed.
+libraries, installer leftovers, logs, and generated results. The two selected
+external model repository roots and their generated `network.trt` engines are
+not owned by the add-on and are not deleted. Selected WAV files, `.blend`
+files, meshes, and shared NVIDIA driver caches are likewise not removed.
 
 ## Workflow
 
@@ -65,7 +94,7 @@ NVIDIA driver caches are not managed by the add-on and are not removed.
 4. Select any mesh objects and click **Add Selected Meshes**. Shape Keys are
    not required when a mesh is added.
 5. Click **Start Worker**. Blender launches the verified managed worker,
-   negotiates the protocol, and loads both managed models.
+   negotiates the protocol, and loads both selected models.
 6. Choose a model identity and adjust the controls reported by that model.
 7. Leave **Auto Audio2Emotion** off to use the manual emotion values. Enable it
    to replace the manual driver with emotions inferred from the same audio.

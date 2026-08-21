@@ -1,4 +1,4 @@
-"""Validated release catalog for the managed Audio2Face runtime download.
+"""Validated release catalog for this add-on's native GPU worker packages.
 
 The catalog is intentionally independent of :mod:`bpy`.  Release automation
 fills it with one pinned, checksummed archive per supported platform.  Blender
@@ -57,7 +57,8 @@ class RuntimeCatalog:
             return self.artifacts[platform]
         except KeyError as exc:
             raise RuntimeCatalogError(
-                f"no managed Audio2Face runtime is published for {platform}"
+                "this Audio2Face add-on release does not include a verified "
+                f"GPU worker package for {platform}"
             ) from exc
 
 

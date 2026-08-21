@@ -211,12 +211,67 @@ def test_install_eligibility_reports_the_release_artifact_blocker(
     monkeypatch.setattr(
         controller,
         "install_availability",
-        lambda: (False, "no managed runtime is published for this platform"),
+        lambda: (False, "this release has no verified GPU worker package"),
     )
 
     assert controller.install_eligibility() == (
         False,
-        "no managed runtime is published for this platform",
+        "this release has no verified GPU worker package",
+    )
+
+
+def test_model_directories_use_the_two_saved_external_selections(
+    runtime_module: tuple[ModuleType, ModuleType],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runtime, _bpy = runtime_module
+    selected: list[Path] = []
+    for name in ("face", "emotion"):
+        directory = tmp_path / name
+        directory.mkdir()
+        model = directory / "model.json"
+        model.write_text('{"networkPath":"network.trt"}', encoding="utf-8")
+        (directory / "network.onnx").write_bytes(b"onnx")
+        (directory / "trt_info.json").write_text("{}", encoding="utf-8")
+        selected.append(directory)
+    monkeypatch.setattr(
+        runtime,
+        "get_preferences",
+        lambda: SimpleNamespace(
+            audio2face_model_directory=str(selected[0]),
+            audio2emotion_model_directory=str(selected[1]),
+        ),
+    )
+
+    controller = runtime.RuntimeController()
+    assert controller.model_directories(require_engine=False) == (
+        selected[0].resolve(),
+        selected[1].resolve(),
+    )
+    assert controller.model_availability(require_engine=False) == (
+        True,
+        "Both selected model folders contain the required files",
+    )
+
+
+def test_model_availability_explains_a_missing_selection(
+    runtime_module: tuple[ModuleType, ModuleType],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, _bpy = runtime_module
+    monkeypatch.setattr(
+        runtime,
+        "get_preferences",
+        lambda: SimpleNamespace(
+            audio2face_model_directory="",
+            audio2emotion_model_directory="",
+        ),
+    )
+
+    assert runtime.RuntimeController().model_availability(require_engine=False) == (
+        False,
+        "select the complete downloaded Audio2Face model folder in Add-on Preferences",
     )
 
 
@@ -229,7 +284,12 @@ def test_install_eligibility_requires_online_access_and_license_acceptance(
     monkeypatch.setattr(
         controller,
         "install_availability",
-        lambda: (True, "managed runtime is available"),
+        lambda: (True, "GPU worker package is available"),
+    )
+    monkeypatch.setattr(
+        controller,
+        "model_availability",
+        lambda **_kwargs: (True, "selected models are valid"),
     )
 
     bpy.app.online_access = False  # type: ignore[attr-defined]
@@ -254,7 +314,7 @@ def test_install_eligibility_requires_online_access_and_license_acceptance(
     )
     assert controller.install_eligibility() == (
         True,
-        "managed runtime is available",
+        "GPU worker package is available",
     )
 
 

@@ -56,14 +56,6 @@ set(A2F_BUNDLE_TRTEXEC_SOURCE_LICENSE "" CACHE FILEPATH
   "License for the pinned NVIDIA TensorRT source used to build bundled trtexec")
 set(A2F_BUNDLE_TRTEXEC_PROVENANCE "" CACHE FILEPATH
   "Pinned NVIDIA TensorRT tag/commit and bundled trtexec build provenance")
-set(A2F_BUNDLE_AUDIO2FACE_MODEL_DIR "" CACHE PATH
-  "Official Audio2Face-3D v3.0 ONNX model directory to bundle")
-set(A2F_BUNDLE_AUDIO2FACE_MODEL_LICENSE "" CACHE FILEPATH
-  "NVIDIA Audio2Face model license file to include in the runtime archive")
-set(A2F_BUNDLE_AUDIO2EMOTION_MODEL_DIR "" CACHE PATH
-  "Official Audio2Emotion v3.0 ONNX model directory to bundle")
-set(A2F_BUNDLE_AUDIO2EMOTION_MODEL_LICENSE "" CACHE FILEPATH
-  "NVIDIA Audio2Emotion model license file to include in the runtime archive")
 
 add_executable(audio2face_worker
   src/a2f_backend.cpp
@@ -142,20 +134,12 @@ if(A2F_WORKER_STAGE_RUNTIME)
 
   a2f_require_release_directory(A2F_CUDA_RUNTIME_DIR "CUDA runtime directory")
   a2f_require_release_directory(A2F_TENSORRT_RUNTIME_DIR "TensorRT runtime directory")
-  a2f_require_release_directory(A2F_BUNDLE_AUDIO2FACE_MODEL_DIR
-    "Audio2Face-3D v3.0 model directory")
-  a2f_require_release_directory(A2F_BUNDLE_AUDIO2EMOTION_MODEL_DIR
-    "Audio2Emotion v3.0 model directory")
   a2f_require_release_file(A2F_BUNDLE_TRTEXEC
     "Release-built NVIDIA TensorRT trtexec executable")
   a2f_require_release_file(A2F_BUNDLE_TRTEXEC_SOURCE_LICENSE
     "Pinned NVIDIA TensorRT source license")
   a2f_require_release_file(A2F_BUNDLE_TRTEXEC_PROVENANCE
     "Pinned NVIDIA TensorRT trtexec build provenance")
-  a2f_require_release_file(A2F_BUNDLE_AUDIO2FACE_MODEL_LICENSE
-    "Audio2Face model license")
-  a2f_require_release_file(A2F_BUNDLE_AUDIO2EMOTION_MODEL_LICENSE
-    "Audio2Emotion model license")
 
   set(_a2f_sdk_license "${A2F_SDK_SOURCE_DIR}/LICENSE.txt")
   set(_a2f_cuda_license "${A2F_SDK_SOURCE_DIR}/licenses/cuda-LICENSE.txt")
@@ -169,43 +153,6 @@ if(A2F_WORKER_STAGE_RUNTIME)
       _a2f_tensorrt_acknowledgements)
     a2f_require_release_file(${_a2f_sdk_notice} "Audio2Face SDK notice")
   endforeach()
-
-  function(a2f_validate_release_model directory label variable_name)
-    foreach(_a2f_model_file model.json network.onnx trt_info.json)
-      if(NOT EXISTS "${directory}/${_a2f_model_file}" OR
-         IS_DIRECTORY "${directory}/${_a2f_model_file}")
-        message(FATAL_ERROR
-          "Official ${label} ONNX model input is incomplete: "
-          "${directory}/${_a2f_model_file} is missing")
-      endif()
-    endforeach()
-    file(GLOB_RECURSE _a2f_model_inputs LIST_DIRECTORIES FALSE
-      "${directory}/*")
-    set(_a2f_prebuilt_engines)
-    foreach(_a2f_model_input IN LISTS _a2f_model_inputs)
-      get_filename_component(_a2f_model_extension "${_a2f_model_input}" LAST_EXT)
-      string(TOLOWER "${_a2f_model_extension}" _a2f_model_extension)
-      if(_a2f_model_extension STREQUAL ".trt" OR
-         _a2f_model_extension STREQUAL ".engine")
-        list(APPEND _a2f_prebuilt_engines "${_a2f_model_input}")
-      endif()
-    endforeach()
-    if(_a2f_prebuilt_engines)
-      message(FATAL_ERROR
-        "The downloadable runtime must be GPU-neutral and cannot contain "
-        "prebuilt TensorRT engines. Remove these files from ${variable_name}: "
-        "${_a2f_prebuilt_engines}")
-    endif()
-  endfunction()
-
-  a2f_validate_release_model(
-    "${A2F_BUNDLE_AUDIO2FACE_MODEL_DIR}"
-    "Audio2Face-3D v3.0"
-    "A2F_BUNDLE_AUDIO2FACE_MODEL_DIR")
-  a2f_validate_release_model(
-    "${A2F_BUNDLE_AUDIO2EMOTION_MODEL_DIR}"
-    "Audio2Emotion v3.0"
-    "A2F_BUNDLE_AUDIO2EMOTION_MODEL_DIR")
 
   set(_a2f_runtime_files "$<TARGET_FILE:audio2x-sdk::audio2x>")
 
@@ -285,16 +232,12 @@ set(A2F_RUNTIME_FILES [==[@A2F_RUNTIME_FILES@]==])
 set(A2F_TRTEXEC_FILE [==[@A2F_TRTEXEC_FILE@]==])
 set(A2F_TRTEXEC_SOURCE_LICENSE [==[@A2F_TRTEXEC_SOURCE_LICENSE@]==])
 set(A2F_TRTEXEC_PROVENANCE [==[@A2F_TRTEXEC_PROVENANCE@]==])
-set(A2F_AUDIO2FACE_MODEL_DIR [==[@A2F_AUDIO2FACE_MODEL_DIR@]==])
-set(A2F_AUDIO2EMOTION_MODEL_DIR [==[@A2F_AUDIO2EMOTION_MODEL_DIR@]==])
 set(A2F_PROJECT_LICENSE [==[@A2F_PROJECT_LICENSE@]==])
 set(A2F_THIRD_PARTY_NOTICES [==[@A2F_THIRD_PARTY_NOTICES@]==])
 set(A2F_SDK_LICENSE [==[@A2F_SDK_LICENSE@]==])
 set(A2F_CUDA_LICENSE [==[@A2F_CUDA_LICENSE@]==])
 set(A2F_TENSORRT_LICENSE [==[@A2F_TENSORRT_LICENSE@]==])
 set(A2F_TENSORRT_ACKNOWLEDGEMENTS [==[@A2F_TENSORRT_ACKNOWLEDGEMENTS@]==])
-set(A2F_AUDIO2FACE_MODEL_LICENSE [==[@A2F_AUDIO2FACE_MODEL_LICENSE@]==])
-set(A2F_AUDIO2EMOTION_MODEL_LICENSE [==[@A2F_AUDIO2EMOTION_MODEL_LICENSE@]==])
 ]====])
   set(A2F_STAGE_ROOT "${_a2f_runtime_root}")
   set(A2F_PLATFORM "${A2F_RUNTIME_PLATFORM}")
@@ -304,16 +247,12 @@ set(A2F_AUDIO2EMOTION_MODEL_LICENSE [==[@A2F_AUDIO2EMOTION_MODEL_LICENSE@]==])
   set(A2F_TRTEXEC_FILE "${A2F_BUNDLE_TRTEXEC}")
   set(A2F_TRTEXEC_SOURCE_LICENSE "${A2F_BUNDLE_TRTEXEC_SOURCE_LICENSE}")
   set(A2F_TRTEXEC_PROVENANCE "${A2F_BUNDLE_TRTEXEC_PROVENANCE}")
-  set(A2F_AUDIO2FACE_MODEL_DIR "${A2F_BUNDLE_AUDIO2FACE_MODEL_DIR}")
-  set(A2F_AUDIO2EMOTION_MODEL_DIR "${A2F_BUNDLE_AUDIO2EMOTION_MODEL_DIR}")
   set(A2F_PROJECT_LICENSE "${_a2f_project_license}")
   set(A2F_THIRD_PARTY_NOTICES "${_a2f_third_party_notices}")
   set(A2F_SDK_LICENSE "${_a2f_sdk_license}")
   set(A2F_CUDA_LICENSE "${_a2f_cuda_license}")
   set(A2F_TENSORRT_LICENSE "${_a2f_tensorrt_license}")
   set(A2F_TENSORRT_ACKNOWLEDGEMENTS "${_a2f_tensorrt_acknowledgements}")
-  set(A2F_AUDIO2FACE_MODEL_LICENSE "${A2F_BUNDLE_AUDIO2FACE_MODEL_LICENSE}")
-  set(A2F_AUDIO2EMOTION_MODEL_LICENSE "${A2F_BUNDLE_AUDIO2EMOTION_MODEL_LICENSE}")
   string(CONFIGURE "${_a2f_stage_config_content}" _a2f_stage_config_content @ONLY)
   file(GENERATE
     OUTPUT "${_a2f_stage_config}"

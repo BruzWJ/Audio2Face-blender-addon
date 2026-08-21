@@ -278,7 +278,9 @@ def _launch_spec(tmp_path: Path, trt_info: object) -> BundleLaunchSpec:
     for model_name in ("audio2face", "audio2emotion"):
         model_directory = tmp_path / "models" / model_name
         model_directory.mkdir(parents=True)
-        (model_directory / "model.json").write_text("{}", encoding="utf-8")
+        (model_directory / "model.json").write_text(
+            '{"networkPath":"network.trt"}', encoding="utf-8"
+        )
         (model_directory / "network.onnx").write_bytes(b"onnx")
         (model_directory / "trt_info.json").write_text(
             json.dumps(trt_info), encoding="utf-8"
@@ -325,6 +327,7 @@ def test_trt_build_plan_is_shell_free_pinned_and_forces_batch_one(tmp_path: Path
         str(spec.trtexec),
         f"--onnx={spec.audio2face_model.parent / 'network.onnx'}",
         f"--saveEngine={spec.audio2face_model.parent / 'network.trt'}",
+        "--device=0",
         "--fp16",
         "--minShapes=input:1x100x1024",
         "--optShapes=input:1x500x1024",
@@ -361,7 +364,15 @@ def test_trt_build_plan_rejects_invalid_model_metadata(
         )
 
 
-@pytest.mark.parametrize("reserved", ["--onnx=/tmp/other.onnx", "--saveEngine=/tmp/other.trt"])
+@pytest.mark.parametrize(
+    "reserved",
+    [
+        "--onnx=/tmp/other.onnx",
+        "--saveEngine=/tmp/other.trt",
+        "--device=1",
+        "--device 1",
+    ],
+)
 def test_trt_build_plan_rejects_model_attempt_to_override_managed_paths(
     tmp_path: Path, reserved: str
 ) -> None:
@@ -369,20 +380,49 @@ def test_trt_build_plan_rejects_model_attempt_to_override_managed_paths(
         tmp_path,
         {"trt_build_param": {"batch": [reserved]}, "defaults": {}},
     )
-    with pytest.raises(RuntimeInstallError, match="managed|reserved|onnx|saveEngine"):
+    with pytest.raises(RuntimeInstallError, match="override|onnx|saveEngine|device"):
         runtime_install._trt_build_plan(
             spec, spec.audio2face_model, "Audio2Face"
         )
 
 
-def test_fresh_install_rejects_a_prepackaged_gpu_engine(tmp_path: Path) -> None:
+def test_trt_build_plan_rejects_a_formatted_device_override(tmp_path: Path) -> None:
+    spec = _launch_spec(
+        tmp_path,
+        {
+            "trt_build_param": {"batch": ["--{OPTION}=1"]},
+            "defaults": {"OPTION": "device"},
+        },
+    )
+    with pytest.raises(RuntimeInstallError, match="device"):
+        runtime_install._trt_build_plan(
+            spec, spec.audio2face_model, "Audio2Face"
+        )
+
+
+def test_failed_model_rebuild_preserves_the_existing_gpu_engine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     spec = _launch_spec(
         tmp_path,
         {"trt_build_param": {"batch": []}, "defaults": {}},
     )
-    spec.audio2emotion_model.with_name("network.trt").write_bytes(b"foreign engine")
+    output = spec.audio2emotion_model.with_name("network.trt")
+    output.write_bytes(b"existing engine")
 
-    with pytest.raises(RuntimeInstallError, match="prebuilt|prepackaged|already contains"):
+    class FailedBuild:
+        returncode = 1
+
+        def poll(self) -> int:
+            return 1
+
+    monkeypatch.setattr(
+        runtime_install.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: FailedBuild(),
+    )
+
+    with pytest.raises(RuntimeInstallError, match="optimization failed"):
         runtime_install._build_trt_engine(
             spec,
             spec.audio2emotion_model,
@@ -392,6 +432,8 @@ def test_fresh_install_rejects_a_prepackaged_gpu_engine(tmp_path: Path) -> None:
             progress=lambda _event: None,
             canceled=threading.Event(),
         )
+    assert output.read_bytes() == b"existing engine"
+    assert not list(output.parent.glob(".audio2face-*.network.trt"))
 
 
 def test_model_builds_use_distinct_progress_and_log_files(
@@ -416,8 +458,10 @@ def test_model_builds_use_distinct_progress_and_log_files(
         return FinishedBuild()
 
     monkeypatch.setattr(runtime_install.subprocess, "Popen", fake_popen)
+    spec.audio2face_model.with_name("network.trt").write_bytes(b"old face engine")
+    spec.audio2emotion_model.with_name("network.trt").write_bytes(b"old emotion engine")
     progress: list[object] = []
-    runtime_install._build_trt_engine(
+    audio2face_candidate = runtime_install._build_trt_engine(
         spec,
         spec.audio2face_model,
         "audio2face",
@@ -426,7 +470,7 @@ def test_model_builds_use_distinct_progress_and_log_files(
         progress=progress.append,
         canceled=threading.Event(),
     )
-    runtime_install._build_trt_engine(
+    audio2emotion_candidate = runtime_install._build_trt_engine(
         spec,
         spec.audio2emotion_model,
         "audio2emotion",
@@ -443,9 +487,77 @@ def test_model_builds_use_distinct_progress_and_log_files(
     assert [event.progress for event in progress] == [0.87, 0.93]  # type: ignore[attr-defined]
     assert "Audio2Face" in progress[0].message  # type: ignore[attr-defined]
     assert "Audio2Emotion" in progress[1].message  # type: ignore[attr-defined]
+    assert spec.audio2face_model.with_name("network.trt").read_bytes() == b"old face engine"
+    assert spec.audio2emotion_model.with_name("network.trt").read_bytes() == b"old emotion engine"
+    assert audio2face_candidate.temporary.read_bytes() == b"local engine"
+    assert audio2emotion_candidate.temporary.read_bytes() == b"local engine"
     assert (spec.root / "trtexec-audio2face-install.log").read_text() == "completed\n"
     assert (spec.root / "trtexec-audio2emotion-install.log").read_text() == "completed\n"
     assert not (spec.root / "trtexec-install.log").exists()
+    runtime_install._cleanup_engine_candidates(
+        (audio2face_candidate, audio2emotion_candidate)
+    )
+
+
+def test_windows_unicode_model_path_builds_through_an_ascii_temp_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = _launch_spec(
+        tmp_path / "模型",
+        {"trt_build_param": {"batch": []}, "defaults": {}},
+    )
+    spec = BundleLaunchSpec(
+        platform="windows-x64",
+        root=original.root,
+        executable=original.executable,
+        trtexec=original.trtexec,
+        env=original.env,
+        audio2face_model=original.audio2face_model,
+        audio2emotion_model=original.audio2emotion_model,
+    )
+    ascii_directory = tmp_path / "ascii-trt"
+
+    def make_ascii_directory() -> Path:
+        ascii_directory.mkdir()
+        return ascii_directory
+
+    class FinishedBuild:
+        returncode = 0
+
+        def poll(self) -> int:
+            return 0
+
+    def fake_popen(command: list[str], **_kwargs: object) -> FinishedBuild:
+        onnx = next(item.partition("=")[2] for item in command if item.startswith("--onnx="))
+        output = next(
+            item.partition("=")[2] for item in command if item.startswith("--saveEngine=")
+        )
+        assert onnx.isascii()
+        assert output.isascii()
+        assert Path(onnx).read_bytes() == b"onnx"
+        Path(output).write_bytes(b"windows engine")
+        return FinishedBuild()
+
+    monkeypatch.setattr(
+        runtime_install,
+        "_windows_ascii_build_directory",
+        make_ascii_directory,
+    )
+    monkeypatch.setattr(runtime_install.subprocess, "Popen", fake_popen)
+    candidate = runtime_install._build_trt_engine(
+        spec,
+        spec.audio2face_model,
+        "audio2face",
+        "Audio2Face",
+        progress_value=0.87,
+        progress=lambda _event: None,
+        canceled=threading.Event(),
+    )
+
+    assert candidate.temporary.read_bytes() == b"windows engine"
+    assert candidate.destination == spec.audio2face_model.with_name("network.trt")
+    assert not ascii_directory.exists()
+    runtime_install._cleanup_engine_candidates((candidate,))
 
 
 def _elf_x64() -> bytes:
@@ -461,22 +573,14 @@ def _valid_linux_runtime_zip() -> tuple[bytes, int]:
         "platform": "linux-x64",
         "worker": "bin/audio2face_worker",
         "trtexec": "bin/trtexec",
-        "audio2face_model": "models/audio2face/model.json",
-        "audio2emotion_model": "models/audio2emotion/model.json",
         "library_directories": ["lib"],
         "licenses": ["licenses/THIRD_PARTY.txt"],
-    }
-    trt_info = {
-        "trt_build_param": {"batch": ["--optShapes=input:{OPT_BATCH_SIZE}x4"]},
-        "defaults": {"OPT_BATCH_SIZE": 4},
     }
     files = [
         ("runtime/", b"", stat.S_IFDIR | 0o755),
         ("runtime/linux-x64/", b"", stat.S_IFDIR | 0o755),
         ("runtime/linux-x64/bin/", b"", stat.S_IFDIR | 0o755),
         ("runtime/linux-x64/lib/", b"", stat.S_IFDIR | 0o755),
-        ("runtime/linux-x64/models/audio2face/", b"", stat.S_IFDIR | 0o755),
-        ("runtime/linux-x64/models/audio2emotion/", b"", stat.S_IFDIR | 0o755),
         ("runtime/linux-x64/licenses/", b"", stat.S_IFDIR | 0o755),
         (
             "runtime/linux-x64/bundle.json",
@@ -493,15 +597,6 @@ def _valid_linux_runtime_zip() -> tuple[bytes, int]:
             _elf_x64(),
             stat.S_IFREG | 0o755,
         ),
-        *[
-            (f"runtime/linux-x64/models/{model_name}/{filename}", data, stat.S_IFREG | 0o644)
-            for model_name in ("audio2face", "audio2emotion")
-            for filename, data in (
-                ("model.json", b"{}"),
-                ("network.onnx", b"onnx"),
-                ("trt_info.json", json.dumps(trt_info).encode("utf-8")),
-            )
-        ],
         (
             "runtime/linux-x64/licenses/THIRD_PARTY.txt",
             b"notices",
@@ -509,6 +604,25 @@ def _valid_linux_runtime_zip() -> tuple[bytes, int]:
         ),
     ]
     return _zip_bytes(files), sum(len(data) for name, data, _mode in files if not name.endswith("/"))
+
+
+def _external_model_directories(root: Path) -> tuple[Path, Path]:
+    trt_info = {
+        "trt_build_param": {"batch": ["--optShapes=input:{OPT_BATCH_SIZE}x4"]},
+        "defaults": {"OPT_BATCH_SIZE": 4},
+    }
+    directories: list[Path] = []
+    for model_name in ("audio2face", "audio2emotion"):
+        directory = root / model_name
+        directory.mkdir(parents=True)
+        model = directory / "model.json"
+        model.write_text('{"networkPath":"network.trt"}', encoding="utf-8")
+        (directory / "network.onnx").write_bytes(b"onnx")
+        (directory / "trt_info.json").write_text(
+            json.dumps(trt_info), encoding="utf-8"
+        )
+        directories.append(directory)
+    return directories[0], directories[1]
 
 
 def test_atomic_activation_replaces_existing_runtime(tmp_path: Path) -> None:
@@ -562,6 +676,59 @@ def test_atomic_activation_rolls_back_if_new_runtime_cannot_be_promoted(
     assert (active / "marker").read_text(encoding="utf-8") == "old"
     assert (staged / "marker").read_text(encoding="utf-8") == "new"
     assert not (data_root / "runtime/.linux-x64.previous").exists()
+
+
+def test_combined_activation_rolls_back_both_external_engines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    staging = tmp_path / "staging"
+    data_root = tmp_path / "data"
+    staged_worker = staging / "runtime/linux-x64"
+    active_worker = data_root / "runtime/linux-x64"
+    staged_worker.mkdir(parents=True)
+    active_worker.mkdir(parents=True)
+    (staged_worker / "marker").write_text("new worker", encoding="utf-8")
+    (active_worker / "marker").write_text("old worker", encoding="utf-8")
+
+    engine_directory = tmp_path / "models"
+    engine_directory.mkdir()
+    destinations = (
+        engine_directory / "face.network.trt",
+        engine_directory / "emotion.network.trt",
+    )
+    temporaries = (
+        engine_directory / ".face.candidate.trt",
+        engine_directory / ".emotion.candidate.trt",
+    )
+    for index, destination in enumerate(destinations):
+        destination.write_bytes(f"old {index}".encode())
+        temporaries[index].write_bytes(f"new {index}".encode())
+    candidates = tuple(
+        runtime_install._EngineCandidate(temporary, destination)
+        for temporary, destination in zip(temporaries, destinations, strict=True)
+    )
+
+    real_replace = os.replace
+
+    def fail_second_candidate(source: object, destination: object) -> None:
+        if Path(source) == temporaries[1]:
+            raise OSError("simulated second-engine activation failure")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(runtime_install.os, "replace", fail_second_candidate)
+    worker_plan = runtime_install._prepare_activation(
+        staging, data_root, "linux-x64"
+    )
+    with pytest.raises(OSError, match="second-engine"):
+        runtime_install._activate_worker_and_engines(
+            worker_plan,
+            candidates,  # type: ignore[arg-type]
+        )
+
+    assert (active_worker / "marker").read_text(encoding="utf-8") == "old worker"
+    assert destinations[0].read_bytes() == b"old 0"
+    assert destinations[1].read_bytes() == b"old 1"
+    assert not list(engine_directory.glob(".audio2face-backup-*"))
 
 
 def _start_lock_holder(lock_path: Path, ready_path: Path) -> subprocess.Popen[str]:
@@ -619,6 +786,8 @@ def test_install_lock_blocks_a_second_process_and_crash_releases_it(
             runtime_install.install_managed_runtime(
                 _artifact(b"unused"),
                 data_root,
+                audio2face_model_directory=tmp_path / "unused-face",
+                audio2emotion_model_directory=tmp_path / "unused-emotion",
                 progress=lambda _event: None,
                 canceled=threading.Event(),
                 activation_lock=threading.Lock(),
@@ -675,6 +844,9 @@ def test_install_downloads_builds_and_atomically_activates_runtime(
     old_runtime = data_root / "runtime/linux-x64"
     old_runtime.mkdir(parents=True)
     (old_runtime / "old-marker").write_text("old", encoding="utf-8")
+    audio2face_directory, audio2emotion_directory = _external_model_directories(
+        tmp_path / "selected models"
+    )
 
     built_models: list[str] = []
 
@@ -684,15 +856,22 @@ def test_install_downloads_builds_and_atomically_activates_runtime(
         model_id: str,
         _model_label: str,
         **_kwargs: object,
-    ) -> None:
+    ) -> object:
         built_models.append(model_id)
-        (model.parent / "network.trt").write_bytes(f"{model_id} engine".encode())
+        candidate = model.parent / f".{model_id}.candidate.trt"
+        candidate.write_bytes(f"{model_id} engine".encode())
+        return runtime_install._EngineCandidate(
+            temporary=candidate,
+            destination=model.parent / "network.trt",
+        )
 
     monkeypatch.setattr(runtime_install, "_build_trt_engine", fake_build)
     progress: list[object] = []
     result = runtime_install.install_managed_runtime(
         artifact,
         data_root,
+        audio2face_model_directory=audio2face_directory,
+        audio2emotion_model_directory=audio2emotion_directory,
         progress=progress.append,
         canceled=threading.Event(),
         activation_lock=threading.Lock(),
@@ -731,6 +910,9 @@ def test_activation_gate_only_covers_cancellation_check_and_renames(
     stale_backup.mkdir(parents=True)
     (active / "marker").write_text("old active", encoding="utf-8")
     (stale_backup / "marker").write_text("stale backup", encoding="utf-8")
+    audio2face_directory, audio2emotion_directory = _external_model_directories(
+        tmp_path / "selected models"
+    )
 
     class TrackingGate:
         held = False
@@ -750,8 +932,13 @@ def test_activation_gate_only_covers_cancellation_check_and_renames(
         _model_id: str,
         _model_label: str,
         **_kwargs: object,
-    ) -> None:
-        (model.parent / "network.trt").write_bytes(b"local engine")
+    ) -> object:
+        candidate = model.parent / f".{_model_id}.candidate.trt"
+        candidate.write_bytes(b"local engine")
+        return runtime_install._EngineCandidate(
+            temporary=candidate,
+            destination=model.parent / "network.trt",
+        )
 
     real_remove = runtime_install._remove_activation_path
     backup_removals = 0
@@ -785,6 +972,8 @@ def test_activation_gate_only_covers_cancellation_check_and_renames(
     result = runtime_install.install_managed_runtime(
         artifact,
         data_root,
+        audio2face_model_directory=audio2face_directory,
+        audio2emotion_model_directory=audio2emotion_directory,
         activation_lock=gate,
         progress=track_progress,
         canceled=threading.Event(),
@@ -793,7 +982,7 @@ def test_activation_gate_only_covers_cancellation_check_and_renames(
 
     assert not gate.held
     assert backup_removals == 2
-    assert rename_gate_states == [True, True]
+    assert rename_gate_states == [True, True, True, True]
     assert result.audio2face_model.with_name("network.trt").read_bytes() == b"local engine"
     assert result.audio2emotion_model.with_name("network.trt").read_bytes() == b"local engine"
     assert (stale_backup / "marker").read_text(encoding="utf-8") == "old active"
@@ -818,6 +1007,9 @@ def test_failed_model_build_keeps_previous_runtime_active_and_cleans_staging(
     old_runtime.mkdir(parents=True)
     marker = old_runtime / "marker"
     marker.write_text("old", encoding="utf-8")
+    audio2face_directory, audio2emotion_directory = _external_model_directories(
+        tmp_path / "selected models"
+    )
 
     built_models: list[str] = []
 
@@ -827,17 +1019,24 @@ def test_failed_model_build_keeps_previous_runtime_active_and_cleans_staging(
         model_id: str,
         _model_label: str,
         **_kwargs: object,
-    ) -> None:
+    ) -> object:
         built_models.append(model_id)
         if model_id == "audio2emotion":
             raise RuntimeInstallError("simulated TensorRT failure")
-        (model.parent / "network.trt").write_bytes(b"temporary engine")
+        candidate = model.parent / ".audio2face.candidate.trt"
+        candidate.write_bytes(b"temporary engine")
+        return runtime_install._EngineCandidate(
+            temporary=candidate,
+            destination=model.parent / "network.trt",
+        )
 
     monkeypatch.setattr(runtime_install, "_build_trt_engine", fail_build)
     with pytest.raises(RuntimeInstallError, match="simulated TensorRT failure"):
         runtime_install.install_managed_runtime(
             artifact,
             data_root,
+            audio2face_model_directory=audio2face_directory,
+            audio2emotion_model_directory=audio2emotion_directory,
             progress=lambda _event: None,
             canceled=threading.Event(),
             activation_lock=threading.Lock(),
@@ -846,4 +1045,7 @@ def test_failed_model_build_keeps_previous_runtime_active_and_cleans_staging(
 
     assert marker.read_text(encoding="utf-8") == "old"
     assert built_models == ["audio2face", "audio2emotion"]
+    assert not (audio2face_directory / "network.trt").exists()
+    assert not (audio2emotion_directory / "network.trt").exists()
+    assert not list(audio2face_directory.glob("*.candidate.trt"))
     assert not list(data_root.glob(".a2f-install-*"))

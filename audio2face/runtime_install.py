@@ -1,4 +1,4 @@
-"""Secure one-time installation of the local Audio2Face runtime and model.
+"""Install the native worker and optimize two user-selected model folders.
 
 This module performs blocking work and deliberately has no :mod:`bpy` import.
 Blender runs :func:`install_managed_runtime` on a background thread and consumes
@@ -176,7 +176,7 @@ class _InterprocessInstallLock:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise RuntimeInstallError(
-                        "another Blender instance is installing the managed runtime; "
+                        "another Blender instance is installing the GPU worker package; "
                         "timed out waiting for its install lock"
                     )
                 wait_time = min(self.poll_interval, remaining)
@@ -222,7 +222,7 @@ def _emit(callback: ProgressCallback, stage: str, progress: float, message: str)
 
 def _check_cancelled(canceled: threading.Event) -> None:
     if canceled.is_set():
-        raise RuntimeInstallCancelled("managed-runtime installation was canceled")
+        raise RuntimeInstallCancelled("GPU worker installation was canceled")
 
 
 def _download_archive(
@@ -286,14 +286,14 @@ def _download_archive(
                         progress,
                         "downloading",
                         0.75 * downloaded / artifact.size,
-                        f"Downloading managed runtime ({downloaded / (1024**2):.1f} MiB)",
+                        f"Downloading GPU worker package ({downloaded / (1024**2):.1f} MiB)",
                     )
             output.flush()
             os.fsync(output.fileno())
     except RuntimeInstallError:
         raise
     except Exception as exc:
-        raise RuntimeInstallError(f"managed-runtime download failed: {exc}") from exc
+        raise RuntimeInstallError(f"GPU worker package download failed: {exc}") from exc
 
     if downloaded != artifact.size:
         raise RuntimeInstallError(
@@ -389,43 +389,47 @@ def _extract_archive(
     except RuntimeInstallError:
         raise
     except (OSError, zipfile.BadZipFile, zipfile.LargeZipFile) as exc:
-        raise RuntimeInstallError(f"cannot extract managed runtime: {exc}") from exc
+        raise RuntimeInstallError(f"cannot extract GPU worker package: {exc}") from exc
 
 
 def _trt_build_plan(
     spec: BundleLaunchSpec,
     model: Path,
     model_label: str,
+    *,
+    onnx_path: Path | None = None,
+    output_path: Path | None = None,
 ) -> tuple[list[str], str]:
     """Load model metadata once and derive the command and progress message."""
 
     model_directory = model.parent
-    onnx_path = model_directory / "network.onnx"
+    source_onnx_path = model_directory / "network.onnx"
+    onnx_path = onnx_path or source_onnx_path
     info_path = model_directory / "trt_info.json"
-    output_path = model_directory / "network.trt"
-    if not onnx_path.is_file() or not info_path.is_file():
-        raise RuntimeInstallError("managed model is missing network.onnx or trt_info.json")
+    output_path = output_path or model_directory / "network.trt"
+    if not source_onnx_path.is_file() or not info_path.is_file():
+        raise RuntimeInstallError("selected model is missing network.onnx or trt_info.json")
     try:
         with info_path.open("r", encoding="utf-8") as handle:
             document = json.load(handle)
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise RuntimeInstallError(f"cannot read managed model TRT settings: {exc}") from exc
+        raise RuntimeInstallError(f"cannot read selected model TRT settings: {exc}") from exc
     if not isinstance(document, dict):
-        raise RuntimeInstallError("managed model trt_info.json must be an object")
+        raise RuntimeInstallError("selected model trt_info.json must be an object")
     try:
         build_parameters = document["trt_build_param"]
         defaults = document["defaults"]
     except KeyError as exc:
         raise RuntimeInstallError(
-            "managed model TRT settings must define trt_build_param and defaults"
+            "selected model TRT settings must define trt_build_param and defaults"
         ) from exc
     if not isinstance(build_parameters, dict) or not isinstance(defaults, dict):
-        raise RuntimeInstallError("managed model TRT settings have an invalid structure")
+        raise RuntimeInstallError("selected model TRT settings have an invalid structure")
     trt_parameters: list[str] = []
     for group, parameters in build_parameters.items():
         if not isinstance(group, str) or not group:
             raise RuntimeInstallError(
-                "managed model TRT parameter group names must be non-empty strings"
+                "selected model TRT parameter group names must be non-empty strings"
             )
         if not isinstance(parameters, list) or not all(
             isinstance(item, str)
@@ -437,22 +441,15 @@ def _trt_build_plan(
             for item in parameters
         ):
             raise RuntimeInstallError(
-                f"managed model TRT settings group {group!r} is invalid"
+                f"selected model TRT settings group {group!r} is invalid"
             )
         trt_parameters.extend(parameters)
-    installer_owned_options = {"--onnx", "--saveengine"}
-    for parameter in trt_parameters:
-        option = parameter.partition("=")[0].casefold()
-        if option in installer_owned_options:
-            raise RuntimeInstallError(
-                f"managed model TRT settings may not override installer option {option}"
-            )
     format_values: dict[str, Any] = {}
     for name, value in defaults.items():
         if not isinstance(name, str) or isinstance(value, bool) or not isinstance(
             value, (int, float, str)
         ):
-            raise RuntimeInstallError("managed model TRT defaults are invalid")
+            raise RuntimeInstallError("selected model TRT defaults are invalid")
         format_values[name] = value
     # Blender previews one character stream, so optimize every conventional
     # batch placeholder for exactly one track.
@@ -463,11 +460,19 @@ def _trt_build_plan(
     try:
         formatted = [parameter.format(**format_values) for parameter in trt_parameters]
     except (KeyError, ValueError) as exc:
-        raise RuntimeInstallError(f"managed model TRT settings cannot be formatted: {exc}") from exc
+        raise RuntimeInstallError(f"selected model TRT settings cannot be formatted: {exc}") from exc
+    installer_owned_options = {"--onnx", "--saveengine", "--device"}
+    for parameter in formatted:
+        option = parameter.split("=", 1)[0].split(maxsplit=1)[0].casefold()
+        if option in installer_owned_options:
+            raise RuntimeInstallError(
+                f"model TRT settings may not override installer option {option}"
+            )
     command = [
         str(spec.trtexec),
         f"--onnx={onnx_path}",
         f"--saveEngine={output_path}",
+        "--device=0",
         *formatted,
     ]
     message = f"Optimizing the {model_label} model for this GPU"
@@ -482,6 +487,32 @@ def _trt_build_plan(
     return command, message
 
 
+def _windows_ascii_build_directory() -> Path:
+    """Create an ASCII-only temp directory for TensorRT's Windows parser."""
+
+    candidates = [Path(tempfile.gettempdir())]
+    system_root = os.environ.get("SystemRoot")
+    if system_root:
+        candidates.append(Path(system_root) / "Temp")
+    failures: list[str] = []
+    for candidate in candidates:
+        if not str(candidate).isascii():
+            continue
+        try:
+            directory = Path(tempfile.mkdtemp(prefix="audio2face-trt-", dir=candidate))
+        except OSError as exc:
+            failures.append(f"{candidate}: {exc}")
+            continue
+        if str(directory).isascii():
+            return directory
+        shutil.rmtree(directory, ignore_errors=True)
+    detail = f" ({'; '.join(failures)})" if failures else ""
+    raise RuntimeInstallError(
+        "TensorRT on Windows requires an ASCII temporary path; no writable "
+        f"ASCII temp directory is available{detail}"
+    )
+
+
 def _build_trt_engine(
     spec: BundleLaunchSpec,
     model: Path,
@@ -491,23 +522,53 @@ def _build_trt_engine(
     progress_value: float,
     progress: ProgressCallback,
     canceled: threading.Event,
-) -> None:
+) -> _EngineCandidate:
     output = model.parent / "network.trt"
-    if output.exists():
-        raise RuntimeInstallError(
-            f"managed runtime archive may not contain a prebuilt {model_label} "
-            "network.trt; "
-            "the engine must be optimized locally for this GPU"
-        )
-    command, build_message = _trt_build_plan(spec, model, model_label)
-    log_path = spec.root / f"trtexec-{model_id}-install.log"
-    _emit(
-        progress,
-        f"building_{model_id}_model",
-        progress_value,
-        build_message,
-    )
     try:
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=".audio2face-",
+            suffix=".network.trt",
+            dir=model.parent,
+        )
+        os.close(descriptor)
+        temporary_output = Path(temporary_name)
+        temporary_output.unlink()
+    except OSError as exc:
+        raise RuntimeInstallError(
+            f"cannot create the {model_label} model build output beside model.json: {exc}"
+        ) from exc
+    log_path = spec.root / f"trtexec-{model_id}-install.log"
+    candidate_ready = False
+    ascii_build_directory: Path | None = None
+    try:
+        command_onnx = model.parent / "network.onnx"
+        command_output = temporary_output
+        if spec.platform == "windows-x64" and not (
+            str(command_onnx).isascii() and str(command_output).isascii()
+        ):
+            ascii_build_directory = _windows_ascii_build_directory()
+            command_onnx = ascii_build_directory / "network.onnx"
+            command_output = ascii_build_directory / "network.trt"
+        command, build_message = _trt_build_plan(
+            spec,
+            model,
+            model_label,
+            onnx_path=command_onnx,
+            output_path=command_output,
+        )
+        _emit(
+            progress,
+            f"building_{model_id}_model",
+            progress_value,
+            build_message,
+        )
+        if ascii_build_directory is not None:
+            try:
+                shutil.copyfile(model.parent / "network.onnx", command_onnx)
+            except OSError as exc:
+                raise RuntimeInstallError(
+                    f"cannot stage the {model_label} ONNX file for TensorRT: {exc}"
+                ) from exc
         with log_path.open("w", encoding="utf-8") as log:
             process = subprocess.Popen(
                 command,
@@ -527,20 +588,52 @@ def _build_trt_engine(
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait(timeout=2.0)
-                raise RuntimeInstallCancelled("managed-runtime installation was canceled")
+                raise RuntimeInstallCancelled("GPU worker installation was canceled")
             returncode = process.returncode
-    except OSError as exc:
-        raise RuntimeInstallError(f"could not run bundled trtexec: {exc}") from exc
-    if returncode != 0 or not output.is_file() or output.stat().st_size == 0:
-        try:
-            tail = log_path.read_text(encoding="utf-8", errors="replace")[-4000:]
-        except OSError:
-            tail = ""
-        detail = f"\n{tail}" if tail else ""
-        raise RuntimeInstallError(
-            f"TensorRT {model_label} model optimization failed with exit code "
-            f"{returncode}{detail}"
+        if (
+            returncode != 0
+            or not command_output.is_file()
+            or command_output.stat().st_size == 0
+        ):
+            try:
+                tail = log_path.read_text(encoding="utf-8", errors="replace")[-4000:]
+            except OSError:
+                tail = ""
+            detail = f"\n{tail}" if tail else ""
+            raise RuntimeInstallError(
+                f"TensorRT {model_label} model optimization failed with exit code "
+                f"{returncode}{detail}"
+            )
+        if command_output != temporary_output:
+            try:
+                shutil.copyfile(command_output, temporary_output)
+            except OSError as exc:
+                raise RuntimeInstallError(
+                    f"cannot copy the optimized {model_label} engine to its model folder: {exc}"
+                ) from exc
+        candidate_ready = True
+        return _EngineCandidate(
+            temporary=temporary_output,
+            destination=output,
         )
+    except RuntimeInstallError:
+        raise
+    except OSError as exc:
+        raise RuntimeInstallError(f"could not build the {model_label} TensorRT engine: {exc}") from exc
+    finally:
+        if not candidate_ready:
+            try:
+                temporary_output.unlink(missing_ok=True)
+            except OSError:
+                pass
+        if ascii_build_directory is not None:
+            shutil.rmtree(ascii_build_directory, ignore_errors=True)
+
+
+@dataclass(frozen=True, slots=True)
+class _EngineCandidate:
+    temporary: Path
+    destination: Path
 
 
 @dataclass(frozen=True, slots=True)
@@ -559,6 +652,97 @@ def _remove_activation_path(path: Path) -> None:
         path.unlink()
     else:
         shutil.rmtree(path)
+
+
+def _engine_backup_path(destination: Path) -> Path:
+    """Reserve a unique same-directory rollback name without keeping a file."""
+
+    try:
+        descriptor, name = tempfile.mkstemp(
+            prefix=".audio2face-backup-",
+            suffix=".network.trt",
+            dir=destination.parent,
+        )
+        os.close(descriptor)
+        backup = Path(name)
+        backup.unlink()
+        return backup
+    except OSError as exc:
+        raise RuntimeInstallError(
+            f"cannot prepare a rollback path for {destination}: {exc}"
+        ) from exc
+
+
+def _activate_worker_and_engines(
+    worker: _ActivationPlan,
+    engines: tuple[_EngineCandidate, _EngineCandidate],
+) -> tuple[Path | None, tuple[Path, ...]]:
+    """Commit the worker and both external engines, rolling back on failure."""
+
+    if engines[0].destination == engines[1].destination:
+        raise RuntimeInstallError("Audio2Face and Audio2Emotion engine paths collide")
+    for engine in engines:
+        if engine.temporary.parent != engine.destination.parent:
+            raise RuntimeInstallError(
+                "TensorRT engine candidates must be beside their selected model.json"
+            )
+        if not engine.temporary.is_file() or engine.temporary.stat().st_size == 0:
+            raise RuntimeInstallError(
+                f"TensorRT engine candidate is missing or empty: {engine.temporary}"
+            )
+
+    backups: list[tuple[Path, Path]] = []
+    installed: list[Path] = []
+    try:
+        for engine in engines:
+            if _path_exists(engine.destination):
+                backup = _engine_backup_path(engine.destination)
+                os.replace(engine.destination, backup)
+                backups.append((engine.destination, backup))
+        for engine in engines:
+            os.replace(engine.temporary, engine.destination)
+            installed.append(engine.destination)
+        worker_backup = _atomic_activate(worker)
+        return worker_backup, tuple(backup for _destination, backup in backups)
+    except Exception as exc:
+        rollback_errors: list[str] = []
+        for destination in reversed(installed):
+            try:
+                _remove_activation_path(destination)
+            except Exception as rollback_exc:
+                rollback_errors.append(f"remove {destination}: {rollback_exc}")
+        for destination, backup in reversed(backups):
+            try:
+                if _path_exists(destination):
+                    _remove_activation_path(destination)
+                os.replace(backup, destination)
+            except Exception as rollback_exc:
+                rollback_errors.append(f"restore {destination}: {rollback_exc}")
+        if rollback_errors:
+            raise RuntimeInstallError(
+                "GPU worker/model activation failed and rollback was incomplete: "
+                + "; ".join(rollback_errors)
+            ) from exc
+        raise
+
+
+def _cleanup_engine_candidates(engines: tuple[_EngineCandidate, ...]) -> None:
+    for engine in engines:
+        try:
+            engine.temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _cleanup_engine_backups(backups: tuple[Path, ...]) -> None:
+    for backup in backups:
+        try:
+            _remove_activation_path(backup)
+        except Exception:
+            # The new engine is active. A uniquely named inactive backup is
+            # safer to leave in place than turning a successful commit into an
+            # apparent failure.
+            pass
 
 
 def _prepare_activation(
@@ -643,23 +827,26 @@ def install_managed_runtime(
     artifact: RuntimeArtifact,
     data_root: str | Path,
     *,
+    audio2face_model_directory: str | Path,
+    audio2emotion_model_directory: str | Path,
     progress: ProgressCallback,
     canceled: threading.Event,
     activation_lock: Any,
     open_url: OpenUrl = urllib.request.urlopen,
     interprocess_lock_timeout: float = INSTALL_LOCK_TIMEOUT_SECONDS,
 ) -> BundleLaunchSpec:
-    """Download, verify, optimize, and atomically activate one runtime release."""
+    """Install one native worker release and optimize the selected models."""
 
     root = Path(data_root).expanduser().resolve(strict=False)
     root.mkdir(parents=True, exist_ok=True)
     temporary: Path | None = None
+    engine_candidates: tuple[_EngineCandidate, ...] = ()
     try:
         _emit(
             progress,
             "waiting_for_install_lock",
             0.0,
-            "Waiting for exclusive managed-runtime installer access",
+            "Waiting for exclusive GPU worker installer access",
         )
         with _InterprocessInstallLock(
             root / INSTALL_LOCK_FILENAME,
@@ -670,7 +857,7 @@ def install_managed_runtime(
             archive = temporary / "runtime.zip"
             extracted = temporary / "extracted"
             extracted.mkdir()
-            _emit(progress, "downloading", 0.0, "Starting managed-runtime download")
+            _emit(progress, "downloading", 0.0, "Starting GPU worker package download")
             _download_archive(
                 artifact,
                 archive,
@@ -689,6 +876,8 @@ def install_managed_runtime(
             try:
                 staged_spec = resolve_runtime_bundle(
                     extracted,
+                    audio2face_model_directory=audio2face_model_directory,
+                    audio2emotion_model_directory=audio2emotion_model_directory,
                     platform=artifact.platform,
                     require_engine=False,
                 )
@@ -700,7 +889,7 @@ def install_managed_runtime(
                     f"runtime archive may not provide the installer-owned {RUNTIME_RECEIPT_FILENAME}"
                 )
             receipt.write_text(f"{artifact.sha256}\n", encoding="ascii")
-            _build_trt_engine(
+            audio2face_candidate = _build_trt_engine(
                 staged_spec,
                 staged_spec.audio2face_model,
                 "audio2face",
@@ -709,37 +898,39 @@ def install_managed_runtime(
                 progress=progress,
                 canceled=canceled,
             )
-            _build_trt_engine(
-                staged_spec,
-                staged_spec.audio2emotion_model,
-                "audio2emotion",
-                "Audio2Emotion",
-                progress_value=0.93,
-                progress=progress,
-                canceled=canceled,
-            )
             try:
-                staged_spec = resolve_runtime_bundle(
-                    extracted,
-                    platform=artifact.platform,
-                    require_engine=True,
+                audio2emotion_candidate = _build_trt_engine(
+                    staged_spec,
+                    staged_spec.audio2emotion_model,
+                    "audio2emotion",
+                    "Audio2Emotion",
+                    progress_value=0.93,
+                    progress=progress,
+                    canceled=canceled,
                 )
-                validate_install_receipt(staged_spec, artifact)
-            except BundleError as exc:
-                raise RuntimeInstallError(f"optimized runtime bundle is invalid: {exc}") from exc
+            except Exception:
+                _cleanup_engine_candidates((audio2face_candidate,))
+                raise
+            engine_candidates = (audio2face_candidate, audio2emotion_candidate)
+            validate_install_receipt(staged_spec, artifact)
 
             # Stale-backup deletion can be large, so it deliberately happens
             # before acquiring Blender's process-local cancellation gate.
             activation = _prepare_activation(extracted, root, artifact.platform)
-            _emit(progress, "activating", 0.99, "Activating managed runtime")
+            _emit(progress, "activating", 0.99, "Activating GPU worker and models")
             with activation_lock:
                 _check_cancelled(canceled)
-                backup = _atomic_activate(activation)
+                worker_backup, engine_backups = _activate_worker_and_engines(
+                    activation,
+                    (audio2face_candidate, audio2emotion_candidate),
+                )
 
-            # The staged runtime was fully validated before the atomic rename.
-            _cleanup_activation_backup(backup)
+            _cleanup_activation_backup(worker_backup)
+            _cleanup_engine_backups(engine_backups)
             result = resolve_runtime_bundle(
                 root,
+                audio2face_model_directory=audio2face_model_directory,
+                audio2emotion_model_directory=audio2emotion_model_directory,
                 platform=artifact.platform,
                 require_engine=True,
             )
@@ -747,13 +938,14 @@ def install_managed_runtime(
                 progress,
                 "complete",
                 1.0,
-                "Managed runtime and both NVIDIA models are ready",
+                "GPU worker and both NVIDIA models are ready",
             )
             return result
     except RuntimeInstallError:
         raise
     except Exception as exc:
-        raise RuntimeInstallError(f"managed-runtime installation failed: {exc}") from exc
+        raise RuntimeInstallError(f"GPU worker installation failed: {exc}") from exc
     finally:
+        _cleanup_engine_candidates(engine_candidates)
         if temporary is not None:
             shutil.rmtree(temporary, ignore_errors=True)

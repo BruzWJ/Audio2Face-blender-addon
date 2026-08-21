@@ -41,8 +41,9 @@ incrementally and creates no result file.
 
 The extension owns:
 
-- Add-on Preferences for managed setup, one NVIDIA terms acceptance, model
-  source links, install/repair, cancellation, and progress;
+- Add-on Preferences for one NVIDIA terms acceptance, model-source links, two
+  persistent external repository-root selections, worker install/repair,
+  model optimization, cancellation, and progress;
 - a compact sidebar readiness notice plus worker and inference controls;
 - worker launch, handshake, model load, generation, streaming, cancellation,
   and shutdown;
@@ -96,49 +97,82 @@ bounded audio chunks and receive one timestamped weight row per `stream_frame`
 event. Channel names are negotiated once in `load_model`; they are not repeated
 in each live event.
 
-## Managed installation
+## Worker installation and model optimization
 
-Runtime setup is extension-level state, so it appears only in Audio2Face's
-Add-on Preferences. One NVIDIA terms link and one acceptance checkbox gate the
-single artifact install. Audio2Face and Audio2Emotion source buttons expose the
-model source pages; the models are delivered together rather than as separate
-user downloads.
+Setup is extension-level state, so it appears only in Audio2Face's Add-on
+Preferences. The page links to the NVIDIA Audio2Face-3D v3.0 and gated
+Audio2Emotion v3.0 repositories. Users download and extract both complete
+repositories, then use two persistent Blender `DIR_PATH` properties to select
+their exact clone or download roots anywhere on disk. For each selected root,
+the add-on derives only `<root>/model.json`; it neither searches recursively
+nor falls back to a nested or alternate descriptor. It does not authenticate
+with a model host and never downloads, copies, relocates, or deletes either
+model root.
+
+NVIDIA publishes the Audio2Face-3D SDK source and ONNX-based model inputs. It
+does not publish the native Blender child described by this architecture. A
+production add-on release must build, review, and publish separate Windows x64
+and Linux x64 GPU worker packages containing the project worker, Audio2X,
+required CUDA/TensorRT user-mode libraries, a project-built `trtexec`, licenses,
+and notices. A worker package contains no model files or serialized TensorRT
+engines.
 
 Each published platform record contains an immutable HTTPS URL, exact
-compressed and unpacked sizes, and a SHA-256 digest. Installation:
+compressed and unpacked sizes, and a SHA-256 digest. **Install Worker & Optimize
+Models**:
 
-1. takes an OS-held lock shared by Blender processes;
-2. downloads the one artifact to temporary storage;
-3. requires the final URL to remain credential-free HTTPS and verifies its
+1. validates each selection as a directory with a non-empty, valid top-level
+   `model.json` whose `networkPath` is exactly `network.trt`, non-empty
+   top-level `network.onnx` and `trt_info.json`, and every other descriptor
+   path resolved as a canonical relative, non-empty regular file confined to
+   that root; Git LFS pointers are rejected;
+2. takes an OS-held lock shared by Blender processes;
+3. downloads the one platform worker archive to temporary storage;
+4. requires the final URL to remain credential-free HTTPS and verifies its
    byte count and digest;
-4. extracts canonical paths under bounded member and total-size limits;
-5. validates `bundle.json`, x86-64 executables, runtime libraries, both model
-   input trees, licenses, and notices;
-6. uses the bundled release-built TensorRT `trtexec` to build separate
-   Audio2Face and Audio2Emotion `network.trt` engines for the local GPU;
-7. writes the catalog receipt; and
-8. atomically activates the completed platform directory.
+5. extracts canonical paths under bounded member and total-size limits;
+6. validates `bundle.json`, x86-64 executables, runtime libraries, licenses,
+   and notices;
+7. runs the bundled `trtexec` on CUDA device 0 for each selected model,
+   building each completed engine as a temporary sibling candidate;
+8. writes the worker archive receipt; and
+9. atomically activates the completed platform worker directory and replaces
+   both `<selected-root>/network.trt` engines as one rollback transaction.
 
-Cancellation is honored before activation. A failed install cannot replace a
-verified active runtime. The runtime root and every manifest member must stay
-inside Blender's writable extension directory:
+Both external model roots must be writable. Re-running the action repairs the
+worker and rebuilds both engines for the current GPU. Both engine candidates
+are built first; the worker and both engines are then committed together with
+rollback. A failed build or commit does not expose a partial `network.trt`, and
+the selected roots remain exactly where the user placed them.
+
+Cancellation is honored before worker activation. A failed worker install
+cannot replace a verified active runtime. The runtime root and every manifest
+member must stay inside Blender's writable extension directory:
 
 ```python
 bpy.utils.extension_path_user(__package__, path="", create=True)
 ```
 
 The verified artifact supplies the worker, Audio2X, reviewed CUDA/TensorRT
-user-mode libraries, `trtexec`, both model input trees, licenses, and notices.
-The NVIDIA display driver remains a system requirement. No executable, SDK,
-model, working directory, system installation, hosted service, or access
-credential is selected by the user.
+user-mode libraries, `trtexec`, licenses, and notices. The NVIDIA display
+driver remains a system requirement. No executable, SDK, working directory,
+system installation, hosted service, or access credential is selected by the
+user; only the two external model repository roots are selected.
 
-The checked-in catalog contains no artifacts. Installation therefore remains
-disabled until release maintainers publish license-reviewed Linux x64 and
-Windows x64 archives and enter their measured records. Release validation must
-exercise the exact pinned model pair and confirm that Audio2Emotion's
-post-processed vector order agrees with Audio2Face's emotion order; SDK 1.0.0
-reports the vector width but does not expose names for those output positions.
+Platform selection and validation must remain at this boundary. A Windows x64
+package contains PE executables and DLLs; a Linux x64 package contains ELF
+executables and shared objects. These native files are not interchangeable.
+The external ONNX model roots are independent of that package selection, and
+the CUDA-only backend has no supported macOS or ARM package.
+
+The checked-in catalog contains no artifacts, so the current add-on ZIP is a
+development package. Its interface can be installed and tested, but managed
+GPU inference installation remains disabled until release maintainers publish
+license-reviewed Linux x64 and Windows x64 archives and enter their measured
+records. Release validation must exercise the supported model pair and
+confirm that Audio2Emotion's post-processed vector order agrees with
+Audio2Face's emotion order; SDK 1.0.0 reports the vector width but does not
+expose names for those output positions.
 
 The top of Add-on Preferences presents the right-aligned **Uninstall** action
 used by Blender 5.2's Legacy (User) add-on UI and the same two-line
@@ -148,9 +182,11 @@ extension uninstaller, preventing the operator from unregistering its own
 class while it is executing. The native disable phase runs Audio2Face's normal
 process, stream, playback, timer, and handler cleanup; its package phase
 removes both the installed extension and the Audio2Face leaf under Blender's
-writable extension directory. That leaf owns the runtime, models, TensorRT
-engines, logs, temporary install state, and generated results. User-selected
-audio, `.blend` data, and shared GPU caches remain outside this ownership
+writable extension directory. That leaf owns the worker, runtime libraries,
+archive receipt, logs, temporary install state, and generated results. The two
+selected model repository roots and their generated `network.trt` engines are
+external user data. Uninstall never deletes them. User-selected audio,
+`.blend` data, and shared GPU caches also remain outside this ownership
 boundary.
 
 ## Lifecycle
@@ -173,8 +209,8 @@ Unexpected exit or rejected contract --> ERROR
 ```
 
 **Start Worker** launches only a catalog-verified child, sends `hello {}`, and
-loads the managed Audio2Face and Audio2Emotion models. One worker accepts at
-most one generation or stream operation.
+loads the two selected Audio2Face and Audio2Emotion models. One worker accepts
+at most one generation or stream operation.
 
 **Generate ARKit Values** reloads when the selected identity changes, freezes
 the current model-described settings, and submits a complete WAV. **Cancel
@@ -201,9 +237,10 @@ accumulators, and the CUDA stream in dependency order.
 
 ## Model schema and settings
 
-`load_model` accepts only the two absolute managed model paths and a
-non-negative identity index. It returns a positive `sample_rate` and one
-`model_schema` with exactly:
+The UI persists two model roots, but the extension derives their exact
+top-level `model.json` paths before protocol submission. `load_model` accepts
+only those two validated absolute descriptor paths and a non-negative identity
+index. It returns a positive `sample_rate` and one `model_schema` with exactly:
 
 - `identities`: ordered non-empty names from Audio2Face;
 - `channels`: the exact 52 unique model-provided names in model order;

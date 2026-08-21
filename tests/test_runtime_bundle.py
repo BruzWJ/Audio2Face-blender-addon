@@ -12,8 +12,22 @@ from audio2face.runtime_bundle import (
     BundleError,
     RUNTIME_SCHEMA,
     current_platform_id,
-    resolve_runtime_bundle,
+    resolve_runtime_bundle as _resolve_runtime_bundle,
 )
+
+
+def resolve_runtime_bundle(package_root: Path, **kwargs: object):
+    """Supply this test tree's two external model selections."""
+
+    kwargs.setdefault(
+        "audio2face_model_directory",
+        package_root / "selected-models" / "audio2face",
+    )
+    kwargs.setdefault(
+        "audio2emotion_model_directory",
+        package_root / "selected-models" / "audio2emotion",
+    )
+    return _resolve_runtime_bundle(package_root, **kwargs)
 
 
 def _write_elf_x64(path: Path, *, executable: bool = True) -> None:
@@ -65,9 +79,11 @@ def _make_bundle(
 
     (root / "lib" / "audio2x").mkdir(parents=True)
     for model_name in ("audio2face", "audio2emotion"):
-        model_dir = root / "models" / model_name
+        model_dir = data_root / "selected-models" / model_name
         model_dir.mkdir(parents=True)
-        (model_dir / "model.json").write_text("{}", encoding="utf-8")
+        (model_dir / "model.json").write_text(
+            '{"networkPath":"network.trt"}', encoding="utf-8"
+        )
         (model_dir / "network.onnx").write_bytes(b"onnx")
         (model_dir / "trt_info.json").write_text("{}", encoding="utf-8")
         if include_engine:
@@ -81,8 +97,6 @@ def _make_bundle(
         "platform": platform_id,
         "worker": f"bin/{worker_name}",
         "trtexec": f"bin/{trtexec_name}",
-        "audio2face_model": "models/audio2face/model.json",
-        "audio2emotion_model": "models/audio2emotion/model.json",
         "library_directories": ["lib", "lib/audio2x"],
         "licenses": ["licenses/THIRD_PARTY.txt"],
     }
@@ -141,10 +155,10 @@ def test_resolve_linux_bundle_returns_immutable_child_launch_spec(tmp_path: Path
     assert spec.executable == (root / "bin" / "audio2face_worker").resolve()
     assert spec.trtexec == (root / "bin" / "trtexec").resolve()
     assert spec.audio2face_model == (
-        root / "models" / "audio2face" / "model.json"
+        tmp_path / "selected-models" / "audio2face" / "model.json"
     ).resolve()
     assert spec.audio2emotion_model == (
-        root / "models" / "audio2emotion" / "model.json"
+        tmp_path / "selected-models" / "audio2emotion" / "model.json"
     ).resolve()
     expected_prefix = ":".join(
         str(path.resolve())
@@ -219,7 +233,7 @@ def test_prebuild_validation_allows_onnx_without_engine(tmp_path: Path) -> None:
     )
     assert spec.audio2face_model.with_name("network.onnx").is_file()
     assert spec.audio2emotion_model.with_name("network.onnx").is_file()
-    with pytest.raises(BundleError, match="audio2face_model"):
+    with pytest.raises(BundleError, match="Audio2Face"):
         resolve_runtime_bundle(
             tmp_path,
             system="linux",
@@ -229,26 +243,25 @@ def test_prebuild_validation_allows_onnx_without_engine(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("model_name", "field", "missing"),
+    ("model_name", "missing"),
     [
-        ("audio2face", "audio2face_model", "model.json"),
-        ("audio2face", "audio2face_model", "network.onnx"),
-        ("audio2face", "audio2face_model", "trt_info.json"),
-        ("audio2emotion", "audio2emotion_model", "model.json"),
-        ("audio2emotion", "audio2emotion_model", "network.onnx"),
-        ("audio2emotion", "audio2emotion_model", "trt_info.json"),
+        ("audio2face", "model.json"),
+        ("audio2face", "network.onnx"),
+        ("audio2face", "trt_info.json"),
+        ("audio2emotion", "model.json"),
+        ("audio2emotion", "network.onnx"),
+        ("audio2emotion", "trt_info.json"),
     ],
 )
 def test_resolver_requires_every_file_for_both_models(
     tmp_path: Path,
     model_name: str,
-    field: str,
     missing: str,
 ) -> None:
     root, _manifest = _make_bundle(tmp_path)
-    (root / "models" / model_name / missing).unlink()
+    (tmp_path / "selected-models" / model_name / missing).unlink()
 
-    with pytest.raises(BundleError, match=field):
+    with pytest.raises(BundleError, match="Audio2Face|Audio2Emotion"):
         resolve_runtime_bundle(
             tmp_path,
             system="linux",
@@ -260,9 +273,9 @@ def test_resolver_requires_every_file_for_both_models(
 
 def test_resolver_requires_audio2emotion_engine_after_audio2face(tmp_path: Path) -> None:
     root, _manifest = _make_bundle(tmp_path)
-    (root / "models/audio2emotion/network.trt").unlink()
+    (tmp_path / "selected-models/audio2emotion/network.trt").unlink()
 
-    with pytest.raises(BundleError, match="audio2emotion_model"):
+    with pytest.raises(BundleError, match="Audio2Emotion"):
         resolve_runtime_bundle(
             tmp_path,
             system="linux",
@@ -279,10 +292,6 @@ def test_resolver_requires_audio2emotion_engine_after_audio2face(tmp_path: Path)
         ("worker", r"bin\audio2face_worker"),
         ("worker", "bin/../audio2face_worker"),
         ("trtexec", "lib/trtexec"),
-        ("audio2face_model", "bin/model.json"),
-        ("audio2face_model", "models/other/model.json"),
-        ("audio2emotion_model", "C:/models/model.json"),
-        ("audio2emotion_model", "models/other/model.json"),
     ],
 )
 def test_manifest_rejects_unsafe_or_misplaced_paths(
@@ -322,7 +331,7 @@ def test_manifest_rejects_schema_and_platform_mismatch(tmp_path: Path) -> None:
 def test_manifest_rejects_duplicate_json_fields(tmp_path: Path) -> None:
     root, _manifest = _make_bundle(tmp_path)
     (root / "bundle.json").write_text(
-        '{"schema":"audio2face-runtime/2","schema":"again"}', encoding="utf-8"
+        '{"schema":"audio2face-runtime/3","schema":"again"}', encoding="utf-8"
     )
     with pytest.raises(BundleError, match="duplicate field 'schema'"):
         resolve_runtime_bundle(tmp_path, system="linux", machine="x86_64", environ={})
@@ -370,17 +379,17 @@ def test_manifest_members_cannot_escape_through_symlinks(tmp_path: Path) -> None
 
 
 def test_model_companions_cannot_escape_through_symlinks(tmp_path: Path) -> None:
-    root, _manifest = _make_bundle(tmp_path)
+    _root, _manifest = _make_bundle(tmp_path)
     outside = tmp_path / "outside.onnx"
     outside.write_bytes(b"outside")
-    network = root / "models/audio2emotion/network.onnx"
+    network = tmp_path / "selected-models/audio2emotion/network.onnx"
     network.unlink()
     try:
         network.symlink_to(outside)
     except OSError:
         pytest.skip("symlinks are unavailable")
 
-    with pytest.raises(BundleError, match="audio2emotion_model.*escapes"):
+    with pytest.raises(BundleError, match="Audio2Emotion.*outside|escapes"):
         resolve_runtime_bundle(
             tmp_path,
             system="linux",

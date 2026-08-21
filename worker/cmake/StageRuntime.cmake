@@ -19,16 +19,12 @@ foreach(_a2f_required IN ITEMS
     A2F_TRTEXEC_FILE
     A2F_TRTEXEC_SOURCE_LICENSE
     A2F_TRTEXEC_PROVENANCE
-    A2F_AUDIO2FACE_MODEL_DIR
-    A2F_AUDIO2EMOTION_MODEL_DIR
     A2F_PROJECT_LICENSE
     A2F_THIRD_PARTY_NOTICES
     A2F_SDK_LICENSE
     A2F_CUDA_LICENSE
     A2F_TENSORRT_LICENSE
-    A2F_TENSORRT_ACKNOWLEDGEMENTS
-    A2F_AUDIO2FACE_MODEL_LICENSE
-    A2F_AUDIO2EMOTION_MODEL_LICENSE)
+    A2F_TENSORRT_ACKNOWLEDGEMENTS)
   if(NOT DEFINED ${_a2f_required} OR "${${_a2f_required}}" STREQUAL "")
     message(FATAL_ERROR "Runtime staging config is missing ${_a2f_required}")
   endif()
@@ -71,9 +67,7 @@ foreach(_a2f_file IN ITEMS
     "${A2F_SDK_LICENSE}"
     "${A2F_CUDA_LICENSE}"
     "${A2F_TENSORRT_LICENSE}"
-    "${A2F_TENSORRT_ACKNOWLEDGEMENTS}"
-    "${A2F_AUDIO2FACE_MODEL_LICENSE}"
-    "${A2F_AUDIO2EMOTION_MODEL_LICENSE}")
+    "${A2F_TENSORRT_ACKNOWLEDGEMENTS}")
   if(NOT EXISTS "${_a2f_file}" OR IS_DIRECTORY "${_a2f_file}")
     message(FATAL_ERROR "Required runtime package input is not a file: ${_a2f_file}")
   endif()
@@ -82,44 +76,6 @@ foreach(_a2f_file IN ITEMS
     message(FATAL_ERROR "Required runtime package input is empty: ${_a2f_file}")
   endif()
 endforeach()
-function(a2f_validate_model_input directory label)
-  if(NOT IS_DIRECTORY "${directory}")
-    message(FATAL_ERROR "${label} model input is not a directory: ${directory}")
-  endif()
-  foreach(_a2f_model_file IN ITEMS model.json network.onnx trt_info.json)
-    if(NOT EXISTS "${directory}/${_a2f_model_file}" OR
-       IS_DIRECTORY "${directory}/${_a2f_model_file}")
-      message(FATAL_ERROR
-        "Official ${label} ONNX model input is missing ${_a2f_model_file}")
-    endif()
-    file(SIZE "${directory}/${_a2f_model_file}" _a2f_model_file_size)
-    if(_a2f_model_file_size LESS 1)
-      message(FATAL_ERROR
-        "Official ${label} ONNX model input is empty: ${_a2f_model_file}")
-    endif()
-  endforeach()
-  file(GLOB_RECURSE _a2f_model_inputs LIST_DIRECTORIES FALSE
-    "${directory}/*")
-  set(_a2f_input_engines)
-  foreach(_a2f_model_input IN LISTS _a2f_model_inputs)
-    get_filename_component(_a2f_model_extension "${_a2f_model_input}" LAST_EXT)
-    string(TOLOWER "${_a2f_model_extension}" _a2f_model_extension)
-    if(_a2f_model_extension STREQUAL ".trt" OR
-       _a2f_model_extension STREQUAL ".engine")
-      list(APPEND _a2f_input_engines "${_a2f_model_input}")
-    endif()
-  endforeach()
-  if(_a2f_input_engines)
-    message(FATAL_ERROR
-      "Official ${label} model input must not contain a prebuilt TensorRT "
-      "engine: ${_a2f_input_engines}")
-  endif()
-endfunction()
-
-a2f_validate_model_input("${A2F_AUDIO2FACE_MODEL_DIR}"
-  "Audio2Face-3D v3.0")
-a2f_validate_model_input("${A2F_AUDIO2EMOTION_MODEL_DIR}"
-  "Audio2Emotion v3.0")
 
 function(a2f_validate_x64_executable path label)
   file(SIZE "${path}" _a2f_executable_size)
@@ -202,7 +158,6 @@ file(REMOVE_RECURSE "${_a2f_stage_directory}")
 file(MAKE_DIRECTORY
   "${_a2f_stage_directory}/bin"
   "${_a2f_stage_directory}/lib"
-  "${_a2f_stage_directory}/models"
   "${_a2f_stage_directory}/licenses")
 
 get_filename_component(_a2f_worker_name "${A2F_WORKER_FILE}" NAME)
@@ -244,25 +199,6 @@ foreach(_a2f_runtime IN LISTS A2F_RUNTIME_FILES)
     "${_a2f_stage_directory}/lib/${_a2f_runtime_name}" COPYONLY)
 endforeach()
 
-# Preserve both complete reviewed v3.0 model trees. VCS/cache debris and
-# GPU-specific engines are never part of the release. Any model symlink copied
-# by CMake is rejected by the all-payload check below.
-foreach(_a2f_model_name IN ITEMS audio2face audio2emotion)
-  if(_a2f_model_name STREQUAL "audio2face")
-    set(_a2f_model_source "${A2F_AUDIO2FACE_MODEL_DIR}")
-  else()
-    set(_a2f_model_source "${A2F_AUDIO2EMOTION_MODEL_DIR}")
-  endif()
-  file(COPY "${_a2f_model_source}/"
-    DESTINATION "${_a2f_stage_directory}/models/${_a2f_model_name}"
-    PATTERN ".git" EXCLUDE
-    PATTERN ".cache" EXCLUDE
-    PATTERN "__pycache__" EXCLUDE
-    PATTERN "*.pyc" EXCLUDE
-    PATTERN "*.trt" EXCLUDE
-    PATTERN "*.engine" EXCLUDE)
-endforeach()
-
 configure_file("${A2F_PROJECT_LICENSE}"
   "${_a2f_stage_directory}/licenses/audio2face-LICENSE.txt" COPYONLY)
 configure_file("${A2F_THIRD_PARTY_NOTICES}"
@@ -279,10 +215,6 @@ configure_file("${A2F_TRTEXEC_SOURCE_LICENSE}"
   "${_a2f_stage_directory}/licenses/trtexec-source-LICENSE.txt" COPYONLY)
 configure_file("${A2F_TRTEXEC_PROVENANCE}"
   "${_a2f_stage_directory}/licenses/trtexec-PROVENANCE.txt" COPYONLY)
-configure_file("${A2F_AUDIO2FACE_MODEL_LICENSE}"
-  "${_a2f_stage_directory}/licenses/audio2face-model-LICENSE.txt" COPYONLY)
-configure_file("${A2F_AUDIO2EMOTION_MODEL_LICENSE}"
-  "${_a2f_stage_directory}/licenses/audio2emotion-model-LICENSE.txt" COPYONLY)
 
 set(_a2f_staged_worker "${_a2f_stage_directory}/bin/${_a2f_worker_name}")
 set(_a2f_staged_trtexec "${_a2f_stage_directory}/bin/${_a2f_trtexec_name}")
@@ -294,34 +226,14 @@ if(A2F_PLATFORM STREQUAL "linux-x64")
       WORLD_READ WORLD_EXECUTE)
 endif()
 
-foreach(_a2f_staged_model_name IN ITEMS audio2face audio2emotion)
-  foreach(_a2f_staged_model_file IN ITEMS model.json network.onnx trt_info.json)
-    if(NOT EXISTS
-       "${_a2f_stage_directory}/models/${_a2f_staged_model_name}/${_a2f_staged_model_file}")
-      message(FATAL_ERROR
-        "Staged ${_a2f_staged_model_name} model is incomplete: "
-        "${_a2f_staged_model_file} was not copied")
-    endif()
-  endforeach()
-endforeach()
-file(GLOB_RECURSE _a2f_staged_engines LIST_DIRECTORIES FALSE
-  "${_a2f_stage_directory}/models/*.trt"
-  "${_a2f_stage_directory}/models/*.engine")
-if(_a2f_staged_engines)
-  message(FATAL_ERROR
-    "Staged runtime unexpectedly contains a prebuilt TensorRT engine: ${_a2f_staged_engines}")
-endif()
-
 # bundle.json is deliberately the exact resolver contract. Release/catalog
 # metadata belongs beside the archive, not inside this launch manifest.
 string(CONCAT _a2f_bundle_json
   "{\n"
-  "  \"schema\": \"audio2face-runtime/2\",\n"
+  "  \"schema\": \"audio2face-runtime/3\",\n"
   "  \"platform\": \"${A2F_PLATFORM}\",\n"
   "  \"worker\": \"bin/${_a2f_worker_name}\",\n"
   "  \"trtexec\": \"bin/${_a2f_trtexec_name}\",\n"
-  "  \"audio2face_model\": \"models/audio2face/model.json\",\n"
-  "  \"audio2emotion_model\": \"models/audio2emotion/model.json\",\n"
   "  \"library_directories\": [\"lib\"],\n"
   "  \"licenses\": [\n"
   "    \"licenses/audio2face-LICENSE.txt\",\n"
@@ -331,9 +243,7 @@ string(CONCAT _a2f_bundle_json
   "    \"licenses/tensorrt-LICENSE.txt\",\n"
   "    \"licenses/tensorrt-ACKNOWLEDGEMENTS.txt\",\n"
   "    \"licenses/trtexec-source-LICENSE.txt\",\n"
-  "    \"licenses/trtexec-PROVENANCE.txt\",\n"
-  "    \"licenses/audio2face-model-LICENSE.txt\",\n"
-  "    \"licenses/audio2emotion-model-LICENSE.txt\"\n"
+  "    \"licenses/trtexec-PROVENANCE.txt\"\n"
   "  ]\n"
   "}\n")
 file(WRITE "${_a2f_stage_directory}/bundle.json" "${_a2f_bundle_json}")
@@ -346,9 +256,7 @@ set(_a2f_required_license_names
   tensorrt-LICENSE.txt
   tensorrt-ACKNOWLEDGEMENTS.txt
   trtexec-source-LICENSE.txt
-  trtexec-PROVENANCE.txt
-  audio2face-model-LICENSE.txt
-  audio2emotion-model-LICENSE.txt)
+  trtexec-PROVENANCE.txt)
 foreach(_a2f_license_name IN LISTS _a2f_required_license_names)
   if(NOT EXISTS "${_a2f_stage_directory}/licenses/${_a2f_license_name}" OR
      IS_DIRECTORY "${_a2f_stage_directory}/licenses/${_a2f_license_name}")
@@ -361,7 +269,7 @@ foreach(_a2f_runtime_name IN LISTS _a2f_runtime_names)
     message(FATAL_ERROR "Staged reviewed runtime is missing: ${_a2f_runtime_name}")
   endif()
 endforeach()
-foreach(_a2f_required_directory IN ITEMS bin lib models licenses)
+foreach(_a2f_required_directory IN ITEMS bin lib licenses)
   file(GLOB _a2f_directory_entries
     "${_a2f_stage_directory}/${_a2f_required_directory}/*")
   if(NOT _a2f_directory_entries)

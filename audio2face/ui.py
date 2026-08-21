@@ -143,16 +143,16 @@ class A2F_PT_main(bpy.types.Panel):
             status_box.prop(settings, "progress", text="Progress", slider=True)
 
         runtime_box = layout.box()
-        runtime_box.label(text="Managed GPU Runtime", icon="PREFERENCES")
+        runtime_box.label(text="GPU Worker & Models", icon="PREFERENCES")
         if controller.install_in_progress:
             runtime_box.label(text="Installation in progress", icon="TIME")
             runtime_box.label(text="Manage installation in Add-on Preferences")
         elif runtime_ready:
-            runtime_box.label(text="Runtime and GPU-optimized models ready", icon="CHECKMARK")
+            runtime_box.label(text="GPU worker and optimized models ready", icon="CHECKMARK")
         else:
             warning = runtime_box.row()
             warning.alert = True
-            warning.label(text="Runtime and models are not ready", icon="ERROR")
+            warning.label(text="GPU worker and models are not ready", icon="ERROR")
             runtime_box.label(text=runtime_message)
             runtime_box.label(text="Install it from this add-on's Preferences", icon="INFO")
 

@@ -1,4 +1,4 @@
-"""Resolve an installed, self-contained Audio2Face native runtime bundle.
+"""Resolve the installed Audio2Face native worker and selected model folders.
 
 This module deliberately has no :mod:`bpy` dependency.  Blender-facing code is
 responsible for supplying the extension's writable data root; this resolver
@@ -17,16 +17,15 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import MappingProxyType
 from typing import Any, Mapping
 
+from .model_inputs import ModelInputError, validate_model_directory
 
-RUNTIME_SCHEMA = "audio2face-runtime/2"
+RUNTIME_SCHEMA = "audio2face-runtime/3"
 _MANIFEST_FIELDS = frozenset(
     {
         "schema",
         "platform",
         "worker",
         "trtexec",
-        "audio2face_model",
-        "audio2emotion_model",
         "library_directories",
         "licenses",
     }
@@ -256,71 +255,22 @@ def _prepend_environment(
     return child
 
 
-def _resolve_model(
-    root: Path,
-    manifest: Mapping[str, Any],
-    field: str,
-    expected_relative: str,
-    *,
-    require_engine: bool,
-) -> Path:
-    """Resolve and validate one canonical managed model payload."""
-
-    if manifest[field] != expected_relative:
-        raise BundleError(
-            f"bundle manifest {field} must be exactly {expected_relative!r}"
-        )
-    expected_path = PurePosixPath(expected_relative)
-    model = _resolve_member(
-        root, manifest[field], field, "models", directory=False
-    )
-    for filename in ("network.onnx", "trt_info.json"):
-        sibling = _resolve_member(
-            root,
-            (expected_path.parent / filename).as_posix(),
-            f"{field}.{filename}",
-            "models",
-            directory=False,
-        )
-        if sibling.parent != model.parent:
-            raise BundleError(
-                f"bundled {field} {filename} is not beside model.json"
-            )
-    if require_engine:
-        engine_path = (expected_path.parent / "network.trt").as_posix()
-        engine_candidate = root.joinpath(*PurePosixPath(engine_path).parts)
-        if not engine_candidate.is_file():
-            raise BundleError(
-                f"GPU-specific TensorRT engine has not been built for "
-                f"{field}: {engine_candidate}"
-            )
-        engine = _resolve_member(
-            root,
-            engine_path,
-            f"{field}.network.trt",
-            "models",
-            directory=False,
-        )
-        if engine.parent != model.parent:
-            raise BundleError(
-                f"bundled {field} network.trt is not beside model.json"
-            )
-    return model
-
-
 def resolve_runtime_bundle(
     package_root: Path,
     *,
+    audio2face_model_directory: str | Path,
+    audio2emotion_model_directory: str | Path,
     platform: str | None = None,
     system: str | None = None,
     machine: str | None = None,
     environ: Mapping[str, str] | None = None,
     require_engine: bool = True,
 ) -> BundleLaunchSpec:
-    """Validate the installed bundle beneath ``package_root/runtime``.
+    """Validate the installed worker and the two user-selected models.
 
     ``package_root`` must be Blender's writable per-extension data directory.
-    Only the managed runtime inside that directory is considered.
+    Only the native worker beneath that directory is considered. Model folders
+    deliberately remain at the exact paths selected in Add-on Preferences.
     """
 
     if platform is None:
@@ -367,20 +317,21 @@ def resolve_runtime_bundle(
 
     executable = _resolve_member(root, manifest["worker"], "worker", "bin", directory=False)
     trtexec = _resolve_member(root, manifest["trtexec"], "trtexec", "bin", directory=False)
-    audio2face_model = _resolve_model(
-        root,
-        manifest,
-        "audio2face_model",
-        "models/audio2face/model.json",
-        require_engine=require_engine,
-    )
-    audio2emotion_model = _resolve_model(
-        root,
-        manifest,
-        "audio2emotion_model",
-        "models/audio2emotion/model.json",
-        require_engine=require_engine,
-    )
+    try:
+        resolved_audio2face_model = validate_model_directory(
+            audio2face_model_directory,
+            "Audio2Face",
+            require_engine=require_engine,
+        )
+        resolved_audio2emotion_model = validate_model_directory(
+            audio2emotion_model_directory,
+            "Audio2Emotion",
+            require_engine=require_engine,
+        )
+    except ModelInputError as exc:
+        raise BundleError(str(exc)) from exc
+    if resolved_audio2face_model == resolved_audio2emotion_model:
+        raise BundleError("Audio2Face and Audio2Emotion must use different model folders")
     _validate_executable(executable, platform_id, "worker")
     _validate_executable(trtexec, platform_id, "trtexec")
 
@@ -411,6 +362,6 @@ def resolve_runtime_bundle(
         executable=executable,
         trtexec=trtexec,
         env=environment,
-        audio2face_model=audio2face_model,
-        audio2emotion_model=audio2emotion_model,
+        audio2face_model=resolved_audio2face_model,
+        audio2emotion_model=resolved_audio2emotion_model,
     )

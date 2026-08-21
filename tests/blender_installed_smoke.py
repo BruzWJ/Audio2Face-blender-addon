@@ -35,7 +35,9 @@ def main() -> None:
 
     preference_names = set(preferences.A2FAddonPreferences.bl_rna.properties.keys())
     assert set(preferences.A2FAddonPreferences.__annotations__) == {
-        "nvidia_terms_accepted"
+        "nvidia_terms_accepted",
+        "audio2face_model_directory",
+        "audio2emotion_model_directory",
     }
     missing_preference_names = (
         set(preferences.A2FAddonPreferences.__annotations__) - preference_names
@@ -43,6 +45,18 @@ def main() -> None:
     assert not missing_preference_names, (
         "preferences missing registered RNA properties: "
         f"{sorted(missing_preference_names)}"
+    )
+    assert (
+        preferences.A2FAddonPreferences.bl_rna.properties[
+            "audio2face_model_directory"
+        ].subtype
+        == "DIR_PATH"
+    )
+    assert (
+        preferences.A2FAddonPreferences.bl_rna.properties[
+            "audio2emotion_model_directory"
+        ].subtype
+        == "DIR_PATH"
     )
     scene_property_names = set(properties.A2FSceneSettings.bl_rna.properties.keys())
     missing_scene_property_names = (
@@ -98,7 +112,7 @@ def main() -> None:
     )
     ready, reason = runtime.get_controller().runtime_availability()
     assert not ready
-    assert "published" in reason or "runtime" in reason
+    assert "model folder" in reason or "GPU worker package" in reason
     assert package.__package__.startswith("bl_ext.")
     print(f"Installed Audio2Face smoke test passed ({data_root})")
 

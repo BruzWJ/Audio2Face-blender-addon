@@ -71,9 +71,9 @@ class A2F_OT_start_worker(bpy.types.Operator):
 
 class A2F_OT_install_runtime(bpy.types.Operator):
     bl_idname = "a2f.install_runtime"
-    bl_label = "Install Runtime & Models"
+    bl_label = "Install Worker & Optimize Models"
     bl_description = (
-        "Download, verify, and install the managed NVIDIA GPU runtime and both models"
+        "Install this add-on's GPU worker and optimize both selected NVIDIA models"
     )
 
     @classmethod
@@ -89,14 +89,14 @@ class A2F_OT_install_runtime(bpy.types.Operator):
 
 class A2F_OT_cancel_runtime_install(bpy.types.Operator):
     bl_idname = "a2f.cancel_runtime_install"
-    bl_label = "Cancel Runtime Install"
-    bl_description = "Cancel the current managed-runtime download or model optimization"
+    bl_label = "Cancel GPU Worker Install"
+    bl_description = "Cancel the current GPU worker download or model optimization"
 
     @classmethod
     def poll(cls, _context: bpy.types.Context) -> bool:
         in_progress = get_controller().install_in_progress
         if not in_progress:
-            cls.poll_message_set("managed-runtime installation is not running")
+            cls.poll_message_set("GPU worker installation is not running")
         return in_progress
 
     def execute(self, _context: bpy.types.Context) -> set[str]:

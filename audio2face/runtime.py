@@ -20,6 +20,7 @@ from .live_stream import (
     get_live_stream_controller,
     unregister_live_stream,
 )
+from .model_inputs import ModelInputError, validate_model_directory
 from .preferences import get_preferences
 from .preview import get_preview_controller, unregister_preview
 from .properties import apply_model_schema, tuning_parameters
@@ -77,7 +78,7 @@ class RuntimeController:
         self.pending_lock = threading.Lock()
         self.negotiated = False
         self.startup_scene: str | None = None
-        # One sidecar owns exactly one managed model pair, so its signature is global rather
+        # One sidecar owns exactly one selected model pair, so its signature is global rather
         # than attached to a Blender scene.
         self.loaded_signature: tuple[str, str, int] | None = None
         self.model_sample_rate: int | None = None
@@ -185,9 +186,14 @@ class RuntimeController:
 
     def runtime_spec(self) -> BundleLaunchSpec:
         try:
+            audio2face_directory, audio2emotion_directory = self.model_directories(
+                require_engine=True
+            )
             artifact = load_runtime_catalog().artifact_for(current_platform_id())
             spec = resolve_runtime_bundle(
                 self.data_root(create=False),
+                audio2face_model_directory=audio2face_directory,
+                audio2emotion_model_directory=audio2emotion_directory,
                 require_engine=True,
             )
             validate_install_receipt(spec, artifact)
@@ -200,7 +206,48 @@ class RuntimeController:
             spec = self.runtime_spec()
         except SidecarError as exc:
             return False, str(exc)
-        return True, f"Managed {spec.platform} GPU runtime is ready"
+        return True, f"The {spec.platform} GPU worker and optimized models are ready"
+
+    def model_directories(self, *, require_engine: bool) -> tuple[Path, Path]:
+        """Validate and return the two exact model folders selected in Preferences."""
+
+        preferences = get_preferences()
+        if preferences is None:
+            raise SidecarError("Audio2Face Add-on Preferences are unavailable")
+        selections = (
+            (preferences.audio2face_model_directory, "Audio2Face"),
+            (preferences.audio2emotion_model_directory, "Audio2Emotion"),
+        )
+        resolved_directories: list[Path] = []
+        try:
+            for value, label in selections:
+                if not value:
+                    raise ModelInputError(
+                        f"select the complete downloaded {label} model folder "
+                        "in Add-on Preferences"
+                    )
+                model_card = validate_model_directory(
+                    self._absolute_blender_path(value),
+                    label,
+                    require_engine=require_engine,
+                )
+                resolved_directories.append(model_card.parent)
+        except ModelInputError as exc:
+            raise SidecarError(str(exc)) from exc
+        if resolved_directories[0] == resolved_directories[1]:
+            raise SidecarError(
+                "Audio2Face and Audio2Emotion must use different model folders"
+            )
+        return resolved_directories[0], resolved_directories[1]
+
+    def model_availability(self, *, require_engine: bool) -> tuple[bool, str]:
+        try:
+            self.model_directories(require_engine=require_engine)
+        except SidecarError as exc:
+            return False, str(exc)
+        if require_engine:
+            return True, "Selected models are optimized for this GPU"
+        return True, "Both selected model folders contain the required files"
 
     def install_availability(self) -> tuple[bool, str]:
         """Return whether this add-on release publishes a platform artifact."""
@@ -211,16 +258,19 @@ class RuntimeController:
             catalog.artifact_for(platform_id)
         except (BundleError, RuntimeCatalogError) as exc:
             return False, str(exc)
-        return True, f"Managed runtime {catalog.release} is available for download"
+        return True, f"GPU worker package {catalog.release} is available for download"
 
     def install_eligibility(self) -> tuple[bool, str]:
         """Return the canonical install/repair eligibility and blocking reason."""
 
         if self.install_in_progress:
-            return False, "managed-runtime installation is already running"
+            return False, "GPU worker installation is already running"
         available, message = self.install_availability()
         if not available:
             return False, message
+        models_ready, model_message = self.model_availability(require_engine=False)
+        if not models_ready:
+            return False, model_message
         if self.client.state not in {Lifecycle.STOPPED, Lifecycle.FAILED}:
             return False, "stop the Audio2Face worker before installing its runtime"
         if not bpy.app.online_access:
@@ -283,6 +333,9 @@ class RuntimeController:
         try:
             platform_id = current_platform_id()
             artifact = load_runtime_catalog().artifact_for(platform_id)
+            audio2face_directory, audio2emotion_directory = self.model_directories(
+                require_engine=False
+            )
         except (BundleError, RuntimeCatalogError) as exc:
             raise SidecarError(str(exc)) from exc
 
@@ -292,7 +345,7 @@ class RuntimeController:
             self.install_latest_progress = None
         self.install_cancel = canceled
         self.install_progress = 0.0
-        message = "Preparing managed-runtime download"
+        message = "Preparing GPU worker package download"
         self.install_message = message
         self._tag_runtime_setup_redraw()
 
@@ -304,6 +357,8 @@ class RuntimeController:
                 install_managed_runtime(
                     artifact,
                     data_root,
+                    audio2face_model_directory=audio2face_directory,
+                    audio2emotion_model_directory=audio2emotion_directory,
                     progress=progress,
                     canceled=canceled,
                     activation_lock=self.install_activation_lock,
@@ -313,7 +368,7 @@ class RuntimeController:
             except (RuntimeInstallError, OSError, ValueError) as exc:
                 self.install_events.put(("error", str(exc)))
             except Exception as exc:  # Never let a background exception disappear.
-                self.install_events.put(("error", f"managed-runtime installation failed: {exc}"))
+                self.install_events.put(("error", f"GPU worker installation failed: {exc}"))
             else:
                 self.install_events.put(("complete", None))
 
@@ -328,23 +383,23 @@ class RuntimeController:
             self.install_thread = None
             self.install_cancel = None
             self.install_progress = 0.0
-            self.install_message = f"could not start managed-runtime installer: {exc}"
+            self.install_message = f"could not start GPU worker installer: {exc}"
             self._tag_runtime_setup_redraw()
-            raise SidecarError(f"could not start managed-runtime installer: {exc}") from exc
+            raise SidecarError(f"could not start GPU worker installer: {exc}") from exc
 
     def cancel_runtime_install(self) -> None:
         if not self.install_in_progress or self.install_cancel is None:
-            raise SidecarError("managed-runtime installation is not running")
+            raise SidecarError("GPU worker installation is not running")
         with self.install_activation_lock:
             self.install_cancel.set()
-        message = "Canceling managed-runtime installation"
+        message = "Canceling GPU worker installation"
         self.install_message = message
         self._tag_runtime_setup_redraw()
 
     def start(self, scene: bpy.types.Scene) -> None:
         self._require_editable_scene(scene)
         if self.install_in_progress:
-            raise SidecarError("wait for managed-runtime installation to finish")
+            raise SidecarError("wait for GPU worker installation to finish")
         if self.client.state == Lifecycle.RUNNING:
             raise SidecarError("worker is already running")
         if self.client.state == Lifecycle.STOPPING:
@@ -1389,10 +1444,10 @@ class RuntimeController:
 
     def _finish_install(self, kind: str, payload: str | None) -> None:
         if kind == "complete":
-            self.install_message = "Managed runtime and both NVIDIA models are ready"
+            self.install_message = "GPU worker and both NVIDIA models are ready"
             self.install_progress = 1.0
         elif kind == "canceled":
-            self.install_message = "Runtime installation canceled"
+            self.install_message = "GPU worker installation canceled"
             self.install_progress = 0.0
         else:
             if payload is None:

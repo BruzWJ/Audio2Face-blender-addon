@@ -14,8 +14,8 @@ platforms = ["windows-x64", "linux-x64"]
 license = ["SPDX:GPL-3.0-or-later"]
 
 [permissions]
-files = "Install the managed runtime and read selected WAV files"
-network = "Download the managed GPU runtime and required models"
+files = "Read WAV/model folders; write engines; install GPU worker"
+network = "Download the platform-specific GPU worker package"
 
 [build]
 paths_exclude_pattern = [

@@ -87,7 +87,9 @@ def main() -> None:
         assert not bpy.ops.a2f.uninstall.poll()
         preference_names = set(A2FAddonPreferences.bl_rna.properties.keys())
         assert set(A2FAddonPreferences.__annotations__) == {
-            "nvidia_terms_accepted"
+            "nvidia_terms_accepted",
+            "audio2face_model_directory",
+            "audio2emotion_model_directory",
         }
         missing_preference_names = (
             set(A2FAddonPreferences.__annotations__) - preference_names
@@ -95,6 +97,18 @@ def main() -> None:
         assert not missing_preference_names, (
             f"preferences missing registered RNA properties: "
             f"{sorted(missing_preference_names)}"
+        )
+        assert (
+            A2FAddonPreferences.bl_rna.properties[
+                "audio2face_model_directory"
+            ].subtype
+            == "DIR_PATH"
+        )
+        assert (
+            A2FAddonPreferences.bl_rna.properties[
+                "audio2emotion_model_directory"
+            ].subtype
+            == "DIR_PATH"
         )
         scene_property_names = set(A2FSceneSettings.bl_rna.properties.keys())
         missing_scene_property_names = (

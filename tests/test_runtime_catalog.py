@@ -90,7 +90,7 @@ def test_catalog_rejects_invalid_top_level_contract(mutation: object, match: str
 
 def test_catalog_missing_platform_fails_closed() -> None:
     catalog = validate_runtime_catalog(_catalog_document())
-    with pytest.raises(RuntimeCatalogError, match="no managed Audio2Face runtime"):
+    with pytest.raises(RuntimeCatalogError, match="verified GPU worker package"):
         catalog.artifact_for("windows-x64")
 
 

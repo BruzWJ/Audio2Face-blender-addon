@@ -63,18 +63,23 @@ Parameters contain exactly:
 
 ```json
 {
-  "audio2face_model_path": "/absolute/managed/models/audio2face/model.json",
-  "audio2emotion_model_path": "/absolute/managed/models/audio2emotion/model.json",
+  "audio2face_model_path": "/absolute/user-selected/audio2face/model.json",
+  "audio2emotion_model_path": "/absolute/user-selected/audio2emotion/model.json",
   "identity_index": 0
 }
 ```
 
-Both paths must be absolute managed files. `identity_index` is a non-negative
-integer within the Audio2Face identity range. Loading creates the device-0
-Audio2Face diffusion/blendshape executor, Audio2Emotion classifier executor,
-their shared CUDA stream, and shared audio and emotion accumulators. The models
-must agree on sample rate and emotion-vector width. Loading does not execute
-inference.
+Blender persistently stores two user-selected repository roots, then derives
+these protocol paths as exactly `<root>/model.json`. It performs no recursive
+search or fallback. Before the worker starts, setup has validated each root's
+non-empty `model.json`, `network.onnx`, `trt_info.json`, every file referenced
+by the descriptor, and locally optimized `network.trt`; unresolved Git LFS
+pointers are rejected. The model repositories remain external to the add-on's
+managed storage. `identity_index` is a non-negative integer within the
+Audio2Face identity range. Loading creates the device-0 Audio2Face
+diffusion/blendshape executor, Audio2Emotion classifier executor, their shared
+CUDA stream, and shared audio and emotion accumulators. The models must agree
+on sample rate and emotion-vector width. Loading does not execute inference.
 
 The response contains exactly `sample_rate` and `model_schema`:
 
