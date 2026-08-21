@@ -1,22 +1,36 @@
 # Release automation
 
 `.github/workflows/release.yml` is the only GitHub release path. It runs only
-when started manually with an existing version tag that exactly matches
-`audio2face/blender_manifest.toml`. The workflow starts two native builds,
+when started manually from GitHub Actions. The branch selected in the **Run
+workflow** interface must be the repository's protected default branch; there
+are no workflow inputs. The workflow freezes that branch's dispatch commit,
+compares it with the published release marked **Latest**, and derives
+`v<version>` from `audio2face/blender_manifest.toml`. After the source tests
+pass, it creates that tag at the frozen commit. It then starts two native builds,
 uploads the two complete platform extension ZIPs to one draft release, verifies
-that the draft contains exactly those assets, and then publishes it.
-For manifest version `0.1.0`, the only accepted tag is `v0.1.0` and the assets
-are:
+that the draft contains exactly those assets, and publishes it. For manifest
+version `0.1.0`, the generated tag and assets are:
 
 ```text
+v0.1.0
 audio2face-0.1.0-windows-x64.zip
 audio2face-0.1.0-linux-x64.zip
 ```
 
-The workflow reuses an existing draft for the same tag, so a failed job can be
-rerun without deleting the draft. It refuses an already-published release.
-Native uploads use `--clobber`; the final job publishes only after both jobs
-succeed and the draft contains exactly the two expected, non-empty assets.
+The latest published release tag must resolve to an ancestor of the selected
+commit, and the range from that tag to the selected commit must contain at least
+one commit. The selected manifest version must also be newer than the version
+embedded at the latest release tag. This makes the manifest the sole version
+source of truth; the workflow does not infer a semantic-version bump from commit
+subjects.
+
+The workflow reuses an existing lightweight tag and draft only when both still
+point to the same frozen source commit, so a failed job can be rerun without
+deleting the draft. It refuses a moved tag or an already-published release.
+It also refuses to skip over an unrelated pending draft. Native uploads use
+`--clobber`; the final job publishes only after both jobs succeed and the draft
+contains exactly the two expected assets with the SHA-256 digests and byte sizes
+reported by their native build jobs.
 
 ## Standard GitHub-hosted runners
 
@@ -61,24 +75,29 @@ files are deliberately not part of the extension package.
 
 ## Release lifecycle
 
-1. Update `version` in `audio2face/blender_manifest.toml` and merge the complete
-   release source.
-2. Create and push the exact `v<version>` tag.
-3. In GitHub Actions, open **Release platform extensions**, keep the workflow
-   selector on the repository's default branch, choose **Run workflow**, enter
-   that exact tag, and start the workflow. The prepare job resolves
-   `refs/tags/<tag>` once; both native jobs build that frozen commit.
-4. The prepare job runs the Python tests and creates or verifies a draft.
-5. Each native job reclaims its standard runner, selects Python 3.11.9, and
-   builds the locked runtime. Windows first installs and verifies the exact
-   Visual Studio 2022 components listed above.
+1. Confirm `version` in `audio2face/blender_manifest.toml` is the intended stable
+   semantic version. After the first release, it must be newer than the manifest
+   version at the release marked **Latest**. Merge the complete release source to
+   the protected default branch.
+2. In GitHub Actions, open **Release platform extensions**, keep the branch
+   selector on the repository's default branch, choose **Run workflow**, and
+   start the workflow. There are no workflow inputs.
+3. The prepare job freezes the dispatch SHA, resolves the latest published
+   release tag, requires that tag to be an ancestor, and requires a non-empty
+   commit range. It also verifies the selected manifest version increased.
+4. The prepare job runs the Python tests, creates `v<manifest version>` as a
+   lightweight tag at the frozen SHA, and creates or verifies the corresponding
+   draft. Generated notes start at the previous published release tag.
+5. Each native job checks out the same frozen SHA, reclaims its standard runner,
+   selects Python 3.11.9, and builds the locked runtime. Windows first installs
+   and verifies the exact Visual Studio 2022 components listed above.
 6. The native jobs download the official portable Blender 5.2.0 archives,
    verify their pinned SHA-256 digests, discard the downloaded archives after
    extraction, run Blender smoke tests, package the platform extensions,
    enforce GitHub's per-asset size limit, and upload directly to the draft.
-7. The final job requires exactly the Windows and Linux asset names, verifies
-   each upload state and size, confirms that the tag was not moved during the
-   run, and publishes the draft.
+7. The final job requires exactly the Windows and Linux asset names, sizes, and
+   SHA-256 digests, confirms that the tag was not moved during the run, publishes
+   the draft, and explicitly marks it as the latest release.
 
 GitHub Releases requires every individual asset to be smaller than 2 GiB. The
 workflow enforces that limit before upload and again before publication. If a

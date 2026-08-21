@@ -1358,3 +1358,41 @@ def test_extension_zip_uses_package_files_at_root(tmp_path: Path) -> None:
             staged,
             "linux-x64",
         )
+
+
+def test_release_workflow_derives_and_creates_manifest_tag() -> None:
+    workflow = (
+        REPOSITORY_ROOT / ".github" / "workflows" / "release.yml"
+    ).read_text(encoding="utf-8")
+    trigger = workflow.split("on:\n", 1)[1].split("\nconcurrency:", 1)[0]
+
+    assert trigger == "  workflow_dispatch:\n"
+    assert "inputs:" not in trigger
+    assert "push:" not in trigger
+    assert "group: audio2face-release" in workflow
+    assert "ref: ${{ github.sha }}" in workflow
+    assert "fetch-depth: 0" in workflow
+    assert "fetch-tags: true" in workflow
+    assert workflow.count("persist-credentials: false") == 3
+    assert "DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}" in workflow
+    assert "manual releases must use the protected default branch" in workflow
+    assert '"release_tag": f"v{version}"' in workflow
+    assert 'releases?per_page=100"' in workflow
+    assert "resolve pending draft releases" in workflow
+    assert "latestRelease { tagName }" in workflow
+    assert 'git merge-base --is-ancestor "$previous_sha" "$SOURCE_SHA"' in workflow
+    assert 'git rev-list --count "$previous_sha..$SOURCE_SHA"' in workflow
+    assert 'git show "$previous_sha:audio2face/blender_manifest.toml"' in workflow
+    assert "selected source manifest version must be newer" in workflow
+    assert 'ref(qualifiedName: $qualified)' in workflow
+    assert '--method POST "repos/$GITHUB_REPOSITORY/git/refs"' in workflow
+    assert '--raw-field sha="$SOURCE_SHA"' in workflow
+    assert '--notes-start-tag "$PREVIOUS_TAG"' in workflow
+    assert "release_id: ${{ steps.release.outputs.release_id }}" in workflow
+    assert workflow.count("RELEASE_ID: ${{ needs.prepare.outputs.release_id }}") == 3
+    assert 'asset.get("digest") != identity["digest"]' in workflow
+    assert workflow.count("ref: ${{ needs.prepare.outputs.source_sha }}") == 2
+    assert "PREPARED_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}" in workflow
+    assert 'if [[ "$object_type" != "commit" ]]' in workflow
+    assert "--draft=false" in workflow
+    assert "--latest" in workflow

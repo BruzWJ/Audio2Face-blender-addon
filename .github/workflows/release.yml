@@ -2,21 +2,13 @@ name: Release platform extensions
 
 on:
   workflow_dispatch:
-    inputs:
-      tag:
-        description: Existing release tag matching blender_manifest.toml (for example v0.1.0)
-        required: true
-        type: string
 
 concurrency:
-  group: audio2face-release-${{ inputs.tag }}
+  group: audio2face-release
   cancel-in-progress: false
 
 permissions:
   contents: read
-
-env:
-  RELEASE_TAG: ${{ inputs.tag }}
 
 jobs:
   prepare:
@@ -30,25 +22,33 @@ jobs:
       windows_asset: ${{ steps.identity.outputs.windows_asset }}
       linux_asset: ${{ steps.identity.outputs.linux_asset }}
       source_sha: ${{ steps.identity.outputs.source_sha }}
-      tag_ref_sha: ${{ steps.identity.outputs.tag_ref_sha }}
+      release_tag: ${{ steps.identity.outputs.release_tag }}
+      release_id: ${{ steps.release.outputs.release_id }}
+      tag_ref_sha: ${{ steps.release.outputs.tag_ref_sha }}
     steps:
-      - name: Check out tagged source
+      - name: Check out selected branch commit
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
-          ref: refs/tags/${{ inputs.tag }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+          ref: ${{ github.sha }}
 
       - name: Select release Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.11.9"
 
-      - name: Validate tag and package identity
+      - name: Validate source and derive package identity
         id: identity
         shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          DISPATCH_REF: ${{ github.ref }}
+          DISPATCH_SHA: ${{ github.sha }}
         run: |
           python - <<'PY'
           import os
-          import json
           import re
           import subprocess
           import tomllib
@@ -61,21 +61,15 @@ jobs:
           version = manifest.get("version")
           if extension_id != "audio2face":
               raise SystemExit(f"unexpected extension id: {extension_id!r}")
-          if not isinstance(version, str) or re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version) is None:
+          stable_semver = r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
+          if not isinstance(version, str) or re.fullmatch(stable_semver, version) is None:
               raise SystemExit(f"invalid extension version: {version!r}")
-          expected_tag = f"v{version}"
-          actual_tag = os.environ.get("RELEASE_TAG")
-          if actual_tag != expected_tag:
+          dispatch_ref = os.environ.get("DISPATCH_REF", "")
+          expected_ref = f"refs/heads/{os.environ.get('DEFAULT_BRANCH', '')}"
+          if dispatch_ref != expected_ref:
               raise SystemExit(
-                  f"release tag must equal manifest version {expected_tag!r}; got {actual_tag!r}"
-              )
-          event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
-          default_branch = event.get("repository", {}).get("default_branch")
-          expected_workflow_ref = f"refs/heads/{default_branch}"
-          if not isinstance(default_branch, str) or os.environ.get("GITHUB_REF") != expected_workflow_ref:
-              raise SystemExit(
-                  "manual releases must run the workflow definition from the default branch; "
-                  f"expected {expected_workflow_ref!r}, got {os.environ.get('GITHUB_REF')!r}"
+                  "manual releases must use the protected default branch in the "
+                  f"Run workflow selector; expected {expected_ref!r}, got {dispatch_ref!r}"
               )
           source_sha = subprocess.run(
               ["git", "rev-parse", "--verify", "HEAD^{commit}"],
@@ -83,25 +77,126 @@ jobs:
               text=True,
               stdout=subprocess.PIPE,
           ).stdout.strip()
-          tag_ref_sha = subprocess.run(
-              ["git", "rev-parse", "--verify", f"refs/tags/{actual_tag}"],
-              check=True,
-              text=True,
-              stdout=subprocess.PIPE,
-          ).stdout.strip()
-          if re.fullmatch(r"[0-9a-f]{40}", source_sha) is None or re.fullmatch(r"[0-9a-f]{40}", tag_ref_sha) is None:
-              raise SystemExit("Git did not resolve canonical SHA-1 release identities")
+          dispatch_sha = os.environ.get("DISPATCH_SHA")
+          if re.fullmatch(r"[0-9a-f]{40}", source_sha) is None:
+              raise SystemExit("Git did not resolve a canonical SHA-1 source identity")
+          if source_sha != dispatch_sha:
+              raise SystemExit(
+                  f"checked-out source differs from dispatch SHA: {source_sha!r} != {dispatch_sha!r}"
+              )
           outputs = {
               "version": version,
+              "release_tag": f"v{version}",
               "windows_asset": f"{extension_id}-{version}-windows-x64.zip",
               "linux_asset": f"{extension_id}-{version}-linux-x64.zip",
               "source_sha": source_sha,
-              "tag_ref_sha": tag_ref_sha,
           }
           with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as stream:
               for name, value in outputs.items():
                   stream.write(f"{name}={value}\n")
           PY
+
+      - name: Compare selected source with latest release
+        id: baseline
+        shell: bash
+        env:
+          CURRENT_VERSION: ${{ steps.identity.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.identity.outputs.release_tag }}
+          SOURCE_SHA: ${{ steps.identity.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          releases_json="$RUNNER_TEMP/releases.json"
+          gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/releases?per_page=100" > "$releases_json"
+          RELEASES_JSON="$releases_json" python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          pages = json.loads(
+              Path(os.environ["RELEASES_JSON"]).read_text(encoding="utf-8")
+          )
+          if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
+              raise SystemExit("GitHub releases response is not a paginated array")
+          releases = [release for page in pages for release in page]
+          if any(not isinstance(release, dict) for release in releases):
+              raise SystemExit("GitHub releases response contains a non-object")
+          pending = [
+              release.get("tag_name")
+              for release in releases
+              if release.get("draft") is True
+              and release.get("tag_name") != os.environ["RELEASE_TAG"]
+          ]
+          if pending:
+              raise SystemExit(
+                  "resolve pending draft releases before starting a new version: "
+                  + ", ".join(repr(tag) for tag in pending)
+              )
+          PY
+          repository_owner="${GITHUB_REPOSITORY%%/*}"
+          repository_name="${GITHUB_REPOSITORY#*/}"
+          # shellcheck disable=SC2016
+          previous_tag="$(
+            gh api graphql \
+              -f owner="$repository_owner" \
+              -f name="$repository_name" \
+              -f query='query($owner: String!, $name: String!) {
+                repository(owner: $owner, name: $name) {
+                  latestRelease { tagName }
+                }
+              }' \
+              --jq '.data.repository.latestRelease.tagName // ""'
+          )"
+          rm -f -- "$releases_json"
+
+          previous_sha=""
+          if [[ -n "$previous_tag" ]]; then
+            git check-ref-format "refs/tags/$previous_tag"
+            previous_sha="$(git rev-parse --verify "refs/tags/$previous_tag^{commit}")"
+            if ! git merge-base --is-ancestor "$previous_sha" "$SOURCE_SHA"; then
+              echo "Latest release $previous_tag ($previous_sha) is not an ancestor of selected source $SOURCE_SHA." >&2
+              exit 1
+            fi
+            commit_count="$(git rev-list --count "$previous_sha..$SOURCE_SHA")"
+            if [[ ! "$commit_count" =~ ^[1-9][0-9]*$ ]]; then
+              echo "Selected source has no commits after latest release $previous_tag." >&2
+              exit 1
+            fi
+            previous_manifest="$RUNNER_TEMP/previous-blender-manifest.toml"
+            git show "$previous_sha:audio2face/blender_manifest.toml" > "$previous_manifest"
+            PREVIOUS_MANIFEST="$previous_manifest" python - <<'PY'
+          import os
+          import re
+          import tomllib
+          from pathlib import Path
+
+          stable_semver = re.compile(
+              r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
+          )
+
+          def parse_version(value: object, label: str) -> tuple[int, int, int]:
+              if not isinstance(value, str) or stable_semver.fullmatch(value) is None:
+                  raise SystemExit(f"{label} has invalid stable semantic version {value!r}")
+              return tuple(int(part) for part in value.split("."))
+
+          previous = tomllib.loads(
+              Path(os.environ["PREVIOUS_MANIFEST"]).read_text(encoding="utf-8")
+          )
+          if previous.get("id") != "audio2face":
+              raise SystemExit("latest release tag does not contain the Audio2Face manifest")
+          previous_version = parse_version(previous.get("version"), "latest release manifest")
+          current_version = parse_version(os.environ["CURRENT_VERSION"], "selected source manifest")
+          if current_version <= previous_version:
+              raise SystemExit(
+                  "selected source manifest version must be newer than the latest release: "
+                  f"{os.environ['CURRENT_VERSION']} <= {previous.get('version')}"
+              )
+          PY
+            rm -f -- "$previous_manifest"
+          fi
+
+          printf 'previous_tag=%s\n' "$previous_tag" >> "$GITHUB_OUTPUT"
 
       - name: Run source tests
         shell: bash
@@ -109,25 +204,147 @@ jobs:
           python -m pip install --disable-pip-version-check "pytest==7.2.1"
           python -m pytest -q
 
-      - name: Create or verify draft release
+      - name: Create or verify release tag and draft
+        id: release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          PREVIOUS_TAG: ${{ steps.baseline.outputs.previous_tag }}
+          RELEASE_TAG: ${{ steps.identity.outputs.release_tag }}
+          SOURCE_SHA: ${{ steps.identity.outputs.source_sha }}
           VERSION: ${{ steps.identity.outputs.version }}
         run: |
-          if state="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null)"; then
-            if [[ "$state" != "true" ]]; then
-              echo "Release $RELEASE_TAG already exists and is not a draft." >&2
+          set -euo pipefail
+          repository_owner="${GITHUB_REPOSITORY%%/*}"
+          repository_name="${GITHUB_REPOSITORY#*/}"
+          qualified_tag="refs/tags/$RELEASE_TAG"
+
+          query_tag() {
+            # shellcheck disable=SC2016
+            gh api graphql \
+              -f owner="$repository_owner" \
+              -f name="$repository_name" \
+              -f qualified="$qualified_tag" \
+              -f query='query($owner: String!, $name: String!, $qualified: String!) {
+                repository(owner: $owner, name: $name) {
+                  ref(qualifiedName: $qualified) {
+                    target { __typename oid }
+                  }
+                }
+              }' \
+              --jq '.data.repository.ref.target // {} |
+                if .oid == null then "" else [.__typename, .oid] | @tsv end'
+          }
+
+          tag_state="$(query_tag)"
+          if [[ -z "$tag_state" ]]; then
+            create_error="$RUNNER_TEMP/create-tag-error.txt"
+            if ! gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+              --raw-field ref="$qualified_tag" \
+              --raw-field sha="$SOURCE_SHA" \
+              > /dev/null 2> "$create_error"; then
+              tag_state="$(query_tag)"
+              IFS=$'\t' read -r raced_type raced_sha <<< "$tag_state"
+              if [[ "$raced_type" != "Commit" || "$raced_sha" != "$SOURCE_SHA" ]]; then
+                cat "$create_error" >&2
+                exit 1
+              fi
+            fi
+            rm -f -- "$create_error"
+          fi
+
+          tag_state="$(query_tag)"
+          IFS=$'\t' read -r tag_type tag_ref_sha <<< "$tag_state"
+          if [[ "$tag_type" != "Commit" || "$tag_ref_sha" != "$SOURCE_SHA" ]]; then
+            echo "Release tag $RELEASE_TAG must be a lightweight tag at $SOURCE_SHA; got $tag_type $tag_ref_sha." >&2
+            exit 1
+          fi
+
+          resolve_release_id() {
+            RELEASES_JSON="$1" python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          pages = json.loads(
+              Path(os.environ["RELEASES_JSON"]).read_text(encoding="utf-8")
+          )
+          if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
+              raise SystemExit("GitHub releases response is not a paginated array")
+          releases = [release for page in pages for release in page]
+          if any(not isinstance(release, dict) for release in releases):
+              raise SystemExit("GitHub releases response contains a non-object")
+          pending = [
+              release.get("tag_name")
+              for release in releases
+              if release.get("draft") is True
+              and release.get("tag_name") != os.environ["RELEASE_TAG"]
+          ]
+          if pending:
+              raise SystemExit(
+                  "resolve pending draft releases before continuing: "
+                  + ", ".join(repr(tag) for tag in pending)
+              )
+          matches = [
+              release
+              for release in releases
+              if release.get("tag_name") == os.environ["RELEASE_TAG"]
+          ]
+          if matches:
+              if len(matches) != 1:
+                  raise SystemExit("generated tag resolves to multiple releases")
+              release = matches[0]
+              if release.get("draft") is not True:
+                  raise SystemExit(
+                      f"release {os.environ['RELEASE_TAG']} already exists and is not a draft"
+                  )
+              if release.get("prerelease") is not False:
+                  raise SystemExit("existing draft must not be a prerelease")
+              expected_name = f"Audio2Face {os.environ['VERSION']}"
+              if release.get("name") != expected_name:
+                  raise SystemExit(
+                      f"existing draft name must be {expected_name!r}; "
+                      f"got {release.get('name')!r}"
+                  )
+              release_id = release.get("id")
+              if (
+                  isinstance(release_id, bool)
+                  or not isinstance(release_id, int)
+                  or release_id <= 0
+              ):
+                  raise SystemExit(f"existing draft has invalid release ID {release_id!r}")
+              print(release_id, end="")
+          PY
+          }
+
+          releases_json="$RUNNER_TEMP/releases.json"
+          gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/releases?per_page=100" > "$releases_json"
+          release_id="$(resolve_release_id "$releases_json")"
+          if [[ -z "$release_id" ]]; then
+            create=(
+              gh release create "$RELEASE_TAG"
+              --repo "$GITHUB_REPOSITORY"
+              --draft
+              --generate-notes
+              --title "Audio2Face $VERSION"
+              --verify-tag
+            )
+            if [[ -n "$PREVIOUS_TAG" ]]; then
+              create+=(--notes-start-tag "$PREVIOUS_TAG")
+            fi
+            "${create[@]}"
+            gh api --paginate --slurp \
+              "repos/$GITHUB_REPOSITORY/releases?per_page=100" > "$releases_json"
+            release_id="$(resolve_release_id "$releases_json")"
+            if [[ -z "$release_id" ]]; then
+              echo "Created draft release cannot be resolved by its generated tag." >&2
               exit 1
             fi
-          else
-            gh release create "$RELEASE_TAG" \
-              --repo "$GITHUB_REPOSITORY" \
-              --draft \
-              --generate-notes \
-              --title "Audio2Face $VERSION" \
-              --verify-tag
           fi
+          rm -f -- "$releases_json"
+          printf 'release_id=%s\n' "$release_id" >> "$GITHUB_OUTPUT"
+          printf 'tag_ref_sha=%s\n' "$tag_ref_sha" >> "$GITHUB_OUTPUT"
 
   build_windows:
     name: Build Windows x64 extension
@@ -136,13 +353,20 @@ jobs:
     timeout-minutes: 360
     permissions:
       contents: write
+    outputs:
+      asset_sha256: ${{ steps.upload.outputs.sha256 }}
+      asset_size: ${{ steps.upload.outputs.size }}
     env:
       ASSET_NAME: ${{ needs.prepare.outputs.windows_asset }}
+      RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
+      RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+      SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
     steps:
-      - name: Check out tagged source
+      - name: Check out frozen release source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           clean: true
+          persist-credentials: false
           ref: ${{ needs.prepare.outputs.source_sha }}
 
       - name: Reclaim standard Windows runner disk
@@ -273,11 +497,27 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Windows extension build failed with exit code $LASTEXITCODE" }
 
       - name: Upload Windows asset to draft release
+        id: upload
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = "Stop"
+          $releaseJson = gh api "repos/$env:GITHUB_REPOSITORY/releases/$env:RELEASE_ID"
+          if ($LASTEXITCODE -ne 0) { throw "Cannot resolve prepared release ID $env:RELEASE_ID" }
+          $release = $releaseJson | ConvertFrom-Json
+          if ([string]$release.id -cne $env:RELEASE_ID -or
+              $release.tag_name -cne $env:RELEASE_TAG -or
+              $release.draft -cne $true -or
+              $release.prerelease -cne $false) {
+            throw "Prepared draft release identity changed before Windows upload"
+          }
+          $tagJson = gh api "repos/$env:GITHUB_REPOSITORY/git/ref/tags/$env:RELEASE_TAG"
+          if ($LASTEXITCODE -ne 0) { throw "Cannot resolve prepared release tag $env:RELEASE_TAG" }
+          $tag = $tagJson | ConvertFrom-Json
+          if ($tag.object.type -cne "commit" -or $tag.object.sha -cne $env:SOURCE_SHA) {
+            throw "Prepared release tag changed before Windows upload"
+          }
           $asset = Join-Path $env:GITHUB_WORKSPACE "dist\$env:ASSET_NAME"
           if (-not (Test-Path -LiteralPath $asset -PathType Leaf)) {
             throw "Expected release asset is missing: $asset"
@@ -286,8 +526,11 @@ jobs:
           if ($size -lt 1 -or $size -ge 2147483648) {
             throw "GitHub release asset must be non-empty and smaller than 2 GiB; got $size bytes"
           }
+          $sha256 = (Get-FileHash -LiteralPath $asset -Algorithm SHA256).Hash.ToLowerInvariant()
           gh release upload $env:RELEASE_TAG $asset --repo $env:GITHUB_REPOSITORY --clobber
           if ($LASTEXITCODE -ne 0) { throw "GitHub release upload failed with exit code $LASTEXITCODE" }
+          "sha256=$sha256" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "size=$size" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       - name: Remove native build workspace
         if: always()
@@ -310,13 +553,20 @@ jobs:
     timeout-minutes: 360
     permissions:
       contents: write
+    outputs:
+      asset_sha256: ${{ steps.upload.outputs.sha256 }}
+      asset_size: ${{ steps.upload.outputs.size }}
     env:
       ASSET_NAME: ${{ needs.prepare.outputs.linux_asset }}
+      RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
+      RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+      SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
     steps:
-      - name: Check out tagged source
+      - name: Check out frozen release source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           clean: true
+          persist-credentials: false
           ref: ${{ needs.prepare.outputs.source_sha }}
 
       - name: Reclaim standard Ubuntu runner disk
@@ -409,11 +659,31 @@ jobs:
         run: python tools/build_extension.py --blender "$BLENDER_EXECUTABLE" --platform linux-x64
 
       - name: Upload Linux asset to draft release
+        id: upload
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          release="$(
+            gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+              --jq '[.id, .tag_name, .draft, .prerelease] | @tsv'
+          )"
+          IFS=$'\t' read -r current_release_id current_tag draft prerelease <<< "$release"
+          if [[ "$current_release_id" != "$RELEASE_ID" || "$current_tag" != "$RELEASE_TAG" ||
+                "$draft" != "true" || "$prerelease" != "false" ]]; then
+            echo "Prepared draft release identity changed before Linux upload." >&2
+            exit 1
+          fi
+          tag="$(
+            gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" \
+              --jq '.object | [.type, .sha] | @tsv'
+          )"
+          IFS=$'\t' read -r tag_type tag_sha <<< "$tag"
+          if [[ "$tag_type" != "commit" || "$tag_sha" != "$SOURCE_SHA" ]]; then
+            echo "Prepared release tag changed before Linux upload." >&2
+            exit 1
+          fi
           asset="$GITHUB_WORKSPACE/dist/$ASSET_NAME"
           test -f "$asset"
           size="$(stat --format=%s "$asset")"
@@ -421,7 +691,10 @@ jobs:
             echo "GitHub release asset must be non-empty and smaller than 2 GiB; got $size bytes" >&2
             exit 1
           fi
+          sha256="$(sha256sum "$asset" | cut --delimiter=' ' --fields=1)"
           gh release upload "$RELEASE_TAG" "$asset" --repo "$GITHUB_REPOSITORY" --clobber
+          printf 'sha256=%s\n' "$sha256" >> "$GITHUB_OUTPUT"
+          printf 'size=%s\n' "$size" >> "$GITHUB_OUTPUT"
 
       - name: Remove native build workspace
         if: always()
@@ -448,56 +721,120 @@ jobs:
     permissions:
       contents: write
     env:
-      WINDOWS_ASSET: ${{ needs.prepare.outputs.windows_asset }}
-      LINUX_ASSET: ${{ needs.prepare.outputs.linux_asset }}
+      EXPECTED_VERSION: ${{ needs.prepare.outputs.version }}
       GH_TOKEN: ${{ github.token }}
+      LINUX_ASSET: ${{ needs.prepare.outputs.linux_asset }}
+      LINUX_SHA256: ${{ needs.build_linux.outputs.asset_sha256 }}
+      LINUX_SIZE: ${{ needs.build_linux.outputs.asset_size }}
+      RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
+      RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+      WINDOWS_ASSET: ${{ needs.prepare.outputs.windows_asset }}
+      WINDOWS_SHA256: ${{ needs.build_windows.outputs.asset_sha256 }}
+      WINDOWS_SIZE: ${{ needs.build_windows.outputs.asset_size }}
     steps:
       - name: Verify exact draft assets
         shell: bash
         run: |
           set -euo pipefail
-          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > "$RUNNER_TEMP/release.json"
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" > "$RUNNER_TEMP/release.json"
           python - <<'PY'
           import json
           import os
           from pathlib import Path
 
           release = json.loads(Path(os.environ["RUNNER_TEMP"], "release.json").read_text())
+          if release.get("id") != int(os.environ["RELEASE_ID"]):
+              raise SystemExit("draft release ID does not match the prepared release")
           if release.get("tag_name") != os.environ["RELEASE_TAG"]:
               raise SystemExit("draft release tag does not match the workflow tag")
           if release.get("draft") is not True:
               raise SystemExit("release is no longer a draft")
+          if release.get("prerelease") is not False:
+              raise SystemExit("draft release unexpectedly became a prerelease")
+          expected_name = f"Audio2Face {os.environ['EXPECTED_VERSION']}"
+          if release.get("name") != expected_name:
+              raise SystemExit(
+                  f"draft release name must be {expected_name!r}; got {release.get('name')!r}"
+              )
           assets = release.get("assets")
           if not isinstance(assets, list):
               raise SystemExit("release assets are not an array")
-          expected = {os.environ["WINDOWS_ASSET"], os.environ["LINUX_ASSET"]}
-          actual = {asset.get("name") for asset in assets if isinstance(asset, dict)}
-          if actual != expected or len(assets) != len(expected):
+          expected = {
+              os.environ["WINDOWS_ASSET"]: {
+                  "size": int(os.environ["WINDOWS_SIZE"]),
+                  "digest": f"sha256:{os.environ['WINDOWS_SHA256']}",
+              },
+              os.environ["LINUX_ASSET"]: {
+                  "size": int(os.environ["LINUX_SIZE"]),
+                  "digest": f"sha256:{os.environ['LINUX_SHA256']}",
+              },
+          }
+          actual = {
+              asset.get("name"): asset
+              for asset in assets
+              if isinstance(asset, dict) and isinstance(asset.get("name"), str)
+          }
+          if set(actual) != set(expected) or len(assets) != len(expected):
               raise SystemExit(
                   f"draft release must contain exactly {sorted(expected)}; got {sorted(actual)}"
               )
-          for asset in assets:
+          for name, identity in expected.items():
+              asset = actual[name]
               size = asset.get("size")
               if asset.get("state") != "uploaded":
-                  raise SystemExit(f"release asset is not uploaded: {asset.get('name')!r}")
-              if isinstance(size, bool) or not isinstance(size, int) or not 0 < size < 2**31:
+                  raise SystemExit(f"release asset is not uploaded: {name!r}")
+              if size != identity["size"] or not 0 < identity["size"] < 2**31:
                   raise SystemExit(
-                      f"release asset has invalid size: {asset.get('name')!r}: {size!r}"
+                      f"release asset size differs from native build: {name!r}: "
+                      f"{size!r} != {identity['size']!r}"
+                  )
+              if asset.get("digest") != identity["digest"]:
+                  raise SystemExit(
+                      f"release asset digest differs from native build: {name!r}: "
+                      f"{asset.get('digest')!r} != {identity['digest']!r}"
                   )
           PY
 
       - name: Verify release tag has not moved
         shell: bash
         env:
+          PREPARED_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
           PREPARED_TAG_REF_SHA: ${{ needs.prepare.outputs.tag_ref_sha }}
         run: |
           set -euo pipefail
-          current="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq .object.sha)"
-          if [[ "$current" != "$PREPARED_TAG_REF_SHA" ]]; then
-            echo "Release tag moved during the workflow: expected $PREPARED_TAG_REF_SHA, got $current" >&2
+          current="$(
+            gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" \
+              --jq '.object | [.type, .sha] | @tsv'
+          )"
+          IFS=$'\t' read -r object_type current_sha <<< "$current"
+          if [[ "$object_type" != "commit" ]]; then
+            echo "Release tag must remain a lightweight commit tag; got $object_type." >&2
+            exit 1
+          fi
+          if [[ "$current_sha" != "$PREPARED_TAG_REF_SHA" ]]; then
+            echo "Release tag moved during the workflow: expected $PREPARED_TAG_REF_SHA, got $current_sha" >&2
+            exit 1
+          fi
+          if [[ "$current_sha" != "$PREPARED_SOURCE_SHA" ]]; then
+            echo "Release tag no longer identifies prepared source $PREPARED_SOURCE_SHA; got $current_sha" >&2
             exit 1
           fi
 
       - name: Publish verified release
         shell: bash
-        run: gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false
+        run: |
+          set -euo pipefail
+          gh release edit "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft=false \
+            --latest
+          published="$(
+            gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+              --jq '[.id, .tag_name, .draft, .prerelease] | @tsv'
+          )"
+          IFS=$'\t' read -r current_release_id current_tag draft prerelease <<< "$published"
+          if [[ "$current_release_id" != "$RELEASE_ID" || "$current_tag" != "$RELEASE_TAG" ||
+                "$draft" != "false" || "$prerelease" != "false" ]]; then
+            echo "Published release postcondition does not match the verified draft." >&2
+            exit 1
+          fi

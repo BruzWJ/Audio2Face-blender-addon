@@ -243,11 +243,14 @@ installation, cancellation, and shutdown tests for both platform extension
 ZIPs.
 
 Tagged Windows and Linux packages are built and published only by manually
-running the native [GitHub release workflow](docs/releasing.md) with the exact
-existing version tag. The release jobs reclaim the
-standard `windows-latest` and `ubuntu-latest` GitHub-hosted images, use verified
-portable Blender 5.2.0 archives, and run the same two production build scripts
-shown above.
+running the native [GitHub release workflow](docs/releasing.md) on the
+repository's default branch. The workflow compares that branch with the latest
+published release, derives `v<version>` from
+`audio2face/blender_manifest.toml`, creates the tag automatically, then freezes
+that commit for both native builds. The release jobs reclaim the standard
+`windows-latest` and `ubuntu-latest` GitHub-hosted images, use verified portable
+Blender 5.2.0 archives, and run the same two production build scripts shown
+above.
 
 ## Licensing
 
