@@ -18,8 +18,9 @@ native worker, Audio2Face, or Audio2Emotion. Add-on Preferences provides one
 NVIDIA terms acceptance, source buttons for both models, and one managed
 install action that downloads a reviewed artifact containing the runtime and
 both models. The same Preferences page provides **Uninstall Audio2Face**, which
-uses Blender's native extension removal to delete the add-on and all of its
-managed runtime, model, temporary, log, and result files.
+shows a legacy-style path confirmation before using Blender's native extension
+removal to delete the add-on and all of its managed runtime, model, temporary,
+log, and result files.
 
 > [!IMPORTANT]
 > The checked-in runtime catalog currently publishes no platform archives.

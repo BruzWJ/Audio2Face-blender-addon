@@ -43,12 +43,14 @@ in this source release. It becomes available only after release maintainers
 publish reviewed Linux and Windows archives with immutable HTTPS URLs, exact
 sizes, and SHA-256 digests. No URL, checksum, or model payload is inferred.
 
-**Uninstall Audio2Face** uses Blender's extension uninstaller. Blender first
-disables the add-on and stops its worker, streams, and playback, then removes
-the extension and its complete managed data directory: runtime libraries, both
-models and TensorRT engines, installer leftovers, logs, and generated results.
-Selected WAV files, `.blend` files, meshes, and shared NVIDIA driver caches are
-not managed by the add-on and are not removed.
+**Uninstall Audio2Face** opens a legacy-style **Remove Add-on** confirmation
+showing the installed package path. After confirmation it delegates to
+Blender's extension uninstaller, which first disables the add-on and stops its
+worker, streams, and playback, then removes the extension and its complete
+managed data directory: runtime libraries, both models and TensorRT engines,
+installer leftovers, logs, and generated results. Selected WAV files, `.blend`
+files, meshes, and shared NVIDIA driver caches are not managed by the add-on
+and are not removed.
 
 ## Workflow
 

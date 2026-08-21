@@ -140,13 +140,16 @@ exercise the exact pinned model pair and confirm that Audio2Emotion's
 post-processed vector order agrees with Audio2Face's emotion order; SDK 1.0.0
 reports the vector width but does not expose names for those output positions.
 
-Clean uninstall delegates to Blender 5.2's native extension uninstaller. Its
-disable phase runs Audio2Face's normal process, stream, playback, timer, and
-handler cleanup; its package phase removes both the installed extension and
-the Audio2Face leaf under Blender's writable extension directory. That leaf
-owns the runtime, models, TensorRT engines, logs, temporary install state, and
-generated results. User-selected audio, `.blend` data, and shared GPU caches
-remain outside this ownership boundary.
+Clean uninstall presents the same package-path confirmation style as Blender's
+legacy add-on remover. The confirming Audio2Face operator returns before a
+one-shot main-thread timer delegates to Blender 5.2's native extension
+uninstaller, preventing the operator from unregistering its own class while it
+is executing. The native disable phase runs Audio2Face's normal process,
+stream, playback, timer, and handler cleanup; its package phase removes both
+the installed extension and the Audio2Face leaf under Blender's writable
+extension directory. That leaf owns the runtime, models, TensorRT engines,
+logs, temporary install state, and generated results. User-selected audio,
+`.blend` data, and shared GPU caches remain outside this ownership boundary.
 
 ## Lifecycle
 
