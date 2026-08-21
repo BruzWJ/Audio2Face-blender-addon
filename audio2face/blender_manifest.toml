@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "audio2face"
-version = "0.1.0"
+version = "2026.8.21"
 name = "Audio2Face"
 tagline = "Drive target meshes with GPU-generated ARKit-52 values"
 maintainer = "x.com/BruzWJ"
