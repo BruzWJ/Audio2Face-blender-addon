@@ -9,17 +9,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .path_contract import require_unaliased_path
+from .strict_json import duplicate_key_hook, invalid_constant_hook
+
 RESULT_SCHEMA = "a2f-animation/2"
 RESULT_CHANNEL_COUNT = 52
 MAX_RESULT_FILE_BYTES = 512 * 1024 * 1024
 MAX_SAMPLE_RATE = (1 << 32) - 1
 MIN_SAMPLE_TIMESTAMP = -(1 << 63)
 MAX_SAMPLE_TIMESTAMP = (1 << 63) - 1
-MAX_JOB_ID_LENGTH = 128
+MAX_OPERATION_ID_LENGTH = 128
 _RESULT_FIELDS = frozenset(
     {
         "schema",
-        "job_id",
+        "operation_id",
         "channels",
         "sample_rate",
         "timestamps_samples",
@@ -37,7 +40,7 @@ class AnimationResult:
     timestamps: list[int]
     sample_rate: int
     weights: list[list[float]]
-    job_id: str
+    operation_id: str
     channels: list[str]
 
 
@@ -83,8 +86,8 @@ def _timestamps(value: Any) -> list[int]:
 def validate_output_channels(channels: Any) -> tuple[str, ...]:
     """Validate and freeze the model-provided output bus description."""
 
-    if not isinstance(channels, (list, tuple)):
-        raise ResultValidationError("channels must be an array or sequence")
+    if not isinstance(channels, list):
+        raise ResultValidationError("channels must be a JSON array")
     if len(channels) != RESULT_CHANNEL_COUNT:
         raise ResultValidationError(
             f"channels must contain exactly {RESULT_CHANNEL_COUNT} names"
@@ -118,9 +121,9 @@ def _weights(value: Any, frame_count: int, channel_count: int) -> list[list[floa
         parsed: list[float] = []
         for channel_index, item in enumerate(row):
             field = f"weights[{frame_index}][{channel_index}]"
-            if isinstance(item, bool) or not isinstance(item, (int, float)):
-                raise ResultValidationError(f"{field} must be a number")
-            coefficient = float(item)
+            if type(item) is not float:
+                raise ResultValidationError(f"{field} must be a JSON float")
+            coefficient = item
             if not math.isfinite(coefficient):
                 raise ResultValidationError(f"{field} must be finite")
             if coefficient < 0.0 or coefficient > 1.0:
@@ -149,10 +152,15 @@ def validate_result_document(document: dict[str, Any]) -> AnimationResult:
     ):
         raise ResultValidationError("sample_rate must be a positive uint32 integer")
 
-    job_id = document["job_id"]
-    if not isinstance(job_id, str) or not job_id or len(job_id) > MAX_JOB_ID_LENGTH:
+    operation_id = document["operation_id"]
+    if (
+        not isinstance(operation_id, str)
+        or not operation_id
+        or len(operation_id) > MAX_OPERATION_ID_LENGTH
+    ):
         raise ResultValidationError(
-            f"job_id must be a non-empty string of at most {MAX_JOB_ID_LENGTH} characters"
+            "operation_id must be a non-empty string of at most "
+            f"{MAX_OPERATION_ID_LENGTH} characters"
         )
 
     channels = validate_output_channels(_array(document["channels"], "channels"))
@@ -161,7 +169,7 @@ def validate_result_document(document: dict[str, Any]) -> AnimationResult:
         timestamps=timestamps,
         sample_rate=sample_rate,
         weights=_weights(document["weights"], len(timestamps), len(channels)),
-        job_id=job_id,
+        operation_id=operation_id,
         channels=list(channels),
     )
 
@@ -169,54 +177,63 @@ def validate_result_document(document: dict[str, Any]) -> AnimationResult:
 def resolve_result_path(
     reference: str | os.PathLike[str], allowed_directory: str | os.PathLike[str]
 ) -> Path:
-    """Resolve a worker result and confine it to the managed result directory."""
+    """Validate one canonical result path and confine it to its canonical root."""
 
-    path = Path(reference).expanduser().resolve(strict=False)
-    root = Path(allowed_directory).expanduser().resolve(strict=False)
+    root_lexical = require_unaliased_path(
+        allowed_directory,
+        description="controller-owned result directory",
+        error_type=ResultValidationError,
+    )
+    path_lexical = require_unaliased_path(
+        reference,
+        description="result file",
+        error_type=ResultValidationError,
+    )
+    if not root_lexical.is_dir():
+        raise ResultValidationError(
+            f"controller-owned result directory is not a directory: {root_lexical}"
+        )
+    if not path_lexical.is_file():
+        raise ResultValidationError(f"result file is not a regular file: {path_lexical}")
     try:
-        path.relative_to(root)
+        path_lexical.relative_to(root_lexical)
     except ValueError as exc:
         raise ResultValidationError(
-            f"result path is outside the managed result directory: {path}"
+            "result path is outside the controller-owned result directory: "
+            f"{path_lexical}"
         ) from exc
-    return path
-
-
-def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for key, value in pairs:
-        if key in result:
-            raise ResultValidationError(f"result contains duplicate field {key!r}")
-        result[key] = value
-    return result
+    return path_lexical
 
 
 def load_animation_result(
     path: str | os.PathLike[str],
     *,
     allowed_directory: str | os.PathLike[str],
-    max_bytes: int = MAX_RESULT_FILE_BYTES,
 ) -> AnimationResult:
-    """Load and validate one atomically published managed result."""
+    """Load and validate one atomically published controller-owned result."""
 
     resolved = resolve_result_path(path, allowed_directory)
     try:
         size = resolved.stat().st_size
     except OSError as exc:
         raise ResultValidationError(f"cannot stat result file {resolved}: {exc}") from exc
-    if size > max_bytes:
-        raise ResultValidationError(f"result file is larger than {max_bytes} bytes")
+    if size > MAX_RESULT_FILE_BYTES:
+        raise ResultValidationError(
+            f"result file is larger than {MAX_RESULT_FILE_BYTES} bytes"
+        )
     try:
         with resolved.open("r", encoding="utf-8") as handle:
             document = json.load(
                 handle,
-                object_pairs_hook=_reject_duplicate_keys,
-                parse_constant=lambda token: (_ for _ in ()).throw(
-                    ResultValidationError(f"result contains invalid number {token}")
+                object_pairs_hook=duplicate_key_hook(
+                    ResultValidationError,
+                    "result",
+                ),
+                parse_constant=invalid_constant_hook(
+                    ResultValidationError,
+                    "result",
                 ),
             )
-    except ResultValidationError:
-        raise
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise ResultValidationError(f"cannot read result file {resolved}: {exc}") from exc
     return validate_result_document(document)

@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import bpy
 
 from .frame_stream import sample_linear
+from .path_contract import require_unaliased_path
 from .result_io import AnimationResult
 
 if TYPE_CHECKING:
@@ -41,11 +41,17 @@ def build_subscriptions(settings: A2FSceneSettings) -> tuple[bpy.types.Object, .
 
 def apply_shape_key_frame(
     targets: tuple[bpy.types.Object, ...],
-    channels: Sequence[str],
-    weights: Sequence[float],
+    channels: tuple[str, ...],
+    weights: tuple[float, ...],
 ) -> None:
     """Assign one model-described frame to exact-name Shape Key properties."""
 
+    if type(targets) is not tuple:
+        raise PreviewError("shape-key targets must be a frozen tuple")
+    if type(channels) is not tuple:
+        raise PreviewError("shape-key channels must be a frozen tuple")
+    if type(weights) is not tuple:
+        raise PreviewError("shape-key weights must be a frozen frame tuple")
     if len(weights) != len(channels):
         raise PreviewError(
             f"shape-key frame has {len(weights)} values; expected {len(channels)}"
@@ -81,8 +87,8 @@ class PreviewController:
 
     def __init__(self) -> None:
         self._scene_name: str | None = None
-        self._timestamps: list[int] = []
-        self._weights: list[list[float]] = []
+        self._timestamps: tuple[int, ...] = ()
+        self._weights: tuple[tuple[float, ...], ...] = ()
         self._sample_rate = 0
         self._channels: tuple[str, ...] = ()
         self._subscriptions: tuple[bpy.types.Object, ...] = ()
@@ -106,7 +112,11 @@ class PreviewController:
         subscriptions = build_subscriptions(settings)
         if not subscriptions:
             raise PreviewError("no enabled target mesh is selected")
-        resolved_audio = Path(audio_path).expanduser().resolve(strict=False)
+        resolved_audio = require_unaliased_path(
+            audio_path,
+            description="preview audio",
+            error_type=PreviewError,
+        )
         if not resolved_audio.is_file():
             raise PreviewError(f"audio file does not exist: {resolved_audio}")
         try:
@@ -115,15 +125,15 @@ class PreviewController:
             device = aud.Device()
             sound = aud.Sound(str(resolved_audio))
             handle = device.play(sound)
-            handle.loop_count = -1 if bool(settings.preview_loop) else 0
-            handle.volume = float(settings.preview_volume)
+            handle.loop_count = -1 if settings.preview_loop else 0
+            handle.volume = settings.preview_volume
         except Exception as exc:
             raise PreviewError(f"could not play selected audio: {exc}") from exc
 
         self._scene_name = scene.name
-        self._timestamps = result.timestamps
-        self._weights = result.weights
-        self._sample_rate = int(result.sample_rate)
+        self._timestamps = tuple(result.timestamps)
+        self._weights = tuple(tuple(frame) for frame in result.weights)
+        self._sample_rate = result.sample_rate
         self._channels = tuple(result.channels)
         self._subscriptions = subscriptions
         self._device = device
@@ -141,7 +151,11 @@ class PreviewController:
         self.tick()
 
     def pause(self) -> None:
-        scene = bpy.data.scenes.get(self._scene_name) if self._scene_name else None
+        scene = (
+            bpy.data.scenes.get(self._scene_name)
+            if self._scene_name is not None
+            else None
+        )
         if self._handle is None or scene is None:
             raise PreviewError("audio preview is not playing")
         if not self._handle.pause():
@@ -149,39 +163,41 @@ class PreviewController:
         scene.audio2face.preview_state = "PAUSED"
 
     def resume(self) -> None:
-        scene = bpy.data.scenes.get(self._scene_name) if self._scene_name else None
+        scene = (
+            bpy.data.scenes.get(self._scene_name)
+            if self._scene_name is not None
+            else None
+        )
         if self._handle is None or scene is None:
             raise PreviewError("audio preview is not paused")
         if not self._handle.resume():
             raise PreviewError("audio device could not resume preview")
         scene.audio2face.preview_state = "PLAYING"
 
-    def stop(self, *, reset: bool | None = None) -> None:
-        scene = bpy.data.scenes.get(self._scene_name) if self._scene_name else None
-        settings = scene.audio2face if scene is not None else None
-        should_reset = (
-            bool(settings.preview_reset_on_stop)
-            if reset is None
-            else reset
+    def stop(self, *, reset: bool) -> None:
+        if type(reset) is not bool:
+            raise TypeError("reset must be an exact bool")
+        scene = (
+            bpy.data.scenes.get(self._scene_name)
+            if self._scene_name is not None
+            else None
         )
+        settings = scene.audio2face if scene is not None else None
         if self._handle is not None:
-            try:
-                self._handle.stop()
-            except Exception:
-                pass
-        if should_reset and self._subscriptions:
+            self._handle.stop()
+        if reset and self._subscriptions:
             apply_shape_key_frame(
                 self._subscriptions,
                 self._channels,
-                [0.0] * len(self._channels),
+                (0.0,) * len(self._channels),
             )
         if settings is not None:
             settings.preview_state = "IDLE"
             settings.preview_time = 0.0
 
         self._scene_name = None
-        self._timestamps = []
-        self._weights = []
+        self._timestamps = ()
+        self._weights = ()
         self._sample_rate = 0
         self._channels = ()
         self._subscriptions = ()
@@ -201,11 +217,11 @@ class PreviewController:
         try:
             status = self._handle.status
             if status == self._aud.STATUS_STOPPED:
-                self.stop()
+                self.stop(reset=settings.preview_reset_on_stop)
                 return False
-            position = max(0.0, float(self._handle.position))
-            self._handle.loop_count = -1 if bool(settings.preview_loop) else 0
-            self._handle.volume = float(settings.preview_volume)
+            position = max(0.0, self._handle.position)
+            self._handle.loop_count = -1 if settings.preview_loop else 0
+            self._handle.volume = settings.preview_volume
             frame = sample_linear(
                 self._timestamps,
                 self._weights,
@@ -222,9 +238,11 @@ class PreviewController:
             elif status == self._aud.STATUS_PAUSED:
                 settings.preview_state = "PAUSED"
             else:
-                raise PreviewError(f"audio device returned invalid preview status {status!r}")
+                raise PreviewError(
+                    f"audio device returned invalid preview status {status!r}"
+                )
             return True
-        except Exception as exc:
+        except (OSError, RuntimeError, ValueError) as exc:
             self.stop(reset=False)
             settings.status = "ERROR"
             settings.status_message = str(exc)

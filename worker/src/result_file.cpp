@@ -1,6 +1,7 @@
 #include "result_file.h"
 
 #include "backend.h"
+#include "path_contract.h"
 
 #include <atomic>
 #include <cerrno>
@@ -72,24 +73,8 @@ void write_json_atomically(
     const std::atomic_bool& canceled,
     const ResultPublicationGate& publication_gate) {
   namespace fs = std::filesystem;
-  const fs::path target(path);
-  if (!target.is_absolute() || target.filename().empty()) {
-    throw WorkerError("invalid_result_path", "Result path must be an absolute file path",
-                      {{"path", path}});
-  }
-  std::error_code error;
-  if (fs::exists(target, error)) {
-    throw WorkerError("result_exists", "Result file already exists", {{"path", target.string()}});
-  }
-  if (error) {
-    throw WorkerError("invalid_result_path", "Could not inspect result path",
-                      {{"path", target.string()}, {"error", error.message()}});
-  }
-  const fs::path directory = target.parent_path();
-  if (!fs::is_directory(directory, error) || error) {
-    throw WorkerError("result_directory_failed", "Result directory does not exist",
-                      {{"path", directory.string()}, {"error", error.message()}});
-  }
+  const fs::path target = require_canonical_new_file(
+      path, "invalid_result_path", "result_exists", "Result path");
 
   const fs::path temporary(target.string() + temp_suffix());
   try {

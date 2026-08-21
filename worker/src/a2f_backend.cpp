@@ -1,5 +1,6 @@
 #include "backend.h"
 
+#include "path_contract.h"
 #include "result_file.h"
 #include "wav.h"
 
@@ -12,7 +13,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <filesystem>
 #include <initializer_list>
 #include <iostream>
 #include <limits>
@@ -140,12 +140,7 @@ SdkPtr<T> require_sdk_ptr(T* value, const char* operation,
 }
 
 void require_model_file(const std::string& path, const char* field) {
-  std::error_code error;
-  if (!std::filesystem::is_regular_file(path, error)) {
-    throw WorkerError("model_not_found",
-                      std::string(field) + " is not a regular file",
-                      {{"path", path}});
-  }
+  (void)require_canonical_regular_file(path, "model_not_found", field);
 }
 
 void require_exact_keys(const json& object,
@@ -165,8 +160,8 @@ void require_exact_keys(const json& object,
 }
 
 float required_float_value(const json& value, const std::string& path) {
-  if (!value.is_number()) {
-    throw WorkerError("invalid_params", path + " must be numeric");
+  if (!value.is_number_float()) {
+    throw WorkerError("invalid_params", path + " must be a JSON float");
   }
   const double parsed = value.get<double>();
   if (!std::isfinite(parsed) || parsed < -std::numeric_limits<float>::max() ||
@@ -527,8 +522,8 @@ class Backend::Impl final {
                                                  classifier_parameters),
           "Creating Audio2Emotion GPU executor", "gpu_error");
       // SDK 1.0.0 exposes the post-processed vector width, but not names for
-      // those output positions. The release catalog therefore pins one model
-      // pair whose positional compatibility must be verified end to end.
+      // those output positions. Require the selected v3.0 model pair to expose
+      // the same ordered emotion-vector width before creating the integration.
       if (emotion_executor_->GetNbTracks() != 1 ||
           emotion_executor_->GetSamplingRate() != sample_rate_ ||
           emotion_executor_->GetEmotionsSize() != emotion_channels_.size()) {
@@ -590,9 +585,6 @@ class Backend::Impl final {
     }
     const std::vector<float> audio =
         read_wav_mono(request.audio_path, sample_rate);
-    if (audio.empty()) {
-      throw WorkerError("audio_invalid", "Audio contains no samples");
-    }
     if (canceled.load(std::memory_order_acquire)) {
       throw WorkerError("canceled", "Generation was canceled");
     }
@@ -637,7 +629,7 @@ class Backend::Impl final {
     }
 
     json document = {{"schema", "a2f-animation/2"},
-                     {"job_id", request.job_id},
+                     {"operation_id", request.operation_id},
                      {"channels", output_channels_},
                      {"sample_rate", sample_rate},
                      {"timestamps_samples", std::move(timestamps)},
@@ -660,7 +652,7 @@ class Backend::Impl final {
     }
     begin_operation(request.settings);
     try {
-      active_stream_id_ = request.stream_id;
+      active_stream_operation_id_ = request.operation_id;
       const std::size_t prebuffer_samples =
           auto_audio2emotion_active_
               ? std::max(audio2face_input_window_samples_,
@@ -674,11 +666,11 @@ class Backend::Impl final {
     }
   }
 
-  void stream_chunk(const std::string& stream_id,
+  void stream_chunk(const std::string& operation_id,
                     const std::vector<float>& audio,
                     std::atomic_bool& canceled,
                     const StreamFrameCallback& frame) {
-    require_active_stream(stream_id);
+    require_active_stream(operation_id);
     if (audio.empty()) {
       throw WorkerError("invalid_params", "Streaming PCM chunk must not be empty");
     }
@@ -700,18 +692,18 @@ class Backend::Impl final {
     drain_ready(canceled, frame);
   }
 
-  void stream_end(const std::string& stream_id,
+  void stream_end(const std::string& operation_id,
                   std::atomic_bool& canceled,
                   const StreamFrameCallback& frame) {
-    require_active_stream(stream_id);
+    require_active_stream(operation_id);
     OperationReset reset(*this);
     close_audio_and_drain(canceled, frame);
   }
 
-  void stream_abort(const std::string& stream_id) noexcept {
+  void stream_abort(const std::string& operation_id) noexcept {
     if (operation_active_.load(std::memory_order_acquire) &&
-        active_stream_id_ == stream_id) {
-      active_stream_id_.clear();
+        active_stream_operation_id_ == operation_id) {
+      active_stream_operation_id_.clear();
       operation_active_.store(false, std::memory_order_release);
     }
   }
@@ -903,15 +895,15 @@ class Backend::Impl final {
   }
 
   void finish_operation() noexcept {
-    active_stream_id_.clear();
+    active_stream_operation_id_.clear();
     operation_active_.store(false, std::memory_order_release);
   }
 
-  void require_active_stream(const std::string& stream_id) const {
+  void require_active_stream(const std::string& operation_id) const {
     if (!operation_active_.load(std::memory_order_acquire) ||
-        active_stream_id_ != stream_id) {
-      throw WorkerError("job_not_found", "The requested stream is not active",
-                        {{"job_id", stream_id}});
+        active_stream_operation_id_ != operation_id) {
+      throw WorkerError("operation_not_found", "The requested stream is not active",
+                        {{"operation_id", operation_id}});
     }
   }
 
@@ -1219,7 +1211,7 @@ class Backend::Impl final {
     eye_look_indices_ = {};
     emotion_channels_.clear();
     manual_emotion_.clear();
-    active_stream_id_.clear();
+    active_stream_operation_id_.clear();
     previous_timestamp_.reset();
     sample_rate_ = 0;
     audio2face_input_window_samples_ = 0;
@@ -1238,7 +1230,7 @@ class Backend::Impl final {
   ArkitEyeLookIndices eye_look_indices_{};
   std::vector<EmotionChannel> emotion_channels_;
   std::vector<float> manual_emotion_;
-  std::string active_stream_id_;
+  std::string active_stream_operation_id_;
   std::optional<std::int64_t> previous_timestamp_;
   std::uint32_t sample_rate_{0};
   std::size_t audio2face_input_window_samples_{0};
@@ -1264,21 +1256,21 @@ json Backend::stream_start(const StreamRequest& request) {
   return impl_->stream_start(request);
 }
 
-void Backend::stream_chunk(const std::string& stream_id,
+void Backend::stream_chunk(const std::string& operation_id,
                            const std::vector<float>& audio,
                            std::atomic_bool& canceled,
                            const StreamFrameCallback& frame) {
-  impl_->stream_chunk(stream_id, audio, canceled, frame);
+  impl_->stream_chunk(operation_id, audio, canceled, frame);
 }
 
-void Backend::stream_end(const std::string& stream_id,
+void Backend::stream_end(const std::string& operation_id,
                          std::atomic_bool& canceled,
                          const StreamFrameCallback& frame) {
-  impl_->stream_end(stream_id, canceled, frame);
+  impl_->stream_end(operation_id, canceled, frame);
 }
 
-void Backend::stream_abort(const std::string& stream_id) noexcept {
-  impl_->stream_abort(stream_id);
+void Backend::stream_abort(const std::string& operation_id) noexcept {
+  impl_->stream_abort(operation_id);
 }
 
 }  // namespace a2f_worker

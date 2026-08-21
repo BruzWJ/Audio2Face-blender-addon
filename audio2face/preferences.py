@@ -1,4 +1,4 @@
-"""Extension-level setup for the managed local GPU worker."""
+"""Audio2Face extension preferences and model setup."""
 
 from __future__ import annotations
 
@@ -64,19 +64,24 @@ class A2FAddonPreferences(bpy.types.AddonPreferences):
             layout.separator(type="LINE")
 
         controller = get_controller()
-        runtime_ready, runtime_message = controller.runtime_availability()
-        models_ready, model_message = controller.model_availability(
-            require_engine=False
-        )
-        can_install, blocked_reason = controller.install_eligibility()
+        snapshot = controller.setup_snapshot()
+        runtime_status = snapshot.runtime_status
+        model_status = snapshot.model_status
+        engine_status = snapshot.engine_status
+        can_optimize, blocked_reason = controller.optimization_eligibility(snapshot)
 
         setup = layout.box()
-        setup.label(text="GPU Worker & Models", icon="PREFERENCES")
+        setup.label(text="Bundled GPU Runtime & Models", icon="PREFERENCES")
         setup.label(
-            text="Setup installs this OS's worker and optimizes both selected models.",
+            text="The native worker and CUDA/TensorRT libraries ship with this add-on.",
             icon="INFO",
         )
-        setup.label(text="The native worker path is managed automatically.")
+        runtime_row = setup.row()
+        runtime_row.alert = not runtime_status.ready
+        runtime_row.label(
+            text=runtime_status.message,
+            icon="CHECKMARK" if runtime_status.ready else "ERROR",
+        )
 
         terms = setup.operator("wm.url_open", text="NVIDIA Terms", icon="URL")
         terms.url = (
@@ -89,71 +94,64 @@ class A2FAddonPreferences(bpy.types.AddonPreferences):
         sources = setup.row(align=True)
         for label, url in (
             ("Download Audio2Face", "https://huggingface.co/nvidia/Audio2Face-3D-v3.0"),
-            ("Download Audio2Emotion", "https://huggingface.co/nvidia/Audio2Emotion-v3.0"),
+            (
+                "Download Audio2Emotion",
+                "https://huggingface.co/nvidia/Audio2Emotion-v3.0",
+            ),
         ):
             source = sources.operator("wm.url_open", text=label, icon="URL")
             source.url = url
         model_directories = setup.column()
-        model_directories.enabled = not controller.install_in_progress
+        model_directories.enabled = not controller.optimization_in_progress
         model_directories.prop(self, "audio2face_model_directory")
         model_directories.prop(self, "audio2emotion_model_directory")
-        model_status = setup.row()
-        model_status.alert = not models_ready
-        model_status.label(
-            text=model_message,
-            icon="CHECKMARK" if models_ready else "ERROR",
+        model_row = setup.row()
+        model_row.alert = not model_status.ready
+        model_row.label(
+            text=model_status.message,
+            icon="CHECKMARK" if model_status.ready else "ERROR",
         )
 
-        if controller.install_in_progress:
-            setup.label(text=controller.install_message, icon="TIME")
+        if controller.optimization_in_progress:
+            setup.label(text=controller.optimization_message, icon="TIME")
             setup.progress(
-                factor=controller.install_progress,
+                factor=controller.optimization_progress,
                 type="BAR",
-                text=f"Install Progress {controller.install_progress:.0%}",
+                text=f"Optimization {controller.optimization_progress:.0%}",
             )
             setup.operator(
-                "a2f.cancel_runtime_install",
-                text="Cancel Install",
+                "a2f.cancel_model_optimization",
+                text="Cancel Optimization",
                 icon="CANCEL",
             )
             return
 
-        if runtime_ready:
-            setup.label(
-                text="GPU worker and optimized models are ready",
-                icon="CHECKMARK",
+        if model_status.ready:
+            optimized_status = setup.row()
+            optimized_status.alert = not engine_status.ready
+            optimized_status.label(
+                text=engine_status.message,
+                icon="CHECKMARK" if engine_status.ready else "INFO",
             )
-        else:
-            unavailable = setup.row()
-            unavailable.alert = True
-            unavailable.label(text="GPU worker and models are not ready", icon="ERROR")
-            setup.label(text=runtime_message)
 
         action = setup.row()
-        action.enabled = can_install
+        action.enabled = can_optimize
         action.scale_y = 1.2
         action.operator(
-            "a2f.install_runtime",
-            text=(
-                "Repair Worker / Rebuild Models"
-                if runtime_ready
-                else "Install Worker & Optimize Models"
-            ),
-            icon="FILE_REFRESH" if runtime_ready else "IMPORT",
+            "a2f.optimize_models",
+            text="Rebuild Models" if engine_status.ready else "Optimize Models",
+            icon="FILE_REFRESH" if engine_status.ready else "MODIFIER",
         )
-        if not can_install:
+        if not can_optimize:
             reason = setup.row()
             reason.alert = True
             reason.label(text=blocked_reason, icon="ERROR")
-        elif controller.install_message:
-            setup.label(text=controller.install_message, icon="INFO")
+        elif controller.optimization_message:
+            setup.label(text=controller.optimization_message, icon="INFO")
 
 
-def get_preferences(
-    context: bpy.types.Context | None = None,
-) -> A2FAddonPreferences | None:
-    context = context or bpy.context
-    addon = context.preferences.addons.get(__package__)
+def get_preferences() -> A2FAddonPreferences | None:
+    addon = bpy.context.preferences.addons.get(__package__)
     return addon.preferences if addon is not None else None
 
 

@@ -81,12 +81,6 @@ class SidecarClient:
     ) -> None:
         """Spawn without a shell and start queue-only I/O threads."""
 
-        executable = executable.expanduser().resolve(strict=False)
-        if not executable.is_file():
-            raise SidecarError(f"worker executable does not exist: {executable}")
-        if os.name != "nt" and not os.access(executable, os.X_OK):
-            raise SidecarError(f"worker is not executable: {executable}")
-
         with self._state_lock:
             previous = self._process
         if previous is not None:
@@ -129,6 +123,9 @@ class SidecarClient:
         assert process.stdin is not None
         assert process.stdout is not None
         assert process.stderr is not None
+        process.stdin.reconfigure(newline="\n")
+        process.stdout.reconfigure(newline="")
+        process.stderr.reconfigure(newline="")
         self._threads = [
             self._thread("a2f-worker-stdin", self._writer_loop, process),
             self._thread("a2f-worker-stdout", self._stdout_loop, process),
@@ -225,7 +222,7 @@ class SidecarClient:
         self._outgoing.put(encode_message(envelope))
         return envelope["id"]
 
-    def begin_shutdown(self, *, timeout: float = 2.0) -> str | None:
+    def begin_shutdown(self, *, timeout: float) -> str | None:
         """Queue graceful shutdown and let :meth:`tick` enforce its deadline."""
 
         with self._state_lock:
@@ -285,7 +282,7 @@ class SidecarClient:
                 break
         return events
 
-    def close(self, *, timeout: float = 1.0) -> None:
+    def close(self, *, timeout: float) -> None:
         """Bounded synchronous cleanup for add-on unregistration/interpreter exit."""
 
         with self._state_lock:

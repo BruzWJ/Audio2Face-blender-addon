@@ -35,14 +35,14 @@ struct ModelRequest {
 };
 
 struct GenerateRequest {
-  std::string job_id;
+  std::string operation_id;
   std::string audio_path;
   std::string result_path;
   json settings;
 };
 
 struct StreamRequest {
-  std::string stream_id;
+  std::string operation_id;
   std::uint32_t sample_rate;
   json settings;
 };
@@ -69,14 +69,14 @@ class Backend final {
                 const ProgressCallback& progress,
                 const ResultPublicationGate& publication_gate);
   json stream_start(const StreamRequest& request);
-  void stream_chunk(const std::string& stream_id,
+  void stream_chunk(const std::string& operation_id,
                     const std::vector<float>& audio,
                     std::atomic_bool& canceled,
                     const StreamFrameCallback& frame);
-  void stream_end(const std::string& stream_id,
+  void stream_end(const std::string& operation_id,
                   std::atomic_bool& canceled,
                   const StreamFrameCallback& frame);
-  void stream_abort(const std::string& stream_id) noexcept;
+  void stream_abort(const std::string& operation_id) noexcept;
 
  private:
   class Impl;

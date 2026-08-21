@@ -1,114 +1,115 @@
-"""Resolve the installed Audio2Face native worker and selected model folders.
+"""Resolve the native runtime bundled inside this Blender extension.
 
-This module deliberately has no :mod:`bpy` dependency.  Blender-facing code is
-responsible for supplying the extension's writable data root; this resolver
-never searches the extension sources, ``PATH``, or any system installation.
+The installed extension contains exactly one platform runtime at ``runtime/``.
+This module never searches writable extension data, ``PATH``, a CUDA toolkit,
+or another Audio2Face installation.  Model repositories remain at the exact
+paths selected in Add-on Preferences and are attached only after the bundled
+runtime has passed validation.
 """
 
 from __future__ import annotations
 
 import json
+import ntpath
 import os
 import platform as host_platform
 import struct
 import sys
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import Path, PureWindowsPath
 from types import MappingProxyType
 from typing import Any, Mapping
 
-from .model_inputs import ModelInputError, validate_model_directory
-
-RUNTIME_SCHEMA = "audio2face-runtime/3"
-_MANIFEST_FIELDS = frozenset(
-    {
-        "schema",
-        "platform",
-        "worker",
-        "trtexec",
-        "library_directories",
-        "licenses",
-    }
+from .path_contract import require_unaliased_path
+from .runtime_contract import (
+    RUNTIME_MANIFEST_FIELDS,
+    RUNTIME_SCHEMA,
+    RuntimePlatformContract,
+    runtime_contract,
 )
+from .strict_json import duplicate_key_hook, invalid_constant_hook
 
 
 class BundleError(RuntimeError):
-    """Raised when an installed runtime bundle is absent or unsafe to launch."""
+    """Raised when this extension's bundled runtime is absent or unsafe."""
 
 
 @dataclass(frozen=True, slots=True)
-class BundleLaunchSpec:
-    """Immutable, fully validated child-process launch configuration."""
+class RuntimeBundle:
+    """Immutable, fully validated package-local native runtime."""
 
     platform: str
     root: Path
     executable: Path
     trtexec: Path
     env: Mapping[str, str]
-    audio2face_model: Path
-    audio2emotion_model: Path
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "env", MappingProxyType(dict(self.env)))
 
 
-def current_platform_id(
-    *, system: str | None = None, machine: str | None = None
-) -> str:
-    """Return the normalized runtime catalog platform identifier."""
+@dataclass(frozen=True, slots=True)
+class RuntimeModelSpec:
+    """One validated bundled runtime paired with two selected NVIDIA models."""
 
-    raw_system = system if system is not None else sys.platform
-    raw_machine = (
-        machine if machine is not None else host_platform.machine()
-    ).lower()
-    expected_machine = {"linux": "x86_64", "win32": "amd64"}.get(raw_system)
-    if expected_machine is None:
+    runtime: RuntimeBundle
+    audio2face_model: Path
+    audio2emotion_model: Path
+
+
+def current_platform_id() -> str:
+    """Return the one supported runtime identifier for the current host."""
+
+    system = sys.platform
+    machine = host_platform.machine()
+    if system == "linux" and machine == "x86_64":
+        return "linux-x64"
+    if system == "win32" and machine == "AMD64":
+        return "windows-x64"
+    if system not in {"linux", "win32"}:
         raise BundleError(
             "Audio2Face bundled inference supports Linux and Windows only; "
-            f"detected system {raw_system!r}"
+            f"detected system {system!r}"
         )
-    if raw_machine != expected_machine:
-        raise BundleError(
-            "Audio2Face bundled inference supports x86-64 only; "
-            f"detected machine {raw_machine!r}"
-        )
-    if raw_system == "linux":
-        return "linux-x64"
-    return "windows-x64"
-
-
-def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for key, value in pairs:
-        if key in result:
-            raise BundleError(f"bundle manifest contains duplicate field {key!r}")
-        result[key] = value
-    return result
+    raise BundleError(
+        "Audio2Face bundled inference supports x86-64 only; "
+        f"detected machine {machine!r}"
+    )
 
 
 def _read_manifest(path: Path) -> dict[str, Any]:
+    path = require_unaliased_path(
+        path,
+        description="bundled runtime manifest",
+        error_type=BundleError,
+    )
     try:
-        if path.stat().st_size > 64 * 1024:
+        if not path.is_file():
+            raise BundleError(f"bundle manifest is not a regular file: {path}")
+        size = path.stat().st_size
+        if size < 1 or size > 64 * 1024:
             raise BundleError(f"bundle manifest is unexpectedly large: {path}")
         text = path.read_text(encoding="utf-8")
         value = json.loads(
             text,
-            object_pairs_hook=_reject_duplicate_keys,
-            parse_constant=lambda token: (_ for _ in ()).throw(
-                BundleError(f"bundle manifest contains invalid number {token}")
+            object_pairs_hook=duplicate_key_hook(
+                BundleError,
+                "bundle manifest",
+            ),
+            parse_constant=invalid_constant_hook(
+                BundleError,
+                "bundle manifest",
             ),
         )
-    except BundleError:
-        raise
     except FileNotFoundError as exc:
-        raise BundleError(f"installed runtime manifest is missing: {path}") from exc
+        raise BundleError(f"bundled runtime manifest is missing: {path}") from exc
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise BundleError(f"could not read installed runtime manifest {path}: {exc}") from exc
+        raise BundleError(f"could not read bundled runtime manifest {path}: {exc}") from exc
     if not isinstance(value, dict):
         raise BundleError("bundle manifest root must be an object")
     keys = frozenset(value)
-    missing = sorted(_MANIFEST_FIELDS - keys)
-    unknown = sorted(keys - _MANIFEST_FIELDS)
+    missing = sorted(RUNTIME_MANIFEST_FIELDS - keys)
+    unknown = sorted(keys - RUNTIME_MANIFEST_FIELDS)
     if missing or unknown:
         details: list[str] = []
         if missing:
@@ -119,51 +120,86 @@ def _read_manifest(path: Path) -> dict[str, Any]:
     return value
 
 
-def _relative_path(value: Any, label: str, required_directory: str) -> PurePosixPath:
-    if not isinstance(value, str) or not value:
-        raise BundleError(f"bundle manifest {label} must be a non-empty string")
-    if "\x00" in value or "\\" in value:
-        raise BundleError(f"bundle manifest {label} must be a portable relative path")
-    path = PurePosixPath(value)
-    if (
-        path.is_absolute()
-        or PureWindowsPath(value).is_absolute()
-        or PureWindowsPath(value).drive
-        or str(path) != value
-        or any(part in {"", ".", ".."} for part in path.parts)
-    ):
-        raise BundleError(f"bundle manifest {label} must be a canonical relative path")
-    if not path.parts or path.parts[0] != required_directory:
+def _directory_entries(path: Path, expected: frozenset[str], label: str) -> dict[str, Path]:
+    path = require_unaliased_path(
+        path,
+        description=f"bundle {label}",
+        error_type=BundleError,
+    )
+    try:
+        if not path.is_dir():
+            raise BundleError(f"bundle {label} is not a real directory: {path}")
+        entries = {entry.name: entry for entry in path.iterdir()}
+    except OSError as exc:
+        raise BundleError(f"bundle {label} is inaccessible: {path}") from exc
+    if frozenset(entries) != expected:
         raise BundleError(
-            f"bundle manifest {label} must be inside {required_directory}/"
+            f"bundle {label} must contain exactly {sorted(expected)}; "
+            f"found {sorted(entries)}"
         )
-    return path
+    for name, entry in entries.items():
+        entry = require_unaliased_path(
+            entry,
+            description=f"bundle {label}/{name}",
+            error_type=BundleError,
+        )
+        entries[name] = entry
+        try:
+            if not entry.is_file() or entry.stat().st_size < 1:
+                raise BundleError(
+                    f"bundle {label}/{name} is not a non-empty regular file"
+                )
+        except OSError as exc:
+            raise BundleError(f"bundle {label}/{name} is inaccessible") from exc
+    return entries
 
 
-def _resolve_member(
+def _validate_runtime_tree(
     root: Path,
-    value: Any,
-    label: str,
-    required_directory: str,
-    *,
-    directory: bool,
-) -> Path:
-    relative = _relative_path(value, label, required_directory)
-    candidate = root.joinpath(*relative.parts)
+    contract: RuntimePlatformContract,
+) -> dict[str, dict[str, Path]]:
     try:
-        resolved = candidate.resolve(strict=True)
-    except (OSError, RuntimeError) as exc:
-        raise BundleError(f"bundle {label} is missing or inaccessible: {candidate}") from exc
-    try:
-        resolved.relative_to(root)
-    except ValueError as exc:
-        raise BundleError(f"bundle {label} escapes the installed runtime root") from exc
-    if directory:
-        if not resolved.is_dir():
-            raise BundleError(f"bundle {label} is not a directory: {resolved}")
-    elif not resolved.is_file():
-        raise BundleError(f"bundle {label} is not a file: {resolved}")
-    return resolved
+        root_entries = {entry.name for entry in root.iterdir()}
+    except OSError as exc:
+        raise BundleError(f"bundled runtime root is inaccessible: {root}") from exc
+    if root_entries != contract.root_entries:
+        raise BundleError(
+            f"bundle root must contain exactly {sorted(contract.root_entries)}; "
+            f"found {sorted(root_entries)}"
+        )
+    directories = {
+        "bin": _directory_entries(root / "bin", contract.bin_entries, "bin"),
+        "licenses": _directory_entries(
+            root / "licenses", contract.license_entries, "licenses"
+        ),
+    }
+    if "lib" in contract.root_entries:
+        directories["lib"] = _directory_entries(
+            root / "lib", contract.library_entries, "lib"
+        )
+    return directories
+
+
+def _validate_manifest(
+    manifest: dict[str, Any],
+    contract: RuntimePlatformContract,
+) -> None:
+    expected = contract.manifest()
+    if manifest["schema"] != RUNTIME_SCHEMA:
+        raise BundleError(
+            f"unsupported bundle schema {manifest['schema']!r}; expected {RUNTIME_SCHEMA!r}"
+        )
+    if manifest["platform"] != contract.platform:
+        raise BundleError(
+            f"bundle platform {manifest['platform']!r} does not match host "
+            f"{contract.platform!r}"
+        )
+    for field in ("worker", "trtexec", "library_directories", "licenses"):
+        if manifest[field] != expected[field]:
+            raise BundleError(
+                f"bundle manifest {field} does not match the exact "
+                f"{contract.platform} runtime contract"
+            )
 
 
 def _validate_elf_x64(path: Path, label: str) -> None:
@@ -180,7 +216,9 @@ def _validate_elf_x64(path: Path, label: str) -> None:
         or header[6] != 1
         or struct.unpack_from("<H", header, 18)[0] != 62
     ):
-        raise BundleError(f"bundle {label} is not a Linux ELF64 x86-64 executable")
+        raise BundleError(
+            f"bundle {label} is not a Linux ELF64 x86-64 little-endian binary"
+        )
 
 
 def _validate_pe_x64(path: Path, label: str) -> None:
@@ -190,17 +228,15 @@ def _validate_pe_x64(path: Path, label: str) -> None:
             dos_header = stream.read(64)
             if len(dos_header) < 64 or dos_header[:2] != b"MZ":
                 raise BundleError(
-                    f"bundle {label} is not a Windows PE32+ AMD64 executable"
+                    f"bundle {label} is not a Windows PE32+ AMD64 binary"
                 )
             pe_offset = struct.unpack_from("<I", dos_header, 0x3C)[0]
             if pe_offset < 64 or pe_offset > size - 26:
                 raise BundleError(
-                    f"bundle {label} is not a Windows PE32+ AMD64 executable"
+                    f"bundle {label} is not a Windows PE32+ AMD64 binary"
                 )
             stream.seek(pe_offset)
             pe_header = stream.read(26)
-    except BundleError:
-        raise
     except OSError as exc:
         raise BundleError(f"could not inspect bundle {label}: {path}") from exc
     if (
@@ -209,159 +245,132 @@ def _validate_pe_x64(path: Path, label: str) -> None:
         or struct.unpack_from("<H", pe_header, 4)[0] != 0x8664
         or struct.unpack_from("<H", pe_header, 24)[0] != 0x20B
     ):
-        raise BundleError(f"bundle {label} is not a Windows PE32+ AMD64 executable")
+        raise BundleError(f"bundle {label} is not a Windows PE32+ AMD64 binary")
+
+
+def _validate_native_binary(path: Path, platform_id: str, label: str) -> None:
+    if platform_id == "linux-x64":
+        _validate_elf_x64(path, label)
+        return
+    if platform_id == "windows-x64":
+        _validate_pe_x64(path, label)
+        return
+    raise BundleError(f"cannot validate native binary for platform {platform_id!r}")
 
 
 def _validate_executable(path: Path, platform_id: str, label: str) -> None:
     if platform_id == "linux-x64":
         if not os.access(path, os.X_OK):
             raise BundleError(f"bundle {label} is not executable: {path}")
-        _validate_elf_x64(path, label)
-    else:
-        if path.suffix.lower() != ".exe":
-            raise BundleError(f"bundle {label} must have an .exe suffix on Windows")
-        _validate_pe_x64(path, label)
+    _validate_native_binary(path, platform_id, label)
 
 
-def _string_list(value: Any, label: str) -> list[str]:
-    if not isinstance(value, list) or not value:
-        raise BundleError(f"bundle manifest {label} must be a non-empty array")
-    if not all(isinstance(item, str) and item for item in value):
-        raise BundleError(f"bundle manifest {label} must contain non-empty strings")
-    if len(value) != len(set(value)):
-        raise BundleError(f"bundle manifest {label} contains duplicate paths")
-    return value
+def _require_windows_directory(value: str, description: str) -> Path:
+    path = require_unaliased_path(
+        value,
+        description=description,
+        error_type=BundleError,
+    )
+    if not path.is_dir():
+        raise BundleError(f"{description} is not a directory: {path}")
+    return path
 
 
-def _prepend_environment(
-    source: Mapping[str, str], directories: list[Path], platform_id: str
+def _windows_system_directories(source: Mapping[str, str]) -> tuple[str, str]:
+    value = source.get("SystemRoot")
+    if type(value) is not str or not value:
+        raise BundleError("Windows SystemRoot is unavailable")
+    lexical = PureWindowsPath(value)
+    if (
+        not lexical.is_absolute()
+        or len(lexical.drive) != 2
+        or lexical.drive[1] != ":"
+        or not lexical.drive[0].isalpha()
+        or value != ntpath.normpath(value)
+    ):
+        raise BundleError("Windows SystemRoot must be one canonical absolute path")
+    system_root = _require_windows_directory(value, "Windows SystemRoot")
+    system32 = _require_windows_directory(
+        str(system_root / "System32"),
+        "Windows System32",
+    )
+    return str(system_root), str(system32)
+
+
+def _child_environment(
+    executable_directory: Path,
+    library_directory: Path,
+    platform_id: str,
 ) -> Mapping[str, str]:
-    if not all(isinstance(key, str) and isinstance(value, str) for key, value in source.items()):
-        raise BundleError("child environment keys and values must be strings")
-    child = dict(source)
-    separator = ";" if platform_id == "windows-x64" else ":"
+    """Return the exact package-local child environment for one platform."""
 
-    def update(name: str) -> None:
-        key = name
-        if platform_id == "windows-x64":
-            key = next((item for item in child if item.upper() == name), name)
-        prefix = separator.join(str(path) for path in directories)
-        current = child.get(key, "")
-        child[key] = f"{prefix}{separator}{current}" if current else prefix
-
-    update("PATH")
+    source = os.environ
+    if platform_id == "windows-x64":
+        if library_directory != executable_directory:
+            raise BundleError("Windows runtime libraries must be beside the executables")
+        system_root, system32 = _windows_system_directories(source)
+        return {
+            "SystemRoot": system_root,
+            "PATH": system32,
+        }
     if platform_id == "linux-x64":
-        update("LD_LIBRARY_PATH")
-    return child
+        if library_directory == executable_directory:
+            raise BundleError("Linux runtime libraries must use the lib directory")
+        return {
+            "PATH": str(executable_directory),
+            "LD_LIBRARY_PATH": str(library_directory),
+        }
+    raise BundleError(f"cannot build child environment for {platform_id!r}")
 
 
-def resolve_runtime_bundle(
-    package_root: Path,
-    *,
-    audio2face_model_directory: str | Path,
-    audio2emotion_model_directory: str | Path,
-    platform: str | None = None,
-    system: str | None = None,
-    machine: str | None = None,
-    environ: Mapping[str, str] | None = None,
-    require_engine: bool = True,
-) -> BundleLaunchSpec:
-    """Validate the installed worker and the two user-selected models.
+def resolve_runtime_bundle() -> RuntimeBundle:
+    """Validate and return this installed extension's one bundled runtime."""
 
-    ``package_root`` must be Blender's writable per-extension data directory.
-    Only the native worker beneath that directory is considered. Model folders
-    deliberately remain at the exact paths selected in Add-on Preferences.
-    """
-
-    if platform is None:
-        platform_id = current_platform_id(system=system, machine=machine)
-    else:
-        if platform not in {"linux-x64", "windows-x64"}:
-            raise BundleError(f"unsupported runtime platform {platform!r}")
-        platform_id = platform
-        if system is not None or machine is not None:
-            detected = current_platform_id(system=system, machine=machine)
-            if detected != platform_id:
-                raise BundleError(
-                    f"explicit runtime platform {platform_id!r} does not match {detected!r}"
-                )
-    try:
-        base = Path(package_root).expanduser().resolve(strict=True)
-    except (OSError, RuntimeError) as exc:
-        raise BundleError(f"runtime data root is missing or inaccessible: {package_root}") from exc
-    if not base.is_dir():
-        raise BundleError(f"runtime data root is not a directory: {base}")
-    runtime_root = base / "runtime" / platform_id
-    try:
-        root = runtime_root.resolve(strict=True)
-    except (OSError, RuntimeError) as exc:
-        raise BundleError(f"installed {platform_id} runtime is missing: {runtime_root}") from exc
-    try:
-        root.relative_to(base)
-    except ValueError as exc:
+    platform_id = current_platform_id()
+    contract = runtime_contract(platform_id)
+    package_module = require_unaliased_path(
+        __file__,
+        description="Audio2Face runtime module",
+        error_type=BundleError,
+    )
+    if not package_module.is_file():
         raise BundleError(
-            f"installed runtime root escapes the extension data root: {runtime_root}"
-        ) from exc
+            f"Audio2Face runtime module is not a regular file: {package_module}"
+        )
+    package_root = package_module.parent
+    runtime_path = package_root / "runtime"
+    root = require_unaliased_path(
+        runtime_path,
+        description=f"bundled {platform_id} runtime",
+        error_type=BundleError,
+    )
     if not root.is_dir():
-        raise BundleError(f"installed runtime root is not a directory: {root}")
+        raise BundleError(f"bundled runtime root is not a directory: {root}")
 
+    directories = _validate_runtime_tree(root, contract)
     manifest = _read_manifest(root / "bundle.json")
-    if manifest["schema"] != RUNTIME_SCHEMA:
-        raise BundleError(
-            f"unsupported bundle schema {manifest['schema']!r}; expected {RUNTIME_SCHEMA!r}"
-        )
-    if manifest["platform"] != platform_id:
-        raise BundleError(
-            f"bundle platform {manifest['platform']!r} does not match {platform_id!r}"
-        )
+    _validate_manifest(manifest, contract)
 
-    executable = _resolve_member(root, manifest["worker"], "worker", "bin", directory=False)
-    trtexec = _resolve_member(root, manifest["trtexec"], "trtexec", "bin", directory=False)
-    try:
-        resolved_audio2face_model = validate_model_directory(
-            audio2face_model_directory,
-            "Audio2Face",
-            require_engine=require_engine,
-        )
-        resolved_audio2emotion_model = validate_model_directory(
-            audio2emotion_model_directory,
-            "Audio2Emotion",
-            require_engine=require_engine,
-        )
-    except ModelInputError as exc:
-        raise BundleError(str(exc)) from exc
-    if resolved_audio2face_model == resolved_audio2emotion_model:
-        raise BundleError("Audio2Face and Audio2Emotion must use different model folders")
+    executable = directories["bin"][Path(contract.worker).name]
+    trtexec = directories["bin"][Path(contract.trtexec).name]
     _validate_executable(executable, platform_id, "worker")
     _validate_executable(trtexec, platform_id, "trtexec")
+    for packaged_file in contract.libraries:
+        name = Path(packaged_file.path).name
+        directory_name = Path(packaged_file.path).parent.name
+        path = directories[directory_name][name]
+        _validate_native_binary(path, platform_id, f"library {name}")
 
-    library_directories = [
-        _resolve_member(root, item, f"library_directories[{index}]", "lib", directory=True)
-        for index, item in enumerate(
-            _string_list(manifest["library_directories"], "library_directories")
-        )
-    ]
-    if len(library_directories) != len(set(library_directories)):
-        raise BundleError("bundle library_directories resolve to duplicate paths")
-    license_files = [
-        _resolve_member(root, item, f"licenses[{index}]", "licenses", directory=False)
-        for index, item in enumerate(_string_list(manifest["licenses"], "licenses"))
-    ]
-    if len(license_files) != len(set(license_files)):
-        raise BundleError("bundle licenses resolve to duplicate paths")
-
-    source_environment = os.environ if environ is None else environ
-    environment = _prepend_environment(
-        source_environment,
-        list(dict.fromkeys([executable.parent, trtexec.parent, *library_directories])),
+    library_directory = root / contract.library_directories[0]
+    environment = _child_environment(
+        executable.parent,
+        library_directory,
         platform_id,
     )
-    return BundleLaunchSpec(
+    return RuntimeBundle(
         platform=platform_id,
         root=root,
         executable=executable,
         trtexec=trtexec,
         env=environment,
-        audio2face_model=resolved_audio2face_model,
-        audio2emotion_model=resolved_audio2emotion_model,
     )

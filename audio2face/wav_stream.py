@@ -2,25 +2,23 @@
 
 from __future__ import annotations
 
-from array import array
 from dataclasses import dataclass
 import math
 import os
-from pathlib import Path
 import stat
 import struct
-import sys
 from typing import BinaryIO, Iterator
 
+from .path_contract import require_unaliased_path
 
-DEFAULT_OUTPUT_SAMPLE_RATE = 16_000
-DEFAULT_CHUNK_FRAMES = 1_600
+
 MAX_CHUNK_FRAMES = 65_536
 MAX_CHANNELS = 32
 MIN_SAMPLE_RATE = 8_000
 MAX_SAMPLE_RATE = 384_000
 MAX_DURATION_SECONDS = 6 * 60 * 60
 MAX_WAV_FILE_BYTES = 512 * 1024 * 1024
+MAX_OUTPUT_FRAMES = MAX_WAV_FILE_BYTES // 4
 
 _READ_BLOCK_FRAMES = 4_096
 _SUPPORTED_SAMPLE_WIDTHS = frozenset({1, 2, 3, 4})
@@ -45,8 +43,6 @@ class WavStreamMetadata:
     bits_per_sample: int
     input_frames: int
     output_frames: int
-    duration_seconds: float
-
     @property
     def sample_width_bytes(self) -> int:
         return self.bits_per_sample // 8
@@ -213,11 +209,11 @@ def _parse_wav(
         raise WavStreamError(
             f"WAV duration exceeds the {MAX_DURATION_SECONDS}-second safety limit"
         )
-    output_frames = (
-        input_frames * output_sample_rate + source_sample_rate // 2
-    ) // source_sample_rate
-    if output_frames <= 0:
-        raise WavStreamError("WAV is too short for the requested output sample rate")
+    output_frames = max(1, input_frames * output_sample_rate // source_sample_rate)
+    if output_frames > MAX_OUTPUT_FRAMES:
+        raise WavStreamError(
+            "resampled WAV exceeds the 512 MiB decoded-audio safety limit"
+        )
 
     return _ParsedWav(
         metadata=WavStreamMetadata(
@@ -227,7 +223,6 @@ def _parse_wav(
             bits_per_sample=bits_per_sample,
             input_frames=input_frames,
             output_frames=output_frames,
-            duration_seconds=input_frames / source_sample_rate,
         ),
         data_offset=data_offset,
         block_align=block_align,
@@ -247,14 +242,10 @@ def _decode_mono(
         raise WavStreamError("audio block ends in a partial sample frame")
 
     if is_float:
-        decoded_float = array("f")
-        if decoded_float.itemsize != 4:  # pragma: no cover - unsupported platform
-            raise WavStreamError("this Python build does not provide 32-bit floats")
-        decoded_float.frombytes(payload)
-        if sys.byteorder != "little":
-            decoded_float.byteswap()
+        decoded_float = struct.unpack(f"<{sample_count}f", payload)
         if not all(math.isfinite(value) for value in decoded_float):
             raise WavStreamError("IEEE float WAV contains a non-finite sample")
+        decoded_float = tuple(max(-1.0, min(1.0, value)) for value in decoded_float)
         if channels == 1:
             return list(decoded_float)
 
@@ -264,17 +255,18 @@ def _decode_mono(
             append_float(
                 sum(decoded_float[offset : offset + channels]) / channels
             )
-        return mono_float
+        return list(
+            struct.unpack(
+                f"<{len(mono_float)}f",
+                struct.pack(f"<{len(mono_float)}f", *mono_float),
+            )
+        )
 
     if sample_width == 1:
         integer_samples = [value - 128 for value in payload]
         scale = 128.0
     elif sample_width == 2:
-        decoded = array("h")
-        decoded.frombytes(payload)
-        if sys.byteorder != "little":
-            decoded.byteswap()
-        integer_samples = decoded
+        integer_samples = struct.unpack(f"<{sample_count}h", payload)
         scale = 32_768.0
     elif sample_width == 3:
         integer_samples = []
@@ -290,27 +282,26 @@ def _decode_mono(
             append(value)
         scale = 8_388_608.0
     else:
-        decoded = array("i")
-        if decoded.itemsize != 4:  # pragma: no cover - unsupported Python platform
-            raise WavStreamError("this Python build does not provide 32-bit integers")
-        decoded.frombytes(payload)
-        if sys.byteorder != "little":
-            decoded.byteswap()
-        integer_samples = decoded
+        integer_samples = struct.unpack(f"<{sample_count}i", payload)
         scale = 2_147_483_648.0
 
     if channels == 1:
-        return [value / scale for value in integer_samples]
-
-    channel_scale = scale * channels
-    mono: list[float] = []
-    append_mono = mono.append
-    for offset in range(0, sample_count, channels):
-        total = 0
-        for channel in range(channels):
-            total += integer_samples[offset + channel]
-        append_mono(total / channel_scale)
-    return mono
+        mono = [value / scale for value in integer_samples]
+    else:
+        channel_scale = scale * channels
+        mono = []
+        append_mono = mono.append
+        for offset in range(0, sample_count, channels):
+            total = 0
+            for channel in range(channels):
+                total += integer_samples[offset + channel]
+            append_mono(total / channel_scale)
+    return list(
+        struct.unpack(
+            f"<{len(mono)}f",
+            struct.pack(f"<{len(mono)}f", *mono),
+        )
+    )
 
 
 def _pack_f32le(samples: list[float]) -> bytes:
@@ -318,12 +309,7 @@ def _pack_f32le(samples: list[float]) -> bytes:
         raise WavStreamError("internal error: attempted to emit an empty audio chunk")
     if not all(math.isfinite(value) for value in samples):
         raise WavStreamError("decoded audio contains a non-finite sample")
-    packed = array("f", samples)
-    if packed.itemsize != 4:  # pragma: no cover - unsupported Python platform
-        raise WavStreamError("this Python build does not provide 32-bit floats")
-    if sys.byteorder != "little":
-        packed.byteswap()
-    return packed.tobytes()
+    return struct.pack(f"<{len(samples)}f", *samples)
 
 
 class WavStreamSource:
@@ -333,8 +319,8 @@ class WavStreamSource:
         self,
         path: str | os.PathLike[str],
         *,
-        output_sample_rate: int = DEFAULT_OUTPUT_SAMPLE_RATE,
-        chunk_frames: int = DEFAULT_CHUNK_FRAMES,
+        output_sample_rate: int,
+        chunk_frames: int,
     ) -> None:
         output_sample_rate = _require_bounded_int(
             output_sample_rate,
@@ -348,13 +334,14 @@ class WavStreamSource:
             minimum=1,
             maximum=MAX_CHUNK_FRAMES,
         )
-        try:
-            self.path = Path(path)
-        except TypeError as exc:
-            raise WavStreamError("path must be a filesystem path") from exc
+        source_path = require_unaliased_path(
+            path,
+            description="WAV path",
+            error_type=WavStreamError,
+        )
 
         try:
-            handle = self.path.open("rb", buffering=0)
+            handle = source_path.open("rb", buffering=0)
         except OSError as exc:
             raise WavStreamError(f"could not open WAV file: {exc}") from exc
         self._handle: BinaryIO | None = handle
@@ -431,13 +418,7 @@ class WavStreamSource:
         def chunks() -> Iterator[bytes]:
             try:
                 mono_frames = iter(self._mono_frames())
-                try:
-                    previous = next(mono_frames)
-                except StopIteration as exc:
-                    # Defensive: empty data is rejected while parsing.
-                    raise WavStreamError(
-                        "WAV data chunk contains no sample frames"
-                    ) from exc
+                previous = next(mono_frames)
 
                 source_rate = self.metadata.source_sample_rate
                 output_rate = self.metadata.output_sample_rate

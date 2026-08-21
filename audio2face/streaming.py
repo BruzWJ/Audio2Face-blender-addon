@@ -9,7 +9,7 @@ if TYPE_CHECKING:
 
 
 def start_pcm_stream(scene: bpy.types.Scene) -> str:
-    """Open one stream and return its ID; call from Blender's main thread."""
+    """Open one stream and return its operation ID; call from Blender's main thread."""
 
     from .runtime import get_controller
 
@@ -27,15 +27,22 @@ def get_pcm_stream_requirements(
 
 
 def push_audio_f32le(
-    audio_f32le: bytes | bytearray | memoryview,
+    audio_f32le: bytes,
     *,
-    stream_id: str,
+    operation_id: str,
 ) -> str:
     """Queue one finite mono f32le chunk; audio-source threads may call this."""
 
+    if type(audio_f32le) is not bytes:
+        raise TypeError("audio_f32le must be an exact bytes payload")
+    if type(operation_id) is not str:
+        raise TypeError("operation_id must be an exact string")
+    if not operation_id:
+        raise ValueError("operation_id must not be empty")
+
     from .runtime import get_controller
 
-    return get_controller().push_stream_audio(audio_f32le, stream_id=stream_id)
+    return get_controller().push_stream_audio(audio_f32le, operation_id=operation_id)
 
 
 def end_pcm_stream(scene: bpy.types.Scene) -> None:
