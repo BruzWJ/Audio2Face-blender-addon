@@ -1,0 +1,29 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Native worker build output
+build/
+dist/
+worker/build/
+out/
+*.o
+*.obj
+*.so
+*.dll
+*.dylib
+*.exe
+
+# Blender packages and local files
+*.zip
+*.blend1
+*.blend2
+
+# Generated Audio2Face results and local NVIDIA assets
+*.a2f.json
+models/
+trt_models/
