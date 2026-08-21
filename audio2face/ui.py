@@ -7,10 +7,91 @@ from pathlib import Path
 import bpy
 
 from .live_stream import get_live_stream_controller
-from .preferences import get_preferences
-from .properties import PARAMETER_GROUPS
 from .runtime import get_controller
 from .sidecar import Lifecycle
+
+
+def _draw_audio_playback(
+    layout: bpy.types.UILayout,
+    settings: object,
+) -> None:
+    """Draw mode-specific audio controls beside their source selection."""
+
+    playback_box = layout.box()
+    playback_box.label(text="Audio Playback", icon="SPEAKER")
+    if settings.input_mode == "SELECTED":
+        result_name = (
+            Path(settings.result_path).name
+            if settings.result_path
+            else "No generated result yet"
+        )
+        playback_box.label(text=result_name, icon="FILE")
+        if settings.result_audio_path:
+            playback_box.label(
+                text=f"Audio: {Path(settings.result_audio_path).name}",
+                icon="SOUND",
+            )
+        else:
+            playback_box.label(
+                text="Generate the selected WAV to enable playback",
+                icon="INFO",
+            )
+
+        playback_row = playback_box.row(align=True)
+        if settings.preview_state == "PLAYING":
+            playback_row.operator("a2f.preview_pause", text="Pause", icon="PAUSE")
+        else:
+            label = "Resume" if settings.preview_state == "PAUSED" else "Play Result"
+            playback_row.operator("a2f.preview_play", text=label, icon="PLAY")
+        playback_row.operator("a2f.preview_stop", text="Stop", icon="CANCEL")
+        playback_box.label(
+            text=f"{settings.preview_time:.2f}s / {settings.preview_duration:.2f}s"
+        )
+        controls = playback_box.row(align=True)
+        controls.prop(settings, "preview_loop")
+        controls.prop(settings, "preview_volume")
+        playback_box.prop(settings, "preview_reset_on_stop")
+        playback_box.label(
+            text="Plays audio and delivers model channels to targets in sync",
+            icon="INFO",
+        )
+        return
+
+    rate = settings.stream_sample_rate
+    playback_box.label(
+        text=(f"{rate} Hz mono PCM" if rate else "Stream audio is stopped"),
+        icon="SOUND",
+    )
+    playback_box.label(text=f"Audio time: {settings.stream_time:.2f}s")
+    live_stream = get_live_stream_controller()
+    if not settings.stream_id or live_stream.plays_audio:
+        playback_box.prop(settings, "preview_volume")
+    else:
+        playback_box.label(
+            text="External PCM source owns audio playback",
+            icon="INFO",
+        )
+    playback_box.prop(settings, "stream_reset_on_stop")
+
+
+def _draw_model_parameters(
+    layout: bpy.types.UILayout,
+    parameters: object,
+) -> None:
+    """Draw worker-advertised parameters using their opaque path segments."""
+
+    current_group = ""
+    for parameter in parameters:
+        segments = parameter.path.strip("/").split("/")
+        group = segments[-2] if len(segments) > 1 else "model"
+        if group != current_group:
+            current_group = group
+            layout.label(text=group.replace("_", " ").title())
+        layout.prop(
+            parameter,
+            "int_value" if parameter.kind == "integer" else "float_value",
+            text=segments[-1].replace("_", " ").title(),
+        )
 
 
 class A2F_UL_target_meshes(bpy.types.UIList):
@@ -50,9 +131,7 @@ class A2F_PT_main(bpy.types.Panel):
             )
             return
         controller = get_controller()
-        preferences = get_preferences(context)
         runtime_ready, runtime_message = controller.runtime_availability()
-        install_available, install_message = controller.install_availability()
 
         status_box = layout.box()
         header = status_box.row(align=True)
@@ -66,83 +145,16 @@ class A2F_PT_main(bpy.types.Panel):
         runtime_box = layout.box()
         runtime_box.label(text="Managed GPU Runtime", icon="PREFERENCES")
         if controller.install_in_progress:
-            runtime_box.label(
-                text=controller.install_message,
-                icon="TIME",
-            )
-            runtime_box.prop(
-                settings,
-                "runtime_install_progress",
-                text="Install Progress",
-                slider=True,
-            )
-            runtime_box.operator(
-                "a2f.cancel_runtime_install",
-                text="Cancel Install",
-                icon="CANCEL",
-            )
+            runtime_box.label(text="Installation in progress", icon="TIME")
+            runtime_box.label(text="Manage installation in Add-on Preferences")
         elif runtime_ready:
             runtime_box.label(text="Runtime and GPU-optimized models ready", icon="CHECKMARK")
-            runtime_box.label(text="Managed automatically; no executable or model paths needed")
-            repair_row = runtime_box.row()
-            repair_row.enabled = bool(
-                install_available
-                and bpy.app.online_access
-                and preferences is not None
-                and preferences.runtime_license_accepted
-                and controller.client.state in {Lifecycle.STOPPED, Lifecycle.FAILED}
-            )
-            repair_row.operator(
-                "a2f.install_runtime",
-                text="Repair / Rebuild Runtime",
-                icon="FILE_REFRESH",
-            )
         else:
             warning = runtime_box.row()
             warning.alert = True
             warning.label(text="Runtime and models are not ready", icon="ERROR")
             runtime_box.label(text=runtime_message)
-            if not install_available:
-                release_warning = runtime_box.row()
-                release_warning.alert = True
-                release_warning.label(text=install_message, icon="ERROR")
-            if preferences is not None:
-                runtime_box.prop(preferences, "runtime_license_accepted")
-            model_links = runtime_box.row(align=True)
-            face_terms = model_links.operator(
-                "wm.url_open", text="Audio2Face Terms", icon="URL"
-            )
-            face_terms.url = "https://huggingface.co/nvidia/Audio2Face-3D-v3.0"
-            emotion_terms = model_links.operator(
-                "wm.url_open", text="Audio2Emotion Terms", icon="URL"
-            )
-            emotion_terms.url = "https://huggingface.co/nvidia/Audio2Emotion-v3.0"
-            runtime_terms = runtime_box.operator(
-                "wm.url_open", text="NVIDIA Runtime Terms", icon="URL"
-            )
-            runtime_terms.url = (
-                "https://www.nvidia.com/en-us/agreements/enterprise-software/"
-                "nvidia-software-license-agreement/"
-            )
-            can_install = bool(
-                bpy.app.online_access
-                and install_available
-                and preferences is not None
-                and preferences.runtime_license_accepted
-            )
-            if not bpy.app.online_access:
-                runtime_box.label(
-                    text="Enable Online Access in Blender Preferences first",
-                    icon="ERROR",
-                )
-            install_row = runtime_box.row()
-            install_row.enabled = can_install
-            install_row.scale_y = 1.2
-            install_row.operator(
-                "a2f.install_runtime",
-                text="Install Runtime & Models",
-                icon="IMPORT",
-            )
+            runtime_box.label(text="Install it from this add-on's Preferences", icon="INFO")
 
         worker_row = layout.row(align=True)
         worker_state = controller.client.state
@@ -164,6 +176,7 @@ class A2F_PT_main(bpy.types.Panel):
             and settings.preview_state == "IDLE"
         )
         mode_row.prop(settings, "input_mode", expand=True)
+        _draw_audio_playback(input_box, settings)
         input_box.prop(settings, "audio_path")
         if settings.input_mode == "STREAM":
             input_box.label(
@@ -175,46 +188,69 @@ class A2F_PT_main(bpy.types.Panel):
                 icon="INFO",
             )
         input_box.label(text="Model: managed Audio2Face ARKit resolver", icon="SHAPEKEY_DATA")
-        input_box.prop(settings, "identity_index")
+        if len(settings.model_identities) > 1:
+            input_box.label(text="Identity")
+            input_box.template_list(
+                "UI_UL_list",
+                "",
+                settings,
+                "model_identities",
+                settings,
+                "identity_index",
+                rows=min(4, len(settings.model_identities)),
+            )
+        elif len(settings.model_identities) == 1:
+            input_box.label(
+                text=f"Identity: {settings.model_identities[0].name}",
+                icon="USER",
+            )
+        else:
+            input_box.label(text="Identity loads from the model", icon="INFO")
 
         emotion_box = layout.box()
-        emotion_box.enabled = not controller.operation_in_progress
         emotion_box.label(text="Emotion Driver", icon="SOUND")
-        emotion_box.prop(settings, "auto_audio2emotion")
-        if settings.auto_audio2emotion:
-            emotion_box.label(text="Input audio overrides manual emotion values", icon="INFO")
-            auto_column = emotion_box.column(align=True)
-            auto_column.prop(settings, "emotion_strength")
-            auto_column.prop(settings, "emotion_contrast")
-            auto_column.prop(settings, "emotion_smoothing")
-            auto_column.prop(settings, "emotion_transition_time")
-            auto_column.prop(settings, "max_emotions")
-        elif settings.manual_emotions:
-            manual_column = emotion_box.column(align=True)
+        mode_control = emotion_box.row()
+        mode_control.enabled = not controller.operation_in_progress
+        mode_control.prop(settings, "auto_audio2emotion")
+
+        manual_box = emotion_box.box()
+        manual_box.enabled = bool(
+            not settings.auto_audio2emotion and not controller.operation_in_progress
+        )
+        manual_box.label(text="Manual Emotion Channels", icon="DRIVER")
+        if settings.manual_emotions:
+            manual_column = manual_box.column(align=True)
             for emotion in settings.manual_emotions:
                 manual_column.prop(emotion, "value", text=emotion.name, slider=True)
         else:
+            manual_box.label(
+                text="Channels and defaults load dynamically from the model",
+                icon="INFO",
+            )
+            manual_box.label(
+                text="Start the GPU worker to make them available",
+                icon="INFO",
+            )
+
+        if settings.auto_audio2emotion:
             emotion_box.label(
-                text="Start the worker to load model emotion channels",
+                text="Inferred values override the manual driver",
                 icon="INFO",
             )
 
         tuning_box = layout.box()
         tuning_box.enabled = not controller.operation_in_progress
-        tuning_box.prop(
-            settings,
-            "show_tuning",
-            icon="TRIA_DOWN" if settings.show_tuning else "TRIA_RIGHT",
-            emboss=False,
-        )
-        if settings.show_tuning:
-            tuning_box.label(text="Values refresh from the managed model", icon="INFO")
-            tuning_box.prop(settings, "input_strength")
-            for group, names in PARAMETER_GROUPS:
-                column = tuning_box.column(align=True)
-                column.label(text=group.title())
-                for name in names:
-                    column.prop(settings, name)
+        tuning_box.label(text="Model & Emotion Controls", icon="MODIFIER")
+        if settings.model_parameters:
+            _draw_model_parameters(
+                tuning_box.column(align=True),
+                settings.model_parameters,
+            )
+        else:
+            tuning_box.label(
+                text="Controls and defaults load from the worker",
+                icon="INFO",
+            )
 
         operation_ready = bool(
             runtime_ready
@@ -245,8 +281,9 @@ class A2F_PT_main(bpy.types.Panel):
             stream_start.operator("a2f.stream_wav", text="Start WAV Stream", icon="PLAY")
 
         target_box = layout.box()
-        target_box.label(text="ARKit Shape-Key Targets", icon="SHAPEKEY_DATA")
-        target_box.label(text="Exact ARKit-52 names; each mesh may have a subset", icon="INFO")
+        target_box.label(text="Mesh Targets", icon="SHAPEKEY_DATA")
+        target_box.label(text="Any mesh can receive the model channel stream", icon="INFO")
+        target_box.label(text="Missing Shape Keys are ignored during delivery", icon="INFO")
         target_row = target_box.row(align=True)
         target_row.operator("a2f.add_selected_targets", icon="ADD")
         target_row.operator("a2f.remove_target", text="Remove", icon="REMOVE")
@@ -261,59 +298,4 @@ class A2F_PT_main(bpy.types.Panel):
                 rows=3,
             )
 
-        preview_box = layout.box()
-        if settings.preview_state != "IDLE" or (
-            settings.input_mode == "SELECTED" and not settings.stream_id
-        ):
-            preview_box.label(text="Generated ARKit-52 Stream", icon="PLAY")
-            result_name = (
-                Path(settings.result_path).name
-                if settings.result_path
-                else "No generated result"
-            )
-            preview_box.label(text=result_name, icon="FILE")
-            if settings.result_audio_path:
-                preview_box.label(
-                    text=f"Audio: {Path(settings.result_audio_path).name}",
-                    icon="SOUND",
-                )
-            preview_row = preview_box.row(align=True)
-            if settings.preview_state == "PLAYING":
-                preview_row.operator("a2f.preview_pause", text="Pause", icon="PAUSE")
-            else:
-                label = "Resume" if settings.preview_state == "PAUSED" else "Play Selected Audio"
-                preview_row.operator("a2f.preview_play", text=label, icon="PLAY")
-            preview_row.operator("a2f.preview_stop", text="Stop", icon="CANCEL")
-            preview_box.label(
-                text=f"{settings.preview_time:.2f}s / {settings.preview_duration:.2f}s"
-            )
-            controls = preview_box.row(align=True)
-            controls.prop(settings, "preview_loop")
-            controls.prop(settings, "preview_volume")
-            preview_box.prop(settings, "preview_reset_on_stop")
-        else:
-            preview_box.label(text="Live ARKit-52 Stream", icon="PLAY")
-            rate = settings.stream_sample_rate
-            preview_box.label(
-                text=(
-                    f"{rate} Hz mono f32le PCM"
-                    if rate
-                    else "Stream is stopped"
-                )
-            )
-            preview_box.label(text=f"Audio time: {settings.stream_time:.2f}s")
-            live_stream = get_live_stream_controller()
-            if not settings.stream_id or live_stream.plays_audio:
-                preview_box.prop(settings, "preview_volume")
-            else:
-                preview_box.label(
-                    text="External PCM source owns audio playback",
-                    icon="INFO",
-                )
-            preview_box.prop(settings, "stream_reset_on_stop")
-
-
 CLASSES = (A2F_UL_target_meshes, A2F_PT_main)
-
-
-__all__ = ["CLASSES"]

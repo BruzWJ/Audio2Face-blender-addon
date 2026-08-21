@@ -73,6 +73,3 @@ def unregister() -> None:
                 pass
 
     _REGISTERED = False
-
-
-__all__ = ["register", "unregister"]

@@ -159,7 +159,7 @@ class SidecarClient:
             try:
                 process.stdin.write(line)
                 process.stdin.flush()
-            except (BrokenPipeError, OSError, ValueError) as exc:
+            except (OSError, ValueError) as exc:
                 self._incoming.put(ClientDiagnostic(f"worker stdin failed: {exc}"))
                 return
 
@@ -323,14 +323,3 @@ class SidecarClient:
             self._shutdown_deadline = None
             self._terminate_deadline = None
         self._threads.clear()
-
-
-__all__ = [
-    "ClientDiagnostic",
-    "ClientEvent",
-    "ControlMessage",
-    "Lifecycle",
-    "ProcessExited",
-    "SidecarClient",
-    "SidecarError",
-]

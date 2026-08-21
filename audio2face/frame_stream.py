@@ -27,6 +27,3 @@ def sample_linear(
         float(left) + (float(right) - float(left)) * mix
         for left, right in zip(weights[lower], weights[upper])
     )
-
-
-__all__ = ["sample_linear"]

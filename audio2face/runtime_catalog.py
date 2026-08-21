@@ -151,13 +151,3 @@ def load_runtime_catalog(path: str | Path | None = None) -> RuntimeCatalog:
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise RuntimeCatalogError(f"cannot read managed-runtime catalog {source}: {exc}") from exc
     return validate_runtime_catalog(document)
-
-
-__all__ = [
-    "CATALOG_SCHEMA",
-    "RuntimeArtifact",
-    "RuntimeCatalog",
-    "RuntimeCatalogError",
-    "load_runtime_catalog",
-    "validate_runtime_catalog",
-]

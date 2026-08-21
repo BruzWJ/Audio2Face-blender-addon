@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-import copy
 import math
 import queue
 import struct
@@ -23,7 +22,7 @@ from .live_stream import (
 )
 from .preferences import get_preferences
 from .preview import get_preview_controller, unregister_preview
-from .properties import apply_model_defaults, tuning_parameters
+from .properties import apply_model_schema, tuning_parameters
 from .runtime_bundle import (
     BundleError,
     BundleLaunchSpec,
@@ -46,7 +45,7 @@ from .sidecar import (
     SidecarClient,
     SidecarError,
 )
-from .wav_stream import WavStreamError, WavStreamSource
+from .wav_stream import WavStreamSource
 
 
 @dataclass(slots=True)
@@ -59,7 +58,7 @@ class PendingRequest:
     stream_id: str | None = None
 
 
-WORKER_PROFILE = "nvidia-a2f3-a2e3-gpu-arkit52/1"
+WORKER_PROFILE = "nvidia-a2f3-a2e3-gpu-arkit52/2"
 POLL_INTERVAL_SECONDS = 0.10
 PREVIEW_INTERVAL_SECONDS = 1.0 / 60.0
 SHUTDOWN_TIMEOUT_SECONDS = 2.0
@@ -82,20 +81,19 @@ class RuntimeController:
         # than attached to a Blender scene.
         self.loaded_signature: tuple[str, str, int] | None = None
         self.model_sample_rate: int | None = None
-        self.model_parameter_defaults: dict[str, Any] | None = None
-        self.model_emotion_names: tuple[str, ...] | None = None
-        self.scene_model_signatures: dict[int, tuple[str, str, int]] = {}
+        self.model_schema: dict[str, Any] | None = None
+        self.schema_scenes: set[int] = set()
         self.rejected_reason: str | None = None
         self.install_thread: threading.Thread | None = None
         self.install_cancel: threading.Event | None = None
         self.install_activation_lock = threading.Lock()
         self.install_events: queue.Queue[tuple[str, str | None]] = queue.Queue()
-        # Progress can be emitted once per archive member.  Keep only the most
+        # Progress can be emitted once per archive member. Keep only the most
         # recent snapshot so a large runtime cannot flood Blender's main-thread
-        # timer with thousands of redundant RNA writes.
+        # timer with thousands of redundant UI updates.
         self.install_progress_lock = threading.Lock()
         self.install_latest_progress: InstallProgress | None = None
-        self.install_scene: str | None = None
+        self.install_progress = 0.0
         self.install_message = ""
         self.handshake_deadline: float | None = None
         self.last_worker_diagnostic = ""
@@ -121,6 +119,21 @@ class RuntimeController:
             for scene in bpy.data.scenes
             if scene.is_editable
         )
+
+    @staticmethod
+    def _tag_runtime_setup_redraw() -> None:
+        """Refresh preferences and compact sidebar status after install changes."""
+
+        window_manager = getattr(bpy.context, "window_manager", None)
+        if window_manager is None:
+            return
+        for window in window_manager.windows:
+            screen = getattr(window, "screen", None)
+            if screen is None:
+                continue
+            for area in screen.areas:
+                if area.type in {"PREFERENCES", "VIEW_3D"}:
+                    area.tag_redraw()
 
     def _queue_install_progress(self, event: InstallProgress) -> None:
         """Publish the latest installer snapshot without touching :mod:`bpy`."""
@@ -200,6 +213,28 @@ class RuntimeController:
             return False, str(exc)
         return True, f"Managed runtime {catalog.release} is available for download"
 
+    def install_eligibility(self) -> tuple[bool, str]:
+        """Return the canonical install/repair eligibility and blocking reason."""
+
+        if self.install_in_progress:
+            return False, "managed-runtime installation is already running"
+        available, message = self.install_availability()
+        if not available:
+            return False, message
+        if self.client.state not in {Lifecycle.STOPPED, Lifecycle.FAILED}:
+            return False, "stop the Audio2Face worker before installing its runtime"
+        if not bpy.app.online_access:
+            return False, (
+                "Blender Online Access is disabled; enable it in Preferences, "
+                "then install again"
+            )
+        preferences = get_preferences()
+        if preferences is None:
+            return False, "Audio2Face Add-on Preferences are unavailable"
+        if not preferences.nvidia_terms_accepted:
+            return False, "accept the NVIDIA terms first"
+        return True, message
+
     @property
     def install_in_progress(self) -> bool:
         # Keep the operation reserved until its terminal queue event has been
@@ -239,23 +274,12 @@ class RuntimeController:
         if self.operation_in_progress:
             raise SidecarError("wait for the current Audio2Face operation to finish")
 
-    def install_runtime(self, scene: bpy.types.Scene) -> None:
+    def install_runtime(self) -> None:
         """Start the verified runtime/model install without blocking Blender's UI."""
 
-        self._require_editable_scene(scene)
-        if self.install_in_progress:
-            raise SidecarError("managed-runtime installation is already running")
-        if self.client.state not in {Lifecycle.STOPPED, Lifecycle.FAILED}:
-            raise SidecarError("stop the Audio2Face worker before installing its runtime")
-        if not bpy.app.online_access:
-            raise SidecarError(
-                "Blender Online Access is disabled; enable it in Preferences, then install again"
-            )
-        preferences = get_preferences()
-        if preferences is None or not preferences.runtime_license_accepted:
-            raise SidecarError(
-                "accept the NVIDIA runtime and both model license terms first"
-            )
+        can_install, reason = self.install_eligibility()
+        if not can_install:
+            raise SidecarError(reason)
         try:
             platform_id = current_platform_id()
             artifact = load_runtime_catalog().artifact_for(platform_id)
@@ -267,13 +291,10 @@ class RuntimeController:
         with self.install_progress_lock:
             self.install_latest_progress = None
         self.install_cancel = canceled
-        self.install_scene = scene.name
+        self.install_progress = 0.0
         message = "Preparing managed-runtime download"
-        for candidate in self._editable_scenes():
-            candidate_settings = candidate.audio2face
-            candidate_settings.runtime_install_progress = 0.0
         self.install_message = message
-        self._set_status(scene, "INSTALLING_RUNTIME", message)
+        self._tag_runtime_setup_redraw()
 
         def progress(event: InstallProgress) -> None:
             self._queue_install_progress(event)
@@ -306,19 +327,19 @@ class RuntimeController:
         except RuntimeError as exc:
             self.install_thread = None
             self.install_cancel = None
-            self.install_scene = None
+            self.install_progress = 0.0
+            self.install_message = f"could not start managed-runtime installer: {exc}"
+            self._tag_runtime_setup_redraw()
             raise SidecarError(f"could not start managed-runtime installer: {exc}") from exc
 
-    def cancel_runtime_install(self, scene: bpy.types.Scene) -> None:
-        self._require_editable_scene(scene)
+    def cancel_runtime_install(self) -> None:
         if not self.install_in_progress or self.install_cancel is None:
             raise SidecarError("managed-runtime installation is not running")
         with self.install_activation_lock:
             self.install_cancel.set()
-        owner_scene = self._scene(self.install_scene) or scene
         message = "Canceling managed-runtime installation"
-        owner_scene.audio2face.status_message = message
         self.install_message = message
+        self._tag_runtime_setup_redraw()
 
     def start(self, scene: bpy.types.Scene) -> None:
         self._require_editable_scene(scene)
@@ -385,74 +406,46 @@ class RuntimeController:
 
     @staticmethod
     def _model_signature(
-        settings: object,
         spec: BundleLaunchSpec,
+        identity_index: int,
     ) -> tuple[str, str, int]:
         return (
             str(spec.audio2face_model),
             str(spec.audio2emotion_model),
-            int(settings.identity_index),
+            identity_index,
         )
-
-    @staticmethod
-    def _scene_key(scene: bpy.types.Scene) -> int:
-        """Return a stable identity for one live Blender scene datablock."""
-
-        try:
-            return int(scene.as_pointer())
-        except AttributeError:  # Ordinary-Python test doubles have no RNA pointer.
-            return id(scene)
 
     def _clear_model_state(self) -> None:
         self.loaded_signature = None
         self.model_sample_rate = None
-        self.model_parameter_defaults = None
-        self.model_emotion_names = None
-        self.scene_model_signatures.clear()
-
-    def _cache_model_schema(
-        self,
-        scene: bpy.types.Scene,
-        signature: tuple[str, str, int],
-        defaults: dict[str, Any],
-        emotion_names: list[str],
-    ) -> None:
-        self.loaded_signature = signature
-        self.model_parameter_defaults = copy.deepcopy(defaults)
-        self.model_emotion_names = tuple(emotion_names)
-        self.scene_model_signatures[self._scene_key(scene)] = signature
+        self.model_schema = None
+        self.schema_scenes.clear()
 
     def _ensure_scene_model_schema(self, scene: bpy.types.Scene) -> None:
         """Populate model-derived controls for any scene using the loaded worker."""
 
-        signature = self.loaded_signature
-        defaults = self.model_parameter_defaults
-        emotion_names = self.model_emotion_names
-        if signature is None or defaults is None or emotion_names is None:
+        model_schema = self.model_schema
+        if self.loaded_signature is None or model_schema is None:
             raise SidecarError("loaded worker model metadata is unavailable")
-        scene_key = self._scene_key(scene)
-        if self.scene_model_signatures.get(scene_key) == signature:
+        scene_key = int(scene.as_pointer())
+        if scene_key in self.schema_scenes:
             return
         try:
-            apply_model_defaults(
-                scene.audio2face,
-                copy.deepcopy(defaults),
-                list(emotion_names),
-            )
+            apply_model_schema(scene.audio2face, model_schema)
         except ValueError as exc:
             raise SidecarError(str(exc)) from exc
-        self.scene_model_signatures[scene_key] = signature
+        self.schema_scenes.add(scene_key)
 
     def _submit_model_load(
         self,
         scene: bpy.types.Scene,
         spec: BundleLaunchSpec,
         *,
+        identity_index: int,
         then_generate: bool,
         then_stream_wav: bool = False,
     ) -> None:
-        settings = scene.audio2face
-        signature = self._model_signature(settings, spec)
+        signature = self._model_signature(spec, identity_index)
         self._clear_model_state()
         self._request(
             scene,
@@ -460,7 +453,7 @@ class RuntimeController:
             {
                 "audio2face_model_path": str(spec.audio2face_model),
                 "audio2emotion_model_path": str(spec.audio2emotion_model),
-                "identity_index": int(settings.identity_index),
+                "identity_index": identity_index,
             },
             then_generate=then_generate,
             then_stream_wav=then_stream_wav,
@@ -478,8 +471,14 @@ class RuntimeController:
         self._require_worker_ready()
         settings = scene.audio2face
         spec = self.runtime_spec()
-        if self.loaded_signature != self._model_signature(settings, spec):
-            self._submit_model_load(scene, spec, then_generate=True)
+        identity_index = int(settings.identity_index)
+        if self.loaded_signature != self._model_signature(spec, identity_index):
+            self._submit_model_load(
+                scene,
+                spec,
+                identity_index=identity_index,
+                then_generate=True,
+            )
             return
 
         self._ensure_scene_model_schema(scene)
@@ -515,6 +514,9 @@ class RuntimeController:
         sample_rate = self.model_sample_rate
         if sample_rate is None:
             raise SidecarError("worker model did not report its sampling rate")
+        model_schema = self.model_schema
+        if model_schema is None:
+            raise SidecarError("worker model did not report its output channels")
         self._ensure_scene_model_schema(scene)
         stream_id = uuid.uuid4().hex
         playback_started = threading.Event() if audio_path is not None else None
@@ -524,6 +526,7 @@ class RuntimeController:
                 scene,
                 stream_id,
                 sample_rate,
+                model_schema["channels"],
                 audio_path=audio_path,
                 playback_started=(
                     playback_started.set if playback_started is not None else None
@@ -574,10 +577,12 @@ class RuntimeController:
         if not audio_path.is_file():
             raise SidecarError(f"audio file does not exist: {audio_path}")
         spec = self.runtime_spec()
-        if self.loaded_signature != self._model_signature(settings, spec):
+        identity_index = int(settings.identity_index)
+        if self.loaded_signature != self._model_signature(spec, identity_index):
             self._submit_model_load(
                 scene,
                 spec,
+                identity_index=identity_index,
                 then_generate=False,
                 then_stream_wav=True,
             )
@@ -592,7 +597,10 @@ class RuntimeController:
         self._require_worker_ready()
         settings = scene.audio2face
         spec = self.runtime_spec()
-        if self.loaded_signature != self._model_signature(settings, spec):
+        if self.loaded_signature != self._model_signature(
+            spec,
+            int(settings.identity_index),
+        ):
             raise SidecarError(
                 "model settings changed; restart the worker before opening a PCM stream"
             )
@@ -630,14 +638,11 @@ class RuntimeController:
         self,
         audio_f32le: bytes | bytearray | memoryview,
         *,
-        stream_id: str | None = None,
+        stream_id: str,
     ) -> str:
         """Queue one mono-f32le chunk; safe to call from an audio-source thread."""
 
-        active_id = stream_id or get_live_stream_controller().stream_id
-        if not active_id:
-            raise SidecarError("no PCM stream is active")
-        scene_name = self.stream_scene_names.get(active_id)
+        scene_name = self.stream_scene_names.get(stream_id)
         if scene_name is None:
             raise SidecarError("the requested PCM stream is not active")
         payload = self._validate_f32le_chunk(audio_f32le)
@@ -660,14 +665,14 @@ class RuntimeController:
             request_id = self.client.request(
                 "stream_chunk",
                 {
-                    "stream_id": active_id,
+                    "stream_id": stream_id,
                     "audio_f32le_base64": base64.b64encode(payload).decode("ascii"),
                 },
             )
             self.pending[request_id] = PendingRequest(
                 "stream_chunk",
                 scene_name,
-                stream_id=active_id,
+                stream_id=stream_id,
             )
         return request_id
 
@@ -759,7 +764,7 @@ class RuntimeController:
                     {"stream_id": stream_id},
                 )
                 self.stream_source_events.put(("ending", stream_id, None))
-            except (OSError, SidecarError, WavStreamError, ValueError) as exc:
+            except (OSError, SidecarError, ValueError) as exc:
                 if not canceled.is_set():
                     self.stream_source_events.put(("error", stream_id, str(exc)))
             except Exception as exc:
@@ -807,7 +812,7 @@ class RuntimeController:
             except SidecarError:
                 pass
             get_live_stream_controller().stop(reset=False)
-            self._clear_stream_state(scene)
+            self._clear_stream_state(scene, stream_id=stream_id)
             self._set_status(scene, "ERROR", message)
 
     def end_stream(self, scene: bpy.types.Scene) -> None:
@@ -873,12 +878,10 @@ class RuntimeController:
         self,
         scene: bpy.types.Scene,
         *,
-        stream_id: str | None = None,
+        stream_id: str,
     ) -> None:
-        resolved_id = stream_id or scene.audio2face.stream_id
-        if resolved_id:
-            self._release_worker_stream_state(resolved_id)
-        if stream_id is None or scene.audio2face.stream_id == stream_id:
+        self._release_worker_stream_state(stream_id)
+        if scene.audio2face.stream_id == stream_id:
             scene.audio2face.stream_id = ""
             scene.audio2face.stream_sample_rate = 0
             scene.audio2face.stream_prebuffer_samples = 0
@@ -963,7 +966,10 @@ class RuntimeController:
         get_live_stream_controller().stop()
         if self.client.state in {Lifecycle.STOPPED, Lifecycle.FAILED}:
             self._clear_model_state()
-            self._clear_stream_state(scene)
+            self._clear_stream_state(
+                scene,
+                stream_id=scene.audio2face.stream_id,
+            )
             self._set_status(scene, "IDLE", "Worker is already stopped")
             return
         if self.client.state == Lifecycle.STOPPING:
@@ -1016,22 +1022,26 @@ class RuntimeController:
 
             self.negotiated = True
             self.handshake_deadline = None
+            # No identity index is trustworthy until this worker has described
+            # the current model. Bootstrap identity zero, then let the validated
+            # schema populate the selector used by later model reloads.
+            settings.identity_index = 0
             self._submit_model_load(
                 scene,
                 self.runtime_spec(),
+                identity_index=0,
                 then_generate=False,
             )
             return
 
         if pending.method == "load_model":
-            expected_fields = {"parameter_defaults", "emotion_names", "sample_rate"}
+            expected_fields = {"model_schema", "sample_rate"}
             if set(result) != expected_fields:
                 message = "worker returned a noncanonical model response"
                 self._clear_model_state()
                 self._set_status(scene, "ERROR", message)
                 return
-            defaults = result["parameter_defaults"]
-            emotion_names = result["emotion_names"]
+            model_schema = result["model_schema"]
             sample_rate = result["sample_rate"]
             if (
                 isinstance(sample_rate, bool)
@@ -1042,7 +1052,7 @@ class RuntimeController:
                 self._set_status(scene, "ERROR", "worker returned an invalid model sample rate")
                 return
             try:
-                apply_model_defaults(settings, defaults, emotion_names)
+                apply_model_schema(settings, model_schema)
             except ValueError as exc:
                 self._clear_model_state()
                 self._set_status(scene, "ERROR", str(exc))
@@ -1051,12 +1061,9 @@ class RuntimeController:
                 self._clear_model_state()
                 self._set_status(scene, "ERROR", "model response lost its request identity")
                 return
-            self._cache_model_schema(
-                scene,
-                pending.model_signature,
-                defaults,
-                emotion_names,
-            )
+            self.loaded_signature = pending.model_signature
+            self.model_schema = model_schema
+            self.schema_scenes.add(int(scene.as_pointer()))
             self.model_sample_rate = sample_rate
             self._set_status(
                 scene,
@@ -1380,55 +1387,23 @@ class RuntimeController:
         elif envelope["type"] == "event":
             self._handle_event(envelope)
 
-    def _apply_install_progress(self, payload: InstallProgress) -> None:
-        self.install_message = payload.message
-        for candidate in self._editable_scenes():
-            candidate_settings = candidate.audio2face
-            candidate_settings.runtime_install_progress = payload.progress
-        scene = self._scene(self.install_scene)
-        if scene is not None and scene.is_editable:
-            scene.audio2face.status = "INSTALLING_RUNTIME"
-            scene.audio2face.status_message = payload.message
-
     def _finish_install(self, kind: str, payload: str | None) -> None:
-        scene = self._scene(self.install_scene)
-        settings = (
-            scene.audio2face
-            if scene is not None and scene.is_editable
-            else None
-        )
         if kind == "complete":
-            self.install_message = "Managed Audio2Face/Audio2Emotion runtime is ready"
+            self.install_message = "Managed runtime and both NVIDIA models are ready"
+            self.install_progress = 1.0
         elif kind == "canceled":
             self.install_message = "Runtime installation canceled"
+            self.install_progress = 0.0
         else:
             if payload is None:
                 raise RuntimeError("runtime installer error event has no message")
             self.install_message = payload
 
-        if settings is not None:
-            if kind == "complete":
-                settings.runtime_install_progress = 1.0
-                self._set_status(
-                    scene,
-                    "IDLE",
-                    "Managed runtime and GPU-optimized models are ready; start the worker",
-                )
-            elif kind == "canceled":
-                settings.runtime_install_progress = 0.0
-                self._set_status(
-                    scene,
-                    "IDLE",
-                    "Runtime installation canceled; any previous runtime is unchanged",
-                )
-            else:
-                self._set_status(scene, "ERROR", self.install_message)
-
         self.install_thread = None
         self.install_cancel = None
-        self.install_scene = None
         with self.install_progress_lock:
             self.install_latest_progress = None
+        self._tag_runtime_setup_redraw()
 
     def _poll_install_events(self) -> None:
         latest_progress = self._take_install_progress()
@@ -1438,7 +1413,9 @@ class RuntimeController:
             terminal = None
 
         if latest_progress is not None:
-            self._apply_install_progress(latest_progress)
+            self.install_message = latest_progress.message
+            self.install_progress = latest_progress.progress
+            self._tag_runtime_setup_redraw()
         if terminal is not None:
             self._finish_install(*terminal)
 
@@ -1456,7 +1433,6 @@ class RuntimeController:
                 settings.stream_sample_rate = 0
                 settings.stream_prebuffer_samples = 0
                 settings.stream_time = 0.0
-                settings.runtime_install_progress = 0.0
             self.reset_scene_state_on_poll = False
         self._poll_install_events()
         self._poll_stream_source_events()
@@ -1531,7 +1507,7 @@ class RuntimeController:
             self.stream_source_cancel.set()
         if self.stream_source_thread is not None and self.stream_source_thread.is_alive():
             self.stream_source_thread.join(timeout=SHUTDOWN_TIMEOUT_SECONDS)
-        get_live_stream_controller().close()
+        unregister_live_stream()
         self.client.close(timeout=SHUTDOWN_TIMEOUT_SECONDS)
         with self.pending_lock:
             self.pending.clear()
@@ -1540,7 +1516,7 @@ class RuntimeController:
         self._clear_model_state()
         self.install_thread = None
         self.install_cancel = None
-        self.install_scene = None
+        self.install_progress = 0.0
         self.stream_source_thread = None
         self.stream_source_cancel = None
         self.stream_playback_started = None
@@ -1590,11 +1566,10 @@ def _dispose_runtime_state() -> None:
     try:
         if controller is not None:
             controller.close()
-    finally:
-        try:
-            unregister_preview()
-        finally:
+        else:
             unregister_live_stream()
+    finally:
+        unregister_preview()
 
 
 @bpy.app.handlers.persistent
@@ -1639,11 +1614,3 @@ def unregister_runtime() -> None:
     if _load_post_handler in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(_load_post_handler)
     _dispose_runtime_state()
-
-
-__all__ = [
-    "RuntimeController",
-    "get_controller",
-    "register_runtime",
-    "unregister_runtime",
-]

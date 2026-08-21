@@ -16,18 +16,19 @@ from bpy.props import (
     StringProperty,
 )
 
+from .result_io import ResultValidationError, validate_output_channels
+
 
 STATUS_ITEMS = (
     ("IDLE", "Idle", "No worker operation is active"),
-    ("INSTALLING_RUNTIME", "Installing Runtime", "Downloading and preparing the managed GPU runtime"),
     ("STARTING", "Starting", "Starting and handshaking with the worker"),
     ("LOADING_MODEL", "Loading Models", "Loading Audio2Face and Audio2Emotion"),
     ("MODEL_READY", "Model Ready", "Model is ready for generation"),
-    ("GENERATING", "Generating", "Generating timestamped ARKit-52 values"),
+    ("GENERATING", "Generating", "Generating timestamped model channel values"),
     ("CANCELLING", "Cancelling", "Cancellation has been requested"),
-    ("COMPLETED", "Completed", "A generated ARKit-52 stream is available"),
+    ("COMPLETED", "Completed", "A generated model channel stream is available"),
     ("STREAM_STARTING", "Starting Stream", "Preparing incremental PCM inference"),
-    ("STREAMING", "Streaming", "Incremental PCM is driving ARKit-52 values"),
+    ("STREAMING", "Streaming", "Incremental PCM is driving model channel values"),
     ("STREAM_ENDING", "Ending Stream", "Draining the stream's final model frames"),
     ("STOPPING", "Stopping", "Worker is shutting down"),
     ("ERROR", "Error", "The last operation failed"),
@@ -39,12 +40,12 @@ def _mesh_object(_self: Any, obj: bpy.types.Object) -> bool:
 
 
 class A2FTargetMeshItem(bpy.types.PropertyGroup):
-    """One mesh subscriber to the canonical ARKit-52 frame bus."""
+    """One mesh subscriber to the model-provided frame bus."""
 
     enabled: BoolProperty(name="Enabled", default=True)
     object: PointerProperty(
         name="Face Mesh",
-        description="Mesh whose exact-name ARKit shape keys receive streamed values",
+        description="Mesh whose Shape Keys receive model output values when available",
         type=bpy.types.Object,
         poll=_mesh_object,
     )
@@ -69,6 +70,39 @@ class A2FEmotionValueItem(bpy.types.PropertyGroup):
     )
 
 
+class A2FModelParameterItem(bpy.types.PropertyGroup):
+    """One worker-advertised, model-tunable numeric parameter."""
+
+    path: StringProperty(
+        name="Path",
+        description="Opaque worker parameter identifier",
+        default="",
+        options={"HIDDEN"},
+    )
+    kind: StringProperty(
+        name="Kind",
+        description="Worker parameter type: float or integer",
+        default="",
+        options={"HIDDEN"},
+    )
+    float_value: FloatProperty(
+        name="Value",
+        description="Floating-point model parameter value",
+        default=0.0,
+    )
+    int_value: IntProperty(
+        name="Value",
+        description="Integer model parameter value",
+        default=0,
+    )
+
+
+class A2FModelIdentityItem(bpy.types.PropertyGroup):
+    """One identity reported by the loaded Audio2Face model."""
+
+    name: StringProperty(name="Identity", default="", options={"HIDDEN"})
+
+
 class A2FSceneSettings(bpy.types.PropertyGroup):
     input_mode: EnumProperty(
         name="Input Mode",
@@ -86,10 +120,11 @@ class A2FSceneSettings(bpy.types.PropertyGroup):
     )
     identity_index: IntProperty(
         name="Identity Index",
-        description="Worker/model identity index used consistently for generation",
+        description="Identity selected from the loaded model",
         default=0,
         min=0,
     )
+    model_identities: CollectionProperty(type=A2FModelIdentityItem)
 
     auto_audio2emotion: BoolProperty(
         name="Auto Audio2Emotion",
@@ -100,51 +135,14 @@ class A2FSceneSettings(bpy.types.PropertyGroup):
         default=False,
     )
     manual_emotions: CollectionProperty(type=A2FEmotionValueItem)
-    emotion_strength: FloatProperty(
-        name="Strength",
-        description="Overall strength of automatically inferred emotions",
-        default=0.6,
-        min=0.0,
-        max=1.0,
-        subtype="FACTOR",
-    )
-    emotion_contrast: FloatProperty(
-        name="Contrast",
-        description="Contrast applied to automatically inferred emotion probabilities",
-        default=1.0,
-        min=0.1,
-        max=3.0,
-    )
-    emotion_smoothing: FloatProperty(
-        name="Smoothing",
-        description="Temporal smoothing applied to automatically inferred emotions",
-        default=0.7,
-        min=0.0,
-        max=1.0,
-        subtype="FACTOR",
-    )
-    emotion_transition_time: FloatProperty(
-        name="Transition Time",
-        description="Seconds used to transition between inferred emotion states",
-        default=0.5,
-        min=0.1,
-        max=1.0,
-        unit="TIME",
-    )
-    max_emotions: IntProperty(
-        name="Max Emotions",
-        description="Maximum number of simultaneous inferred emotions",
-        default=6,
-        min=1,
-        max=6,
-    )
+    model_parameters: CollectionProperty(type=A2FModelParameterItem)
 
     target_meshes: CollectionProperty(type=A2FTargetMeshItem)
     target_mesh_index: IntProperty(default=0, min=0)
 
     preview_loop: BoolProperty(
         name="Loop",
-        description="Loop selected audio and its canonical ARKit-52 frame stream",
+        description="Loop selected audio and its model-provided channel stream",
         default=False,
     )
     preview_reset_on_stop: BoolProperty(
@@ -194,20 +192,6 @@ class A2FSceneSettings(bpy.types.PropertyGroup):
         name="Stream Time", default=0.0, min=0.0, unit="TIME", options={"SKIP_SAVE"}
     )
 
-    # Managed-model defaults are applied on the main thread after worker startup.
-    input_strength: FloatProperty(name="Input Strength", default=1.0, min=0.0, soft_max=2.0)
-    lower_face_smoothing: FloatProperty(name="Lower Face Smoothing", default=0.0, min=0.0, soft_max=1.0)
-    upper_face_smoothing: FloatProperty(name="Upper Face Smoothing", default=0.0, min=0.0, soft_max=1.0)
-    lower_face_strength: FloatProperty(name="Lower Face Strength", default=1.0, min=0.0, soft_max=2.0)
-    upper_face_strength: FloatProperty(name="Upper Face Strength", default=1.0, min=0.0, soft_max=2.0)
-    face_mask_level: FloatProperty(name="Face Mask Level", default=0.5, min=0.0, max=1.0)
-    face_mask_softness: FloatProperty(name="Face Mask Softness", default=0.1, min=0.0, max=1.0)
-    skin_strength: FloatProperty(name="Skin Strength", default=1.0, min=0.0, soft_max=2.0)
-    blink_strength: FloatProperty(name="Blink Strength", default=1.0, min=0.0, soft_max=2.0)
-    blink_offset: FloatProperty(name="Blink Offset", default=0.0, soft_min=-1.0, soft_max=1.0)
-    eyelid_open_offset: FloatProperty(name="Eyelid Open Offset", default=0.0, soft_min=-1.0, soft_max=1.0)
-    lip_open_offset: FloatProperty(name="Lip Open Offset", default=0.0, soft_min=-1.0, soft_max=1.0)
-
     status: EnumProperty(
         name="Status", items=STATUS_ITEMS, default="IDLE", options={"SKIP_SAVE"}
     )
@@ -225,43 +209,10 @@ class A2FSceneSettings(bpy.types.PropertyGroup):
         subtype="FACTOR",
         options={"SKIP_SAVE"},
     )
-    runtime_install_progress: FloatProperty(
-        name="Install Progress",
-        default=0.0,
-        min=0.0,
-        max=1.0,
-        subtype="FACTOR",
-        options={"HIDDEN", "SKIP_SAVE"},
-    )
-    show_tuning: BoolProperty(name="Model Tuning", default=False)
-
-
-PARAMETER_GROUPS = (
-    (
-        "skin",
-        (
-            "lower_face_smoothing",
-            "upper_face_smoothing",
-            "lower_face_strength",
-            "upper_face_strength",
-            "face_mask_level",
-            "face_mask_softness",
-            "skin_strength",
-            "blink_strength",
-            "blink_offset",
-            "eyelid_open_offset",
-            "lip_open_offset",
-        ),
-    ),
-)
-
-EMOTION_AUTO_PROPERTIES = (
-    ("strength", "emotion_strength"),
-    ("contrast", "emotion_contrast"),
-    ("smoothing", "emotion_smoothing"),
-    ("transition_time", "emotion_transition_time"),
-    ("max_emotions", "max_emotions"),
-)
+_MODEL_SCHEMA_FIELDS = {"identities", "channels", "parameters", "emotion_channels"}
+_EMOTION_DESCRIPTOR_FIELDS = {"name", "default"}
+_BLENDER_INT_MIN = -(1 << 31)
+_BLENDER_INT_MAX = (1 << 31) - 1
 
 
 def _finite_float_in_range(
@@ -271,187 +222,173 @@ def _finite_float_in_range(
     minimum: float,
     maximum: float,
 ) -> float:
+    result = _finite_float(value, label=label)
+    if result < minimum or result > maximum:
+        raise ValueError(f"{label} must be in [{minimum:g}, {maximum:g}]")
+    return result
+
+
+def _finite_float(value: object, *, label: str) -> float:
     if (
         isinstance(value, bool)
         or not isinstance(value, (int, float))
         or not math.isfinite(value)
     ):
         raise ValueError(f"{label} must be a finite number")
-    result = float(value)
-    if result < minimum or result > maximum:
-        raise ValueError(f"{label} must be in [{minimum:g}, {maximum:g}]")
+    return float(value)
+
+
+def _integer(value: object, *, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{label} must be an integer")
+    if value < _BLENDER_INT_MIN or value > _BLENDER_INT_MAX:
+        raise ValueError(f"{label} is outside Blender's integer range")
+    return value
+
+
+def _nonempty_string(value: object, *, label: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{label} must be a non-empty string")
+    return value
+
+
+def _validated_parameters(
+    defaults: object,
+) -> list[tuple[str, str, float | int]]:
+    if not isinstance(defaults, dict):
+        raise ValueError("model_schema.parameters must be an object")
+    result: list[tuple[str, str, float | int]] = []
+    for raw_path, default in defaults.items():
+        path = _nonempty_string(raw_path, label="model_schema parameter path")
+        label = f"model_schema.parameters[{path!r}]"
+        if isinstance(default, int) and not isinstance(default, bool):
+            result.append((path, "integer", _integer(default, label=label)))
+        else:
+            result.append((path, "float", _finite_float(default, label=label)))
+    return result
+
+
+def _validated_emotion_descriptors(
+    descriptors: object,
+) -> list[tuple[str, float]]:
+    if not isinstance(descriptors, list):
+        raise ValueError("model_schema.emotion_channels must be an array")
+    result: list[tuple[str, float]] = []
+    seen_names: set[str] = set()
+    for index, descriptor in enumerate(descriptors):
+        location = f"model_schema.emotion_channels[{index}]"
+        if not isinstance(descriptor, dict) or set(descriptor) != _EMOTION_DESCRIPTOR_FIELDS:
+            raise ValueError(f"{location} has unexpected or missing fields")
+        name = _nonempty_string(descriptor["name"], label=f"{location}.name")
+        if name in seen_names:
+            raise ValueError(f"model_schema contains duplicate emotion name {name!r}")
+        seen_names.add(name)
+        default = _finite_float_in_range(
+            descriptor["default"],
+            label=f"{location}.default",
+            minimum=0.0,
+            maximum=1.0,
+        )
+        result.append((name, default))
+    return result
+
+
+def _validated_identities(identities: object) -> list[str]:
+    if not isinstance(identities, list) or not identities:
+        raise ValueError("model_schema.identities must be a non-empty array")
+    result = []
+    for position, identity in enumerate(identities):
+        location = f"model_schema.identities[{position}]"
+        result.append(_nonempty_string(identity, label=location))
     return result
 
 
 def _manual_emotion_values(settings: A2FSceneSettings) -> dict[str, float]:
-    values: dict[str, float] = {}
-    for item in settings.manual_emotions:
-        name = item.name
-        if not isinstance(name, str) or not name:
-            raise ValueError("manual emotion names must be non-empty strings")
-        if name in values:
-            raise ValueError(f"manual emotion name {name!r} is duplicated")
-        values[name] = _finite_float_in_range(
-            item.value,
-            label=f"manual emotion {name!r}",
-            minimum=0.0,
-            maximum=1.0,
-        )
-    return values
+    return {item.name: float(item.value) for item in settings.manual_emotions}
+
+
+def _model_parameter_value(parameter: A2FModelParameterItem) -> float | int:
+    if parameter.kind == "float":
+        return float(parameter.float_value)
+    if parameter.kind == "integer":
+        return int(parameter.int_value)
+    raise ValueError(f"unsupported model parameter kind {parameter.kind!r}")
+
+
+def _model_parameter_values(settings: A2FSceneSettings) -> dict[str, float | int]:
+    return {
+        item.path: _model_parameter_value(item)
+        for item in settings.model_parameters
+    }
 
 
 def tuning_parameters(settings: A2FSceneSettings) -> dict[str, object]:
-    """Return the worker's nested get-mutate-set parameter shape."""
+    """Return values for exactly the schema advertised by the loaded worker."""
 
     return {
-        "input_strength": float(settings.input_strength),
-        **{
-            group: {name: float(getattr(settings, name)) for name in names}
-            for group, names in PARAMETER_GROUPS
-        },
-        "emotion": {
-            "auto_audio2emotion": bool(settings.auto_audio2emotion),
-            "manual_values": _manual_emotion_values(settings),
-            "auto": {
-                worker_name: (
-                    int(getattr(settings, property_name))
-                    if worker_name == "max_emotions"
-                    else float(getattr(settings, property_name))
-                )
-                for worker_name, property_name in EMOTION_AUTO_PROPERTIES
-            },
-        },
+        "auto_audio2emotion": bool(settings.auto_audio2emotion),
+        "manual_emotions": _manual_emotion_values(settings),
+        "parameters": _model_parameter_values(settings),
     }
 
 
-def apply_model_defaults(
+def apply_model_schema(
     settings: A2FSceneSettings,
-    defaults: object,
-    emotion_names: object,
-) -> None:
-    """Apply the worker's exact finite managed-model parameter document."""
+    model_schema: object,
+) -> tuple[str, ...]:
+    """Validate and materialize one self-describing worker model schema."""
 
-    expected_groups = {"input_strength", "emotion"} | {
-        group for group, _names in PARAMETER_GROUPS
+    if not isinstance(model_schema, dict) or set(model_schema) != _MODEL_SCHEMA_FIELDS:
+        raise ValueError("worker returned a noncanonical model_schema object")
+    try:
+        channels = validate_output_channels(model_schema["channels"])
+    except ResultValidationError as exc:
+        raise ValueError(f"worker returned invalid output channels: {exc}") from exc
+    identities = _validated_identities(model_schema["identities"])
+    parameters = _validated_parameters(model_schema["parameters"])
+    emotions = _validated_emotion_descriptors(model_schema["emotion_channels"])
+
+    preserved_parameters = {
+        (item.path, item.kind): _model_parameter_value(item)
+        for item in settings.model_parameters
     }
-    if not isinstance(defaults, dict) or set(defaults) != expected_groups:
-        raise ValueError("worker returned a noncanonical parameter_defaults object")
-
-    if (
-        not isinstance(emotion_names, list)
-        or any(not isinstance(name, str) or not name for name in emotion_names)
-        or len(set(emotion_names)) != len(emotion_names)
-    ):
-        raise ValueError("worker returned invalid or duplicate emotion_names")
-
-    current_emotion_names = tuple(item.name for item in settings.manual_emotions)
-    schema_matches = current_emotion_names == tuple(emotion_names)
-
-    values: dict[str, object] = {"input_strength": defaults["input_strength"]}
-    for group, names in PARAMETER_GROUPS:
-        group_values = defaults[group]
-        if not isinstance(group_values, dict) or set(group_values) != set(names):
-            raise ValueError(f"worker returned noncanonical {group} parameter defaults")
-        values.update(group_values)
-
-    emotion = defaults["emotion"]
-    if not isinstance(emotion, dict) or set(emotion) != {"manual_values", "auto"}:
-        raise ValueError("worker returned noncanonical emotion parameter defaults")
-    manual_values = emotion["manual_values"]
-    if not isinstance(manual_values, dict) or set(manual_values) != set(emotion_names):
-        raise ValueError("worker emotion defaults do not match emotion_names")
-    validated_manual = {
-        name: _finite_float_in_range(
-            manual_values[name],
-            label=f"model default emotion {name!r}",
-            minimum=0.0,
-            maximum=1.0,
-        )
-        for name in emotion_names
-    }
-
-    auto = emotion["auto"]
-    expected_auto = {name for name, _property_name in EMOTION_AUTO_PROPERTIES}
-    if not isinstance(auto, dict) or set(auto) != expected_auto:
-        raise ValueError("worker returned noncanonical Audio2Emotion defaults")
-    validated_auto: dict[str, float | int] = {
-        "strength": _finite_float_in_range(
-            auto["strength"],
-            label="model default Audio2Emotion strength",
-            minimum=0.0,
-            maximum=1.0,
-        ),
-        "contrast": _finite_float_in_range(
-            auto["contrast"],
-            label="model default Audio2Emotion contrast",
-            minimum=0.1,
-            maximum=3.0,
-        ),
-        "smoothing": _finite_float_in_range(
-            auto["smoothing"],
-            label="model default Audio2Emotion smoothing",
-            minimum=0.0,
-            maximum=1.0,
-        ),
-        "transition_time": _finite_float_in_range(
-            auto["transition_time"],
-            label="model default Audio2Emotion transition time",
-            minimum=0.1,
-            maximum=1.0,
-        ),
-    }
-    max_emotions = auto["max_emotions"]
-    if (
-        isinstance(max_emotions, bool)
-        or not isinstance(max_emotions, int)
-        or not 1 <= max_emotions <= 6
-    ):
-        raise ValueError("model default Audio2Emotion max_emotions must be in [1, 6]")
-    validated_auto["max_emotions"] = max_emotions
-
-    for name, value in values.items():
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, (int, float))
-            or not math.isfinite(value)
-        ):
-            raise ValueError(f"worker returned invalid model default {name!r}")
-        if not schema_matches:
-            try:
-                setattr(settings, name, float(value))
-            except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    f"model default {name!r} is outside Blender property limits"
-                ) from exc
-
-    if not schema_matches:
-        for worker_name, property_name in EMOTION_AUTO_PROPERTIES:
-            try:
-                setattr(settings, property_name, validated_auto[worker_name])
-            except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    f"Audio2Emotion default {worker_name!r} is outside Blender property limits"
-                ) from exc
-
     preserved_manual = _manual_emotion_values(settings)
+
+    settings.model_parameters.clear()
+    for path, kind, default in parameters:
+        item = settings.model_parameters.add()
+        item.path = path
+        item.kind = kind
+        value = preserved_parameters.get((path, kind), default)
+        if kind == "float":
+            item.float_value = float(value)
+        else:
+            item.int_value = int(value)
+
     settings.manual_emotions.clear()
-    for name in emotion_names:
+    for name, default in emotions:
         item = settings.manual_emotions.add()
         item.name = name
-        item.value = preserved_manual.get(name, validated_manual[name])
+        item.value = preserved_manual.get(name, default)
+
+    selected_identity = settings.identity_index
+    settings.model_identities.clear()
+    for name in identities:
+        item = settings.model_identities.add()
+        item.name = name
+    if (
+        isinstance(selected_identity, bool)
+        or not isinstance(selected_identity, int)
+        or not 0 <= selected_identity < len(identities)
+    ):
+        settings.identity_index = 0
+    return channels
 
 
-CLASSES = (A2FTargetMeshItem, A2FEmotionValueItem, A2FSceneSettings)
-
-
-__all__ = [
-    "A2FSceneSettings",
-    "A2FEmotionValueItem",
-    "A2FTargetMeshItem",
-    "CLASSES",
-    "EMOTION_AUTO_PROPERTIES",
-    "PARAMETER_GROUPS",
-    "STATUS_ITEMS",
-    "apply_model_defaults",
-    "tuning_parameters",
-]
+CLASSES = (
+    A2FTargetMeshItem,
+    A2FEmotionValueItem,
+    A2FModelParameterItem,
+    A2FModelIdentityItem,
+    A2FSceneSettings,
+)

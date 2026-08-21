@@ -8,37 +8,28 @@ if TYPE_CHECKING:
     import bpy
 
 
-def _scene_or_context(scene: bpy.types.Scene | None) -> bpy.types.Scene:
-    import bpy
-
-    resolved = scene if scene is not None else bpy.context.scene
-    if resolved is None:
-        raise RuntimeError("an editable Blender scene is required")
-    return resolved
-
-
-def start_pcm_stream(scene: bpy.types.Scene | None = None) -> str:
+def start_pcm_stream(scene: bpy.types.Scene) -> str:
     """Open one stream and return its ID; call from Blender's main thread."""
 
     from .runtime import get_controller
 
-    return get_controller().start_pcm_stream(_scene_or_context(scene))
+    return get_controller().start_pcm_stream(scene)
 
 
 def get_pcm_stream_requirements(
-    scene: bpy.types.Scene | None = None,
+    scene: bpy.types.Scene,
 ) -> tuple[int, int] | None:
     """Return ``(sample_rate, prebuffer_samples)`` or ``None`` while starting."""
 
     from .runtime import get_controller
 
-    return get_controller().pcm_stream_requirements(_scene_or_context(scene))
+    return get_controller().pcm_stream_requirements(scene)
 
 
 def push_audio_f32le(
     audio_f32le: bytes | bytearray | memoryview,
     *,
-    stream_id: str | None = None,
+    stream_id: str,
 ) -> str:
     """Queue one finite mono f32le chunk; audio-source threads may call this."""
 
@@ -47,20 +38,20 @@ def push_audio_f32le(
     return get_controller().push_stream_audio(audio_f32le, stream_id=stream_id)
 
 
-def end_pcm_stream(scene: bpy.types.Scene | None = None) -> None:
+def end_pcm_stream(scene: bpy.types.Scene) -> None:
     """Close input normally and drain final model frames on Blender's main thread."""
 
     from .runtime import get_controller
 
-    get_controller().end_stream(_scene_or_context(scene))
+    get_controller().end_stream(scene)
 
 
-def stop_pcm_stream(scene: bpy.types.Scene | None = None) -> None:
+def stop_pcm_stream(scene: bpy.types.Scene) -> None:
     """Cancel the stream immediately while leaving the GPU model loaded."""
 
     from .runtime import get_controller
 
-    get_controller().stop_stream(_scene_or_context(scene))
+    get_controller().stop_stream(scene)
 
 
 __all__ = [

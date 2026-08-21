@@ -10,53 +10,106 @@
 #include <audio2x/tensor_float.h>
 
 #include <algorithm>
-#include <array>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <initializer_list>
 #include <iostream>
-#include <iterator>
 #include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <system_error>
+#include <type_traits>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace a2f_worker {
 namespace {
 
-constexpr std::size_t kAudioChunkSamples = 16000;
 constexpr std::size_t kAudio2EmotionInputWindowSamples = 60000;
 constexpr std::size_t kAudio2EmotionInferencesToSkip = 30;
 constexpr std::size_t kMaximumResultScalars = 40000000;
 constexpr std::size_t kEyesRotationCount = 6;
+constexpr std::size_t kArkit52ChannelCount = 52;
 constexpr std::uint32_t kMaximumSupportedSampleRate = 384000;
 
-// Exact NVIDIA skin names in the order defined by a2f-animation/1.
-constexpr std::array<const char*, 52> kArkit52SdkNames = {{
-    "eyeBlinkLeft",       "eyeLookDownLeft",    "eyeLookInLeft",
-    "eyeLookOutLeft",     "eyeLookUpLeft",      "eyeSquintLeft",
-    "eyeWideLeft",        "eyeBlinkRight",      "eyeLookDownRight",
-    "eyeLookInRight",     "eyeLookOutRight",    "eyeLookUpRight",
-    "eyeSquintRight",     "eyeWideRight",       "jawForward",
-    "jawLeft",            "jawRight",           "jawOpen",
-    "mouthClose",         "mouthFunnel",        "mouthPucker",
-    "mouthLeft",          "mouthRight",         "mouthSmileLeft",
-    "mouthSmileRight",    "mouthFrownLeft",     "mouthFrownRight",
-    "mouthDimpleLeft",    "mouthDimpleRight",   "mouthStretchLeft",
-    "mouthStretchRight",  "mouthRollLower",     "mouthRollUpper",
-    "mouthShrugLower",    "mouthShrugUpper",    "mouthPressLeft",
-    "mouthPressRight",    "mouthLowerDownLeft", "mouthLowerDownRight",
-    "mouthUpperUpLeft",   "mouthUpperUpRight",  "browDownLeft",
-    "browDownRight",      "browInnerUp",        "browOuterUpLeft",
-    "browOuterUpRight",   "cheekPuff",          "cheekSquintLeft",
-    "cheekSquintRight",   "noseSneerLeft",      "noseSneerRight",
-    "tongueOut",
-}};
+struct ParameterValues {
+  float input_strength{0.0F};
+  nva2f::AnimatorSkinParams skin{};
+  nva2e::PostProcessParams audio2emotion{};
+};
+
+using RootFloatMember = float ParameterValues::*;
+using SkinFloatMember = float nva2f::AnimatorSkinParams::*;
+using EmotionFloatMember = float nva2e::PostProcessParams::*;
+using EmotionSizeMember = std::size_t nva2e::PostProcessParams::*;
+using ParameterMember =
+    std::variant<RootFloatMember, SkinFloatMember, EmotionFloatMember,
+                 EmotionSizeMember>;
+
+struct ParameterBinding {
+  const char* path;
+  ParameterMember member;
+};
+
+// SDK 1.0.0 has get/mutate/set structures but no public reflection API. This
+// is the single typed adapter between those structures and the model schema.
+constexpr ParameterBinding kParameterBindings[] = {
+    {"/input_strength", &ParameterValues::input_strength},
+    {"/skin/lower_face_smoothing",
+     &nva2f::AnimatorSkinParams::lowerFaceSmoothing},
+    {"/skin/upper_face_smoothing",
+     &nva2f::AnimatorSkinParams::upperFaceSmoothing},
+    {"/skin/lower_face_strength",
+     &nva2f::AnimatorSkinParams::lowerFaceStrength},
+    {"/skin/upper_face_strength",
+     &nva2f::AnimatorSkinParams::upperFaceStrength},
+    {"/skin/face_mask_level",
+     &nva2f::AnimatorSkinParams::faceMaskLevel},
+    {"/skin/face_mask_softness",
+     &nva2f::AnimatorSkinParams::faceMaskSoftness},
+    {"/skin/skin_strength",
+     &nva2f::AnimatorSkinParams::skinStrength},
+    {"/skin/blink_strength",
+     &nva2f::AnimatorSkinParams::blinkStrength},
+    {"/skin/eyelid_open_offset",
+     &nva2f::AnimatorSkinParams::eyelidOpenOffset},
+    {"/skin/lip_open_offset",
+     &nva2f::AnimatorSkinParams::lipOpenOffset},
+    {"/skin/blink_offset",
+     &nva2f::AnimatorSkinParams::blinkOffset},
+    {"/audio2emotion/emotion_strength",
+     &nva2e::PostProcessParams::emotionStrength},
+    {"/audio2emotion/emotion_contrast",
+     &nva2e::PostProcessParams::emotionContrast},
+    {"/audio2emotion/live_blend_coef",
+     &nva2e::PostProcessParams::liveBlendCoef},
+    {"/audio2emotion/live_transition_time",
+     &nva2e::PostProcessParams::liveTransitionTime},
+    {"/audio2emotion/max_emotions",
+     &nva2e::PostProcessParams::maxEmotions},
+};
+constexpr std::size_t kParameterBindingCount =
+    sizeof(kParameterBindings) / sizeof(kParameterBindings[0]);
+
+struct ArkitEyeLookIndices {
+  std::size_t down_left;
+  std::size_t in_left;
+  std::size_t out_left;
+  std::size_t up_left;
+  std::size_t down_right;
+  std::size_t in_right;
+  std::size_t out_right;
+  std::size_t up_right;
+};
+
+struct EmotionChannel {
+  std::string name;
+  float default_value;
+};
 
 template <class T>
 struct SdkDestroyer {
@@ -86,6 +139,15 @@ SdkPtr<T> require_sdk_ptr(T* value, const char* operation,
   return SdkPtr<T>(value);
 }
 
+void require_model_file(const std::string& path, const char* field) {
+  std::error_code error;
+  if (!std::filesystem::is_regular_file(path, error)) {
+    throw WorkerError("model_not_found",
+                      std::string(field) + " is not a regular file",
+                      {{"path", path}});
+  }
+}
+
 void require_exact_keys(const json& object,
                         std::initializer_list<const char*> expected,
                         const char* path) {
@@ -102,30 +164,16 @@ void require_exact_keys(const json& object,
   }
 }
 
-float required_float(const json& object, const char* name, const char* path) {
-  const auto it = object.find(name);
-  if (it == object.end() || !it->is_number()) {
-    throw WorkerError("invalid_params",
-                      std::string(path) + name + " must be numeric");
+float required_float_value(const json& value, const std::string& path) {
+  if (!value.is_number()) {
+    throw WorkerError("invalid_params", path + " must be numeric");
   }
-  const double parsed = it->get<double>();
+  const double parsed = value.get<double>();
   if (!std::isfinite(parsed) || parsed < -std::numeric_limits<float>::max() ||
       parsed > std::numeric_limits<float>::max()) {
-    throw WorkerError("invalid_params",
-                      std::string(path) + name + " must be finite");
+    throw WorkerError("invalid_params", path + " must be a finite float");
   }
   return static_cast<float>(parsed);
-}
-
-float required_float_range(const json& object, const char* name,
-                           const char* path, float minimum, float maximum) {
-  const float value = required_float(object, name, path);
-  if (value < minimum || value > maximum) {
-    throw WorkerError(
-        "invalid_params", std::string(path) + name + " is outside its range",
-        {{"minimum", minimum}, {"maximum", maximum}, {"received", value}});
-  }
-  return value;
 }
 
 bool required_bool(const json& object, const char* name, const char* path) {
@@ -137,50 +185,29 @@ bool required_bool(const json& object, const char* name, const char* path) {
   return it->get<bool>();
 }
 
-std::size_t required_size_range(const json& object, const char* name,
-                                const char* path, std::size_t minimum,
-                                std::size_t maximum) {
-  const auto it = object.find(name);
-  if (it == object.end() || !it->is_number_integer()) {
-    throw WorkerError("invalid_params",
-                      std::string(path) + name +
-                          " must be an unsigned integer");
+std::size_t required_size_value(const json& value, const std::string& path) {
+  std::uint64_t parsed = 0;
+  if (value.is_number_unsigned()) {
+    parsed = value.get<std::uint64_t>();
+  } else if (value.is_number_integer()) {
+    const auto signed_value = value.get<std::int64_t>();
+    if (signed_value < 0) {
+      throw WorkerError("invalid_params", path + " must not be negative");
+    }
+    parsed = static_cast<std::uint64_t>(signed_value);
+  } else {
+    throw WorkerError("invalid_params", path + " must be an unsigned integer");
   }
-  const auto signed_value = it->get<std::int64_t>();
-  if (signed_value < 0) {
-    throw WorkerError("invalid_params",
-                      std::string(path) + name + " must not be negative");
+  if (parsed > std::numeric_limits<std::size_t>::max()) {
+    throw WorkerError("invalid_params", path + " is out of range");
   }
-  const auto value = static_cast<std::uint64_t>(signed_value);
-  if (value < minimum || value > maximum) {
-    throw WorkerError(
-        "invalid_params", std::string(path) + name + " is outside its range",
-        {{"minimum", minimum}, {"maximum", maximum}, {"received", value}});
-  }
-  return static_cast<std::size_t>(value);
+  return static_cast<std::size_t>(parsed);
 }
 
-json skin_json(const nva2f::AnimatorSkinParams& value) {
-  return {{"lower_face_smoothing", value.lowerFaceSmoothing},
-          {"upper_face_smoothing", value.upperFaceSmoothing},
-          {"lower_face_strength", value.lowerFaceStrength},
-          {"upper_face_strength", value.upperFaceStrength},
-          {"face_mask_level", value.faceMaskLevel},
-          {"face_mask_softness", value.faceMaskSoftness},
-          {"skin_strength", value.skinStrength},
-          {"blink_strength", value.blinkStrength},
-          {"eyelid_open_offset", value.eyelidOpenOffset},
-          {"lip_open_offset", value.lipOpenOffset},
-          {"blink_offset", value.blinkOffset}};
-}
-
-std::vector<std::string> pose_names(
-    const nva2f::BlendshapeSolveExecutorCreationParameters::BlendshapeParams* params,
-    const char* solver_name) {
+std::vector<std::string> skin_pose_names(
+    const nva2f::BlendshapeSolveExecutorCreationParameters::BlendshapeParams* params) {
   if (params == nullptr) {
-    throw WorkerError("model_invalid",
-                      std::string("Model has no ") + solver_name +
-                          " blendshape solver");
+    throw WorkerError("model_invalid", "Model has no skin blendshape solver");
   }
   if (params->data.poseNames == nullptr && params->data.poseNamesSize != 0) {
     throw WorkerError("model_invalid", "Blendshape pose names pointer is null");
@@ -198,61 +225,137 @@ std::vector<std::string> pose_names(
   return names;
 }
 
-std::vector<std::size_t> arkit52_indices(
-    const std::vector<std::string>& sdk_names) {
-  std::vector<std::size_t> indices;
-  indices.reserve(kArkit52SdkNames.size());
-  json missing = json::array();
-  json ambiguous = json::array();
-  json unexpected = json::array();
-  for (const char* sdk_name : kArkit52SdkNames) {
-    const auto found = std::find(sdk_names.begin(), sdk_names.end(), sdk_name);
-    if (found == sdk_names.end()) {
-      missing.push_back(sdk_name);
-      continue;
-    }
-    if (std::find(std::next(found), sdk_names.end(), sdk_name) != sdk_names.end()) {
-      ambiguous.push_back(sdk_name);
-      continue;
-    }
-    indices.push_back(
-        static_cast<std::size_t>(std::distance(sdk_names.begin(), found)));
-  }
-  for (const std::string& sdk_name : sdk_names) {
-    if (std::find(kArkit52SdkNames.begin(), kArkit52SdkNames.end(), sdk_name) ==
-        kArkit52SdkNames.end()) {
-      unexpected.push_back(sdk_name);
+void validate_arkit52_channels(const std::vector<std::string>& names) {
+  json duplicates = json::array();
+  for (std::size_t index = 0; index < names.size(); ++index) {
+    if (std::find(names.begin(), names.begin() + index, names[index]) !=
+        names.begin() + index) {
+      duplicates.push_back(names[index]);
     }
   }
-  if (!missing.empty() || !ambiguous.empty() || !unexpected.empty() ||
-      sdk_names.size() != kArkit52SdkNames.size()) {
+  if (names.size() != kArkit52ChannelCount || !duplicates.empty()) {
     throw WorkerError(
         "model_invalid",
-        "Skin blendshape solver does not match NVIDIA's ARKit-52 contract",
-        {{"required_schema", "arkit-52/1"},
-         {"missing", missing},
-         {"ambiguous", ambiguous},
-         {"unexpected", unexpected},
-         {"sdk_skin_channel_names", sdk_names}});
+        "Skin blendshape solver is not one unique 52-channel ARKit output",
+        {{"reported_count", names.size()},
+         {"expected_count", kArkit52ChannelCount},
+         {"duplicates", std::move(duplicates)}});
   }
-  return indices;
+}
+
+std::size_t require_channel_index(const std::vector<std::string>& names,
+                                  const char* semantic_name) {
+  const auto found = std::find(names.begin(), names.end(), semantic_name);
+  if (found == names.end()) {
+    throw WorkerError(
+        "model_invalid", "ARKit eye-look channel is missing from the model",
+        {{"channel", semantic_name}});
+  }
+  return static_cast<std::size_t>(found - names.begin());
+}
+
+ArkitEyeLookIndices resolve_arkit_eye_look_indices(
+    const std::vector<std::string>& names) {
+  return {require_channel_index(names, "eyeLookDownLeft"),
+          require_channel_index(names, "eyeLookInLeft"),
+          require_channel_index(names, "eyeLookOutLeft"),
+          require_channel_index(names, "eyeLookUpLeft"),
+          require_channel_index(names, "eyeLookDownRight"),
+          require_channel_index(names, "eyeLookInRight"),
+          require_channel_index(names, "eyeLookOutRight"),
+          require_channel_index(names, "eyeLookUpRight")};
 }
 
 void resolve_arkit_eye_look(std::vector<float>& weights,
-                            const float* eyes) {
+                            const float* eyes,
+                            const ArkitEyeLookIndices& indices) {
   constexpr float kEyeRangeDegrees = 60.0F;
   const float right_x = eyes[0] / kEyeRangeDegrees;
   const float right_y = eyes[1] / kEyeRangeDegrees;
   const float left_x = eyes[3] / kEyeRangeDegrees;
   const float left_y = eyes[4] / kEyeRangeDegrees;
-  weights[1] = left_x;
-  weights[2] = -left_y;
-  weights[3] = left_y;
-  weights[4] = -left_x;
-  weights[8] = right_x;
-  weights[9] = right_y;
-  weights[10] = -right_y;
-  weights[11] = -right_x;
+  weights[indices.down_left] = left_x;
+  weights[indices.in_left] = -left_y;
+  weights[indices.out_left] = left_y;
+  weights[indices.up_left] = -left_x;
+  weights[indices.down_right] = right_x;
+  weights[indices.in_right] = right_y;
+  weights[indices.out_right] = -right_y;
+  weights[indices.up_right] = -right_x;
+}
+
+json parameter_default(const ParameterBinding& binding,
+                       const ParameterValues& values) {
+  return std::visit(
+      [&](auto member) -> json {
+        using Member = decltype(member);
+        if constexpr (std::is_same_v<Member, EmotionSizeMember>) {
+          return values.audio2emotion.*member;
+        } else {
+          float value = 0.0F;
+          if constexpr (std::is_same_v<Member, RootFloatMember>) {
+            value = values.*member;
+          } else if constexpr (std::is_same_v<Member, SkinFloatMember>) {
+            value = values.skin.*member;
+          } else {
+            value = values.audio2emotion.*member;
+          }
+          if (!std::isfinite(value)) {
+            throw WorkerError("model_invalid",
+                              "SDK returned a non-finite parameter default",
+                              {{"path", binding.path}});
+          }
+          return value;
+        }
+      },
+      binding.member);
+}
+
+json parameter_schema(const ParameterValues& values) {
+  json result = json::object();
+  for (const ParameterBinding& binding : kParameterBindings) {
+    result[binding.path] = parameter_default(binding, values);
+  }
+  return result;
+}
+
+void require_parameter_keys(const json& parameters) {
+  json expected = json::array();
+  bool valid = parameters.is_object() &&
+               parameters.size() == kParameterBindingCount;
+  for (const ParameterBinding& binding : kParameterBindings) {
+    expected.push_back(binding.path);
+    valid = valid && parameters.contains(binding.path);
+  }
+  if (!valid) {
+    throw WorkerError(
+        "invalid_params",
+        "settings.parameters must contain every advertised parameter path",
+        {{"expected", std::move(expected)}});
+  }
+}
+
+void assign_parameter(const ParameterBinding& binding, const json& value,
+                      ParameterValues& parameters) {
+  const std::string path =
+      "settings.parameters[" + json(binding.path).dump() + "]";
+  std::visit(
+      [&](auto member) {
+        using Member = decltype(member);
+        if constexpr (std::is_same_v<Member, EmotionSizeMember>) {
+          parameters.audio2emotion.*member = required_size_value(value, path);
+        } else {
+          const float parsed = required_float_value(value, path);
+          if constexpr (std::is_same_v<Member, RootFloatMember>) {
+            parameters.*member = parsed;
+          } else if constexpr (std::is_same_v<Member, SkinFloatMember>) {
+            parameters.skin.*member = parsed;
+          } else {
+            parameters.audio2emotion.*member = parsed;
+          }
+        }
+      },
+      binding.member);
 }
 
 }  // namespace
@@ -271,29 +374,17 @@ class Backend::Impl final {
     }
     clear_locked();
     try {
-      std::error_code fs_error;
-      if (!std::filesystem::is_regular_file(request.audio2face_model_path,
-                                            fs_error)) {
-        throw WorkerError(
-            "model_not_found",
-            "audio2face_model_path is not a regular file",
-            {{"path", request.audio2face_model_path}});
-      }
-      fs_error.clear();
-      if (!std::filesystem::is_regular_file(request.audio2emotion_model_path,
-                                            fs_error)) {
-        throw WorkerError(
-            "model_not_found",
-            "audio2emotion_model_path is not a regular file",
-            {{"path", request.audio2emotion_model_path}});
-      }
+      require_model_file(request.audio2face_model_path,
+                         "audio2face_model_path");
+      require_model_file(request.audio2emotion_model_path,
+                         "audio2emotion_model_path");
       sdk_check(nva2x::SetCudaDeviceIfNeeded(0), "Selecting CUDA device",
                 "gpu_error");
-      diffusion_geometry_info_ = require_sdk_ptr(
+      const auto geometry_info = require_sdk_ptr(
           nva2f::ReadDiffusionModelInfo(
               request.audio2face_model_path.c_str()),
           "Reading diffusion model", "model_invalid");
-      const auto& network = diffusion_geometry_info_->GetNetworkInfo();
+      const auto& network = geometry_info->GetNetworkInfo();
       const auto& audio2face_network = network.GetNetworkInfo();
       audio2face_input_window_samples_ = audio2face_network.bufferLength;
       if (audio2face_input_window_samples_ == 0 ||
@@ -312,26 +403,19 @@ class Backend::Impl final {
             {{"identity_index", request.identity_index},
              {"identity_count", network.GetIdentityLength()}});
       }
-      copy_default_emotion(network.GetDefaultEmotion());
-      if (default_emotion_.size() != network.GetEmotionsCount()) {
-        throw WorkerError("model_invalid",
-                          "Model default emotion size is inconsistent",
-                          {{"reported_count", network.GetEmotionsCount()},
-                           {"default_count", default_emotion_.size()}});
-      }
-      for (std::size_t index = 0; index < default_emotion_.size(); ++index) {
-        if (!std::isfinite(default_emotion_[index]) ||
-            default_emotion_[index] < 0.0F ||
-            default_emotion_[index] > 1.0F) {
-          throw WorkerError(
-              "model_invalid",
-              "Audio2Face default emotion is outside [0, 1]",
-              {{"index", index}, {"value", default_emotion_[index]}});
+      json identities = json::array();
+      for (std::size_t index = 0; index < network.GetIdentityLength(); ++index) {
+        const char* name = network.GetIdentityName(index);
+        if (name == nullptr || *name == '\0') {
+          throw WorkerError("model_invalid",
+                            "Audio2Face contains an empty identity name",
+                            {{"index", index}});
         }
+        identities.push_back(name);
       }
-      copy_emotion_names(network);
+      copy_emotion_channels(network, network.GetDefaultEmotion());
 
-      diffusion_blendshape_info_ = require_sdk_ptr(
+      const auto blendshape_info = require_sdk_ptr(
           nva2f::ReadDiffusionBlendshapeSolveModelInfo(
               request.audio2face_model_path.c_str()),
           "Reading diffusion blendshape solver", "model_invalid");
@@ -339,12 +423,13 @@ class Backend::Impl final {
           nva2f::IGeometryExecutor::ExecutionOption::Skin |
           nva2f::IGeometryExecutor::ExecutionOption::Eyes;
       const auto blendshape_parameters =
-          diffusion_blendshape_info_->GetExecutorCreationParameters(
+          blendshape_info->GetExecutorCreationParameters(
               execution_option,
               static_cast<std::size_t>(request.identity_index));
-      const auto skin_names =
-          pose_names(blendshape_parameters.initializationSkinParams, "skin");
-      arkit_indices_ = arkit52_indices(skin_names);
+      output_channels_ =
+          skin_pose_names(blendshape_parameters.initializationSkinParams);
+      validate_arkit52_channels(output_channels_);
+      eye_look_indices_ = resolve_arkit_eye_look_indices(output_channels_);
 
       bundle_ = require_sdk_ptr(
           nva2f::ReadDiffusionBlendshapeSolveExecutorBundle(
@@ -360,21 +445,22 @@ class Backend::Impl final {
                           "Audio2Face did not create a device blendshape solver");
       }
       if (executor.GetNbTracks() != 1 ||
-          executor.GetWeightCount() != kArkit52SdkNames.size()) {
+          executor.GetWeightCount() != output_channels_.size()) {
         throw WorkerError(
             "model_invalid", "SDK blendshape layout does not match model metadata",
             {{"tracks", executor.GetNbTracks()},
              {"reported_weights", executor.GetWeightCount()},
-             {"expected_weights", kArkit52SdkNames.size()}});
+             {"expected_weights", output_channels_.size()}});
       }
-      sdk_check(nva2f::GetExecutorGeometryExecutor(executor, &geometry_view_),
+      nva2f::IGeometryExecutor* geometry = nullptr;
+      sdk_check(nva2f::GetExecutorGeometryExecutor(executor, &geometry),
                 "Retrieving geometry executor");
-      if (geometry_view_ == nullptr) {
+      if (geometry == nullptr) {
         throw WorkerError("sdk_error", "Geometry executor is null");
       }
-      if (geometry_view_->GetEyesRotationSize() != kEyesRotationCount) {
+      if (geometry->GetEyesRotationSize() != kEyesRotationCount) {
         throw WorkerError("model_invalid", "Unsupported SDK eyes rotation size",
-                          {{"reported", geometry_view_->GetEyesRotationSize()},
+                          {{"reported", geometry->GetEyesRotationSize()},
                            {"expected", kEyesRotationCount}});
       }
       sdk_check(nva2f::SetExecutorGeometryResultsCallback(
@@ -401,9 +487,9 @@ class Backend::Impl final {
           nva2e::ReadClassifierModelInfo(
               request.audio2emotion_model_path.c_str()),
           "Reading Audio2Emotion classifier model", "model_invalid");
-      audio2emotion_classifier_count_ =
+      const std::size_t audio2emotion_classifier_count =
           emotion_model_info->GetNetworkInfo().GetEmotionsCount();
-      if (audio2emotion_classifier_count_ == 0) {
+      if (audio2emotion_classifier_count == 0) {
         throw WorkerError("model_invalid",
                           "Audio2Emotion classifier has no output emotions");
       }
@@ -445,14 +531,14 @@ class Backend::Impl final {
       // pair whose positional compatibility must be verified end to end.
       if (emotion_executor_->GetNbTracks() != 1 ||
           emotion_executor_->GetSamplingRate() != sample_rate_ ||
-          emotion_executor_->GetEmotionsSize() != default_emotion_.size()) {
+          emotion_executor_->GetEmotionsSize() != emotion_channels_.size()) {
         throw WorkerError(
             "model_invalid",
             "Audio2Emotion output is incompatible with Audio2Face",
             {{"audio2face_sample_rate", sample_rate_},
              {"audio2emotion_sample_rate",
               emotion_executor_->GetSamplingRate()},
-             {"audio2face_emotion_count", default_emotion_.size()},
+             {"audio2face_emotion_count", emotion_channels_.size()},
              {"audio2emotion_output_count",
               emotion_executor_->GetEmotionsSize()}});
       }
@@ -460,57 +546,29 @@ class Backend::Impl final {
                     &Impl::emotion_callback, this),
                 "Installing Audio2Emotion callback");
 
-      float input_strength = 0.0F;
-      nva2f::AnimatorSkinParams skin{};
-      nva2e::PostProcessParams emotion_defaults{};
-      sdk_check(nva2f::GetExecutorInputStrength(executor, input_strength),
+      ParameterValues parameter_values;
+      sdk_check(nva2f::GetExecutorInputStrength(
+                    executor, parameter_values.input_strength),
                 "Reading model input strength");
-      sdk_check(nva2f::GetExecutorSkinParameters(executor, 0, skin),
+      sdk_check(nva2f::GetExecutorSkinParameters(
+                    executor, 0, parameter_values.skin),
                 "Reading model skin parameter defaults");
       sdk_check(nva2e::GetExecutorPostProcessParameters(
-                    *emotion_executor_, 0, emotion_defaults),
+                    *emotion_executor_, 0, parameter_values.audio2emotion),
                 "Reading Audio2Emotion parameter defaults");
-      const std::size_t default_max_emotions =
-          emotion_defaults.maxEmotions == 0
-              ? audio2emotion_classifier_count_
-              : emotion_defaults.maxEmotions;
-      if (!std::isfinite(emotion_defaults.emotionStrength) ||
-          !std::isfinite(emotion_defaults.emotionContrast) ||
-          !std::isfinite(emotion_defaults.liveBlendCoef) ||
-          !std::isfinite(emotion_defaults.liveTransitionTime) ||
-          emotion_defaults.emotionStrength < 0.0F ||
-          emotion_defaults.emotionStrength > 1.0F ||
-          emotion_defaults.emotionContrast < 0.1F ||
-          emotion_defaults.emotionContrast > 3.0F ||
-          emotion_defaults.liveBlendCoef < 0.0F ||
-          emotion_defaults.liveBlendCoef > 1.0F ||
-          emotion_defaults.liveTransitionTime < 0.1F ||
-          emotion_defaults.liveTransitionTime > 1.0F ||
-          default_max_emotions == 0 ||
-          default_max_emotions > audio2emotion_classifier_count_) {
-        throw WorkerError(
-            "model_invalid",
-            "Audio2Emotion model has invalid post-process defaults");
+
+      json emotion_channels = json::array();
+      for (const EmotionChannel& channel : emotion_channels_) {
+        emotion_channels.push_back(
+            {{"name", channel.name}, {"default", channel.default_value}});
       }
-      json manual_values = json::object();
-      for (std::size_t index = 0; index < emotion_names_.size(); ++index) {
-        manual_values[emotion_names_[index]] = default_emotion_[index];
-      }
-      json automatic_emotion_defaults = {
-          {"strength", emotion_defaults.emotionStrength},
-          {"contrast", emotion_defaults.emotionContrast},
-          {"smoothing", emotion_defaults.liveBlendCoef},
-          {"transition_time", emotion_defaults.liveTransitionTime},
-          {"max_emotions", default_max_emotions}};
-      json parameter_defaults = {
-          {"input_strength", input_strength},
-          {"skin", skin_json(skin)},
-          {"emotion",
-           {{"manual_values", std::move(manual_values)},
-            {"auto", std::move(automatic_emotion_defaults)}}}};
-      return {{"parameter_defaults", std::move(parameter_defaults)},
-              {"emotion_names", emotion_names_},
-              {"sample_rate", sample_rate_}};
+      json model_schema = {
+          {"identities", std::move(identities)},
+          {"channels", output_channels_},
+          {"parameters", parameter_schema(parameter_values)},
+          {"emotion_channels", std::move(emotion_channels)}};
+      return {{"sample_rate", sample_rate_},
+              {"model_schema", std::move(model_schema)}};
     } catch (...) {
       clear_locked();
       throw;
@@ -547,7 +605,7 @@ class Backend::Impl final {
     auto& weight_rows = weights.get_ref<json::array_t&>();
     const auto collect = [&](const StreamFrame& frame) {
       if (weight_rows.size() >=
-          kMaximumResultScalars / kArkit52SdkNames.size()) {
+          kMaximumResultScalars / output_channels_.size()) {
         throw WorkerError("result_too_large",
                           "Animation result exceeds the worker safety limit");
       }
@@ -557,12 +615,12 @@ class Backend::Impl final {
 
     progress(0.05, "generating");
     for (std::size_t offset = 0; offset < audio.size();
-         offset += kAudioChunkSamples) {
+         offset += sample_rate) {
       if (canceled.load(std::memory_order_acquire)) {
         throw WorkerError("canceled", "Generation was canceled");
       }
       const std::size_t count =
-          std::min(kAudioChunkSamples, audio.size() - offset);
+          std::min<std::size_t>(sample_rate, audio.size() - offset);
       accumulate_audio(audio.data() + offset, count);
       drain_ready(canceled, collect);
       progress(0.05 + 0.85 * static_cast<double>(offset + count) /
@@ -578,8 +636,9 @@ class Backend::Impl final {
                          {"received", weight_rows.size()}});
     }
 
-    json document = {{"schema", "a2f-animation/1"},
+    json document = {{"schema", "a2f-animation/2"},
                      {"job_id", request.job_id},
+                     {"channels", output_channels_},
                      {"sample_rate", sample_rate},
                      {"timestamps_samples", std::move(timestamps)},
                      {"weights", std::move(weights)}};
@@ -657,32 +716,22 @@ class Backend::Impl final {
     }
   }
 
-  void cancel() noexcept {
-    // The noninteractive device executor is stopped by returning false from
-    // its result callbacks. The operation's shared atomic flag is checked by
-    // those callbacks and between every Execute call.
-  }
-
  private:
   class OperationReset final {
    public:
-    explicit OperationReset(Impl& owner) noexcept : owner_(&owner) {}
+    explicit OperationReset(Impl& owner) noexcept : owner_(owner) {}
     OperationReset(const OperationReset&) = delete;
     OperationReset& operator=(const OperationReset&) = delete;
-    ~OperationReset() {
-      if (owner_ != nullptr) owner_->finish_operation();
-    }
+    ~OperationReset() { owner_.finish_operation(); }
 
    private:
-    Impl* owner_;
+    Impl& owner_;
   };
 
   struct PendingFrame {
     std::int64_t next_timestamp{0};
     SdkPtr<nva2x::IHostTensorFloat> weights;
     SdkPtr<nva2x::IHostTensorFloat> eyes;
-    bool has_weights{false};
-    bool has_eyes{false};
   };
 
   struct Capture {
@@ -690,8 +739,7 @@ class Backend::Impl final {
     cudaStream_t cuda_stream{nullptr};
     std::size_t weight_count{0};
     std::map<std::int64_t, PendingFrame> frames;
-    bool failed{false};
-    const char* failure{"SDK result callback failed"};
+    const char* failure{nullptr};
   };
 
   struct EmotionCapture {
@@ -704,7 +752,6 @@ class Backend::Impl final {
   };
 
   static void fail_capture(Capture& capture, const char* message) noexcept {
-    capture.failed = true;
     capture.failure = message;
   }
 
@@ -744,8 +791,8 @@ class Backend::Impl final {
         return false;
       }
       auto& frame = capture.frames[results.timeStampCurrentFrame];
-      if (frame.has_eyes ||
-          (frame.has_weights &&
+      if (frame.eyes ||
+          (frame.weights &&
            frame.next_timestamp != results.timeStampNextFrame)) {
         fail_capture(capture,
                      "Geometry callback returned a duplicate or inconsistent frame");
@@ -762,12 +809,7 @@ class Backend::Impl final {
         fail_capture(capture, "Copying eye rotations failed");
         return false;
       }
-      frame.has_eyes = true;
       return true;
-    } catch (const std::exception& error) {
-      (void)error;
-      fail_capture(capture, "Geometry callback failed");
-      return false;
     } catch (...) {
       fail_capture(capture, "Geometry callback failed");
       return false;
@@ -790,8 +832,8 @@ class Backend::Impl final {
         return false;
       }
       auto& frame = capture.frames[results.timeStampCurrentFrame];
-      if (frame.has_weights ||
-          (frame.has_eyes && frame.next_timestamp != results.timeStampNextFrame)) {
+      if (frame.weights ||
+          (frame.eyes && frame.next_timestamp != results.timeStampNextFrame)) {
         fail_capture(
             capture,
             "Blendshape callback returned a duplicate or inconsistent frame");
@@ -808,12 +850,7 @@ class Backend::Impl final {
         fail_capture(capture, "Copying blendshape weights failed");
         return false;
       }
-      frame.has_weights = true;
       return true;
-    } catch (const std::exception& error) {
-      (void)error;
-      fail_capture(capture, "Blendshape callback failed");
-      return false;
     } catch (...) {
       fail_capture(capture, "Blendshape callback failed");
       return false;
@@ -940,7 +977,7 @@ class Backend::Impl final {
     capture.canceled = &canceled;
     capture.cuda_stream = bundle_->GetCudaStream().Data();
     capture.accumulator = &bundle_->GetEmotionAccumulator(0);
-    capture.emotion_count = default_emotion_.size();
+    capture.emotion_count = emotion_channels_.size();
     active_emotion_capture_ = &capture;
     std::error_code execute_error;
     try {
@@ -988,13 +1025,13 @@ class Backend::Impl final {
     if (canceled.load(std::memory_order_acquire)) {
       throw WorkerError("canceled", "Operation was stopped");
     }
-    if (capture.failed) {
+    if (capture.failure != nullptr) {
       throw WorkerError("generation_failed", capture.failure);
     }
     sdk_check(execute_error, "Executing Audio2Face", "generation_failed");
 
     for (const auto& [timestamp, pending] : capture.frames) {
-      if (!pending.has_weights || !pending.has_eyes) {
+      if (!pending.weights || !pending.eyes) {
         throw WorkerError("generation_failed",
                           "SDK callbacks returned an incomplete frame",
                           {{"timestamp", timestamp}});
@@ -1007,10 +1044,9 @@ class Backend::Impl final {
                            {"previous", *previous_timestamp_}});
       }
       std::vector<float> arkit;
-      arkit.reserve(arkit_indices_.size());
-      for (std::size_t channel = 0; channel < arkit_indices_.size(); ++channel) {
-        const std::size_t sdk_channel = arkit_indices_[channel];
-        const float value = pending.weights->Data()[sdk_channel];
+      arkit.reserve(pending.weights->Size());
+      for (std::size_t channel = 0; channel < pending.weights->Size(); ++channel) {
+        const float value = pending.weights->Data()[channel];
         if (!std::isfinite(value)) {
           throw WorkerError(
               "generation_failed",
@@ -1026,7 +1062,7 @@ class Backend::Impl final {
                             {{"timestamp", timestamp}, {"component", index}});
         }
       }
-      resolve_arkit_eye_look(arkit, pending.eyes->Data());
+      resolve_arkit_eye_look(arkit, pending.eyes->Data(), eye_look_indices_);
       for (float& value : arkit) {
         if (!std::isfinite(value)) {
           throw WorkerError("generation_failed",
@@ -1069,146 +1105,104 @@ class Backend::Impl final {
     if (!settings.is_object()) {
       throw WorkerError("invalid_params", "settings must be an object");
     }
-    require_exact_keys(settings, {"input_strength", "skin", "emotion"},
-                       "settings");
-    const auto skin_value = settings.find("skin");
-    if (!skin_value->is_object()) {
-      throw WorkerError("invalid_params", "settings.skin must be an object");
-    }
     require_exact_keys(
-        *skin_value,
-        {"lower_face_smoothing", "upper_face_smoothing",
-         "lower_face_strength", "upper_face_strength", "face_mask_level",
-         "face_mask_softness", "skin_strength", "blink_strength",
-         "eyelid_open_offset", "lip_open_offset", "blink_offset"},
-        "settings.skin");
-    nva2f::AnimatorSkinParams skin{};
-    skin.lowerFaceSmoothing = required_float(
-        *skin_value, "lower_face_smoothing", "settings.skin.");
-    skin.upperFaceSmoothing = required_float(
-        *skin_value, "upper_face_smoothing", "settings.skin.");
-    skin.lowerFaceStrength = required_float(
-        *skin_value, "lower_face_strength", "settings.skin.");
-    skin.upperFaceStrength = required_float(
-        *skin_value, "upper_face_strength", "settings.skin.");
-    skin.faceMaskLevel =
-        required_float(*skin_value, "face_mask_level", "settings.skin.");
-    skin.faceMaskSoftness = required_float(
-        *skin_value, "face_mask_softness", "settings.skin.");
-    skin.skinStrength =
-        required_float(*skin_value, "skin_strength", "settings.skin.");
-    skin.blinkStrength =
-        required_float(*skin_value, "blink_strength", "settings.skin.");
-    skin.eyelidOpenOffset = required_float(
-        *skin_value, "eyelid_open_offset", "settings.skin.");
-    skin.lipOpenOffset =
-        required_float(*skin_value, "lip_open_offset", "settings.skin.");
-    skin.blinkOffset =
-        required_float(*skin_value, "blink_offset", "settings.skin.");
-
-    const auto emotion_value = settings.find("emotion");
-    if (!emotion_value->is_object()) {
-      throw WorkerError("invalid_params", "settings.emotion must be an object");
-    }
-    require_exact_keys(*emotion_value,
-                       {"auto_audio2emotion", "manual_values", "auto"},
-                       "settings.emotion");
+        settings, {"auto_audio2emotion", "manual_emotions", "parameters"},
+        "settings");
     const bool auto_audio2emotion = required_bool(
-        *emotion_value, "auto_audio2emotion", "settings.emotion.");
-    const auto manual_value = emotion_value->find("manual_values");
+        settings, "auto_audio2emotion", "settings.");
+    const auto manual_value = settings.find("manual_emotions");
     if (!manual_value->is_object() ||
-        manual_value->size() != emotion_names_.size()) {
+        manual_value->size() != emotion_channels_.size()) {
       throw WorkerError(
           "invalid_params",
-          "settings.emotion.manual_values must contain every model emotion");
+          "settings.manual_emotions must contain every model emotion channel");
     }
     std::vector<float> manual_emotion;
-    manual_emotion.reserve(emotion_names_.size());
-    for (const std::string& name : emotion_names_) {
+    manual_emotion.reserve(emotion_channels_.size());
+    for (const EmotionChannel& channel : emotion_channels_) {
+      const std::string& name = channel.name;
       if (!manual_value->contains(name)) {
         throw WorkerError(
             "invalid_params",
-            "settings.emotion.manual_values is missing a model emotion",
+            "settings.manual_emotions is missing a model emotion channel",
             {{"emotion", name}});
       }
-      manual_emotion.push_back(required_float_range(
-          *manual_value, name.c_str(), "settings.emotion.manual_values.",
-          0.0F, 1.0F));
+      const float value = required_float_value(
+          manual_value->at(name),
+          "settings.manual_emotions[" + json(name).dump() + "]");
+      if (value < 0.0F || value > 1.0F) {
+        throw WorkerError(
+            "invalid_params",
+            "settings.manual_emotions values must be between 0 and 1",
+            {{"emotion", name}, {"received", value}});
+      }
+      manual_emotion.push_back(value);
     }
 
-    const auto auto_value = emotion_value->find("auto");
-    if (!auto_value->is_object()) {
-      throw WorkerError("invalid_params",
-                        "settings.emotion.auto must be an object");
+    const auto parameter_value = settings.find("parameters");
+    require_parameter_keys(*parameter_value);
+    ParameterValues parameter_values;
+    sdk_check(nva2f::GetExecutorInputStrength(
+                  executor(), parameter_values.input_strength),
+              "Reading input strength before applying settings");
+    sdk_check(nva2f::GetExecutorSkinParameters(
+                  executor(), 0, parameter_values.skin),
+              "Reading skin parameters before applying settings");
+    sdk_check(nva2e::GetExecutorPostProcessParameters(
+                  *emotion_executor_, 0, parameter_values.audio2emotion),
+              "Reading Audio2Emotion parameters before applying settings");
+    for (const ParameterBinding& binding : kParameterBindings) {
+      assign_parameter(binding, parameter_value->at(binding.path),
+                       parameter_values);
     }
-    require_exact_keys(*auto_value,
-                       {"strength", "contrast", "smoothing",
-                        "transition_time", "max_emotions"},
-                       "settings.emotion.auto");
-    const float emotion_strength = required_float_range(
-        *auto_value, "strength", "settings.emotion.auto.", 0.0F, 1.0F);
-    const float emotion_contrast = required_float_range(
-        *auto_value, "contrast", "settings.emotion.auto.", 0.1F, 3.0F);
-    const float emotion_smoothing = required_float_range(
-        *auto_value, "smoothing", "settings.emotion.auto.", 0.0F, 1.0F);
-    const float emotion_transition_time = required_float_range(
-        *auto_value, "transition_time", "settings.emotion.auto.", 0.1F,
-        1.0F);
-    const std::size_t max_emotions = required_size_range(
-        *auto_value, "max_emotions", "settings.emotion.auto.", 1,
-        audio2emotion_classifier_count_);
 
     sdk_check(nva2f::SetExecutorInputStrength(
-                  executor(),
-                  required_float(settings, "input_strength", "settings.")),
+                  executor(), parameter_values.input_strength),
               "Applying input strength");
-    sdk_check(nva2f::SetExecutorSkinParameters(executor(), 0, skin),
+    sdk_check(nva2f::SetExecutorSkinParameters(
+                  executor(), 0, parameter_values.skin),
               "Applying skin parameters");
-    nva2e::PostProcessParams emotion_parameters{};
-    sdk_check(nva2e::GetExecutorPostProcessParameters(
-                  *emotion_executor_, 0, emotion_parameters),
-              "Reading Audio2Emotion parameters");
-    emotion_parameters.emotionStrength = emotion_strength;
-    emotion_parameters.emotionContrast = emotion_contrast;
-    emotion_parameters.liveBlendCoef = emotion_smoothing;
-    emotion_parameters.liveTransitionTime = emotion_transition_time;
-    emotion_parameters.maxEmotions = max_emotions;
-    emotion_parameters.enablePreferredEmotion = false;
+    // Auto mode fully replaces the manual vector; it never mixes in the SDK's
+    // separate preferred-emotion facility.
+    parameter_values.audio2emotion.enablePreferredEmotion = false;
     sdk_check(nva2e::SetExecutorPostProcessParameters(
-                  *emotion_executor_, 0, emotion_parameters),
+                  *emotion_executor_, 0, parameter_values.audio2emotion),
               "Applying Audio2Emotion parameters");
     auto_audio2emotion_active_ = auto_audio2emotion;
     manual_emotion_ = std::move(manual_emotion);
   }
 
-  void copy_default_emotion(nva2x::HostTensorFloatConstView emotion) {
-    default_emotion_.clear();
-    if (emotion.Size() != 0) {
-      if (emotion.Data() == nullptr) {
-        throw WorkerError("model_invalid", "Model default emotion view is null");
-      }
-      default_emotion_.assign(emotion.Data(), emotion.Data() + emotion.Size());
+  void copy_emotion_channels(const nva2f::IDiffusionModel::INetworkInfo& network,
+                             nva2x::HostTensorFloatConstView defaults) {
+    const std::size_t count = network.GetEmotionsCount();
+    if (defaults.Size() != count || (count != 0 && defaults.Data() == nullptr)) {
+      throw WorkerError(
+          "model_invalid", "Audio2Face default emotion vector is invalid",
+          {{"emotion_count", count}, {"default_count", defaults.Size()}});
     }
-  }
-
-  template <class NetworkInfo>
-  void copy_emotion_names(const NetworkInfo& network) {
-    emotion_names_.clear();
-    emotion_names_.reserve(network.GetEmotionsCount());
-    for (std::size_t index = 0; index < network.GetEmotionsCount(); ++index) {
+    emotion_channels_.clear();
+    emotion_channels_.reserve(count);
+    for (std::size_t index = 0; index < count; ++index) {
       const char* name = network.GetEmotionName(index);
       if (name == nullptr || *name == '\0') {
         throw WorkerError("model_invalid",
                           "Audio2Face contains an empty emotion name",
                           {{"index", index}});
       }
-      if (std::find(emotion_names_.begin(), emotion_names_.end(), name) !=
-          emotion_names_.end()) {
+      if (std::any_of(
+              emotion_channels_.begin(), emotion_channels_.end(),
+              [&](const EmotionChannel& channel) { return channel.name == name; })) {
         throw WorkerError("model_invalid",
                           "Audio2Face contains duplicate emotion names",
                           {{"emotion", name}});
       }
-      emotion_names_.emplace_back(name);
+      const float value = defaults.Data()[index];
+      if (!std::isfinite(value) || value < 0.0F || value > 1.0F) {
+        throw WorkerError(
+            "model_invalid", "Audio2Face default emotion is outside [0, 1]",
+            {{"index", index}, {"value", value}});
+      }
+      emotion_channels_.push_back({name, value});
     }
   }
 
@@ -1217,21 +1211,17 @@ class Backend::Impl final {
       (void)bundle_->GetExecutor().Wait(0);
       (void)bundle_->GetCudaStream().Synchronize();
     }
-    geometry_view_ = nullptr;
     active_capture_ = nullptr;
     active_emotion_capture_ = nullptr;
     emotion_executor_.reset();
     bundle_.reset();
-    diffusion_blendshape_info_.reset();
-    diffusion_geometry_info_.reset();
-    arkit_indices_.clear();
-    emotion_names_.clear();
-    default_emotion_.clear();
+    output_channels_.clear();
+    eye_look_indices_ = {};
+    emotion_channels_.clear();
     manual_emotion_.clear();
     active_stream_id_.clear();
     previous_timestamp_.reset();
     sample_rate_ = 0;
-    audio2emotion_classifier_count_ = 0;
     audio2face_input_window_samples_ = 0;
     audio2emotion_input_window_samples_ = 0;
     auto_audio2emotion_active_ = false;
@@ -1240,23 +1230,17 @@ class Backend::Impl final {
 
   std::mutex resource_mutex_;
   std::atomic_bool operation_active_{false};
-  SdkPtr<nva2f::IDiffusionModel::IGeometryModelInfo>
-      diffusion_geometry_info_;
-  SdkPtr<nva2f::IDiffusionModel::IBlendshapeSolveModelInfo>
-      diffusion_blendshape_info_;
   SdkPtr<nva2f::IBlendshapeExecutorBundle> bundle_;
   SdkPtr<nva2e::IEmotionExecutor> emotion_executor_;
-  nva2f::IGeometryExecutor* geometry_view_{nullptr};
   Capture* active_capture_{nullptr};
   EmotionCapture* active_emotion_capture_{nullptr};
-  std::vector<std::size_t> arkit_indices_;
-  std::vector<std::string> emotion_names_;
-  std::vector<float> default_emotion_;
+  std::vector<std::string> output_channels_;
+  ArkitEyeLookIndices eye_look_indices_{};
+  std::vector<EmotionChannel> emotion_channels_;
   std::vector<float> manual_emotion_;
   std::string active_stream_id_;
   std::optional<std::int64_t> previous_timestamp_;
   std::uint32_t sample_rate_{0};
-  std::size_t audio2emotion_classifier_count_{0};
   std::size_t audio2face_input_window_samples_{0};
   std::size_t audio2emotion_input_window_samples_{0};
   bool auto_audio2emotion_active_{false};
@@ -1296,7 +1280,5 @@ void Backend::stream_end(const std::string& stream_id,
 void Backend::stream_abort(const std::string& stream_id) noexcept {
   impl_->stream_abort(stream_id);
 }
-
-void Backend::cancel() noexcept { impl_->cancel(); }
 
 }  // namespace a2f_worker

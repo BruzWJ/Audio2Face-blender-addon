@@ -77,8 +77,6 @@ class Backend final {
                   std::atomic_bool& canceled,
                   const StreamFrameCallback& frame);
   void stream_abort(const std::string& stream_id) noexcept;
-  // Called from the JSONL control thread while inference runs elsewhere.
-  void cancel() noexcept;
 
  private:
   class Impl;

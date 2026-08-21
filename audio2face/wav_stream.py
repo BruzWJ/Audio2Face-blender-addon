@@ -56,7 +56,6 @@ class WavStreamMetadata:
 class _ParsedWav:
     metadata: WavStreamMetadata
     data_offset: int
-    data_size: int
     block_align: int
     is_float: bool
 
@@ -231,7 +230,6 @@ def _parse_wav(
             duration_seconds=input_frames / source_sample_rate,
         ),
         data_offset=data_offset,
-        data_size=data_size,
         block_align=block_align,
         is_float=is_float,
     )
@@ -373,7 +371,6 @@ class WavStreamSource:
 
         self.metadata = parsed.metadata
         self._data_offset = parsed.data_offset
-        self._data_size = parsed.data_size
         self._block_align = parsed.block_align
         self._is_float = parsed.is_float
 
@@ -394,7 +391,7 @@ class WavStreamSource:
             raise WavStreamError("WAV source is closed")
         return self
 
-    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+    def __exit__(self, _exc_type: object, _exc: object, _traceback: object) -> None:
         self.close()
 
     def _mono_frames(self) -> Iterator[float]:
@@ -480,18 +477,3 @@ class WavStreamSource:
                 self.close()
 
         return chunks()
-
-
-__all__ = [
-    "DEFAULT_CHUNK_FRAMES",
-    "DEFAULT_OUTPUT_SAMPLE_RATE",
-    "MAX_CHANNELS",
-    "MAX_CHUNK_FRAMES",
-    "MAX_DURATION_SECONDS",
-    "MAX_SAMPLE_RATE",
-    "MAX_WAV_FILE_BYTES",
-    "MIN_SAMPLE_RATE",
-    "WavStreamError",
-    "WavStreamMetadata",
-    "WavStreamSource",
-]

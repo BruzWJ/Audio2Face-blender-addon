@@ -8,7 +8,7 @@ import uuid
 from typing import Any
 
 
-PROTOCOL_VERSION = "audio2face/2"
+PROTOCOL_VERSION = "audio2face/3"
 MAX_CONTROL_LINE_BYTES = 1_048_576
 _CONTROL_TYPES = frozenset({"request", "response", "error", "event"})
 _REQUEST_METHODS = frozenset(
@@ -209,13 +209,3 @@ def decode_message(line: str | bytes) -> dict[str, Any]:
     except json.JSONDecodeError as exc:
         raise ProtocolError(f"invalid JSON at column {exc.colno}: {exc.msg}") from exc
     return _validate_message(_require_object(value, "message"))
-
-
-__all__ = [
-    "MAX_CONTROL_LINE_BYTES",
-    "PROTOCOL_VERSION",
-    "ProtocolError",
-    "decode_message",
-    "encode_message",
-    "make_request",
-]

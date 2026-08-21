@@ -719,11 +719,12 @@ def install_managed_runtime(
                 canceled=canceled,
             )
             try:
-                resolve_runtime_bundle(
+                staged_spec = resolve_runtime_bundle(
                     extracted,
                     platform=artifact.platform,
                     require_engine=True,
                 )
+                validate_install_receipt(staged_spec, artifact)
             except BundleError as exc:
                 raise RuntimeInstallError(f"optimized runtime bundle is invalid: {exc}") from exc
 
@@ -735,16 +736,19 @@ def install_managed_runtime(
                 _check_cancelled(canceled)
                 backup = _atomic_activate(activation)
 
-            # The new runtime is active.  Backup deletion is intentionally
-            # outside the cancellation gate and can never fail the install.
+            # The staged runtime was fully validated before the atomic rename.
             _cleanup_activation_backup(backup)
             result = resolve_runtime_bundle(
                 root,
                 platform=artifact.platform,
                 require_engine=True,
             )
-            validate_install_receipt(result, artifact)
-            _emit(progress, "complete", 1.0, "Managed Audio2Face runtime is ready")
+            _emit(
+                progress,
+                "complete",
+                1.0,
+                "Managed runtime and both NVIDIA models are ready",
+            )
             return result
     except RuntimeInstallError:
         raise
@@ -753,15 +757,3 @@ def install_managed_runtime(
     finally:
         if temporary is not None:
             shutil.rmtree(temporary, ignore_errors=True)
-
-
-__all__ = [
-    "InstallProgress",
-    "RuntimeInstallCancelled",
-    "RuntimeInstallError",
-    "INSTALL_LOCK_FILENAME",
-    "INSTALL_LOCK_TIMEOUT_SECONDS",
-    "RUNTIME_RECEIPT_FILENAME",
-    "install_managed_runtime",
-    "validate_install_receipt",
-]

@@ -1,4 +1,4 @@
-"""Main-thread playback and Shape Key delivery for incremental ARKit frames."""
+"""Main-thread playback and Shape Key delivery for model-described frames."""
 
 from __future__ import annotations
 
@@ -10,21 +10,19 @@ from typing import Any
 
 import bpy
 
-from .arkit import ARKIT_52_CHANNELS
 from .frame_stream import sample_linear
 from .preview import (
-    PreviewError,
-    TargetSubscription,
-    apply_arkit_frame,
+    apply_shape_key_frame,
     build_subscriptions,
 )
+from .result_io import ResultValidationError, validate_output_channels
 
 
 MAX_BUFFER_SECONDS = 4.0
 
 
 class LiveStreamError(RuntimeError):
-    """Raised when a live ARKit stream cannot be delivered safely."""
+    """Raised when a live output stream cannot be delivered safely."""
 
 
 class LiveStreamController:
@@ -34,9 +32,10 @@ class LiveStreamController:
         self._scene_name: str | None = None
         self._stream_id: str | None = None
         self._sample_rate = 0
+        self._channels: tuple[str, ...] = ()
         self._timestamps: list[int] = []
         self._weights: list[list[float]] = []
-        self._subscriptions: tuple[TargetSubscription, ...] = ()
+        self._subscriptions: tuple[bpy.types.Object, ...] = ()
         self._audio_path: Path | None = None
         self._device: Any = None
         self._sound: Any = None
@@ -67,6 +66,7 @@ class LiveStreamController:
         scene: bpy.types.Scene,
         stream_id: str,
         sample_rate: int,
+        channels: Sequence[str],
         *,
         audio_path: str | Path | None = None,
         playback_started: Callable[[], None] | None = None,
@@ -77,11 +77,13 @@ class LiveStreamController:
         self.stop(reset=True)
         if isinstance(sample_rate, bool) or not isinstance(sample_rate, int) or sample_rate <= 0:
             raise LiveStreamError("stream sample rate must be a positive integer")
+        try:
+            validated_channels = validate_output_channels(channels)
+        except ResultValidationError as exc:
+            raise LiveStreamError(f"invalid stream output contract: {exc}") from exc
         subscriptions = build_subscriptions(scene.audio2face)
         if not subscriptions:
-            raise LiveStreamError(
-                "no enabled target mesh has an exact-name ARKit-52 shape key"
-            )
+            raise LiveStreamError("no enabled target mesh is selected")
         resolved_audio: Path | None = None
         if audio_path is not None:
             resolved_audio = Path(audio_path).expanduser().resolve(strict=False)
@@ -91,6 +93,7 @@ class LiveStreamController:
         self._scene_name = scene.name
         self._stream_id = stream_id
         self._sample_rate = sample_rate
+        self._channels = validated_channels
         self._subscriptions = subscriptions
         self._audio_path = resolved_audio
         self._playback_started = playback_started
@@ -125,22 +128,21 @@ class LiveStreamController:
             self._playback_started = None
             callback()
 
-    @staticmethod
-    def _validated_weights(weights: Sequence[float]) -> list[float]:
-        if len(weights) != len(ARKIT_52_CHANNELS):
+    def _validated_weights(self, weights: Sequence[float]) -> list[float]:
+        if len(weights) != len(self._channels):
             raise LiveStreamError(
-                f"ARKit frame has {len(weights)} values; expected {len(ARKIT_52_CHANNELS)}"
+                f"stream frame has {len(weights)} values; expected {len(self._channels)}"
             )
         validated: list[float] = []
         for index, weight in enumerate(weights):
             if isinstance(weight, bool) or not isinstance(weight, (int, float)):
                 raise LiveStreamError(
-                    f"ARKit channel {ARKIT_52_CHANNELS[index]} is not numeric"
+                    f"output channel {self._channels[index]} is not numeric"
                 )
             value = float(weight)
             if not math.isfinite(value) or not 0.0 <= value <= 1.0:
                 raise LiveStreamError(
-                    f"ARKit channel {ARKIT_52_CHANNELS[index]} must be in [0, 1]"
+                    f"output channel {self._channels[index]} must be in [0, 1]"
                 )
             validated.append(value)
         return validated
@@ -232,11 +234,12 @@ class LiveStreamController:
                 return False
             sample_position = self._stream_sample_position()
             try:
-                apply_arkit_frame(
+                apply_shape_key_frame(
                     self._subscriptions,
+                    self._channels,
                     sample_linear(self._timestamps, self._weights, sample_position),
                 )
-            except (PreviewError, RuntimeError, ValueError) as exc:
+            except (RuntimeError, ValueError) as exc:
                 self.stop(reset=False)
                 scene.audio2face.status = "ERROR"
                 scene.audio2face.status_message = str(exc)
@@ -263,14 +266,15 @@ class LiveStreamController:
             position = max(0.0, float(self._handle.position))
             sample_position = position * self._sample_rate
             if self._timestamps:
-                apply_arkit_frame(
+                apply_shape_key_frame(
                     self._subscriptions,
+                    self._channels,
                     sample_linear(self._timestamps, self._weights, sample_position),
                 )
             settings.stream_time = position
             self._drop_old_frames(sample_position)
             return True
-        except (LiveStreamError, PreviewError, OSError, RuntimeError, ValueError) as exc:
+        except (OSError, RuntimeError, ValueError) as exc:
             self.stop(reset=False)
             settings.status = "ERROR"
             settings.status_message = str(exc)
@@ -290,7 +294,11 @@ class LiveStreamController:
             except Exception:
                 pass
         if should_reset and self._subscriptions:
-            apply_arkit_frame(self._subscriptions, [0.0] * len(ARKIT_52_CHANNELS))
+            apply_shape_key_frame(
+                self._subscriptions,
+                self._channels,
+                [0.0] * len(self._channels),
+            )
         if settings is not None:
             settings.stream_time = 0.0
 
@@ -299,6 +307,7 @@ class LiveStreamController:
         self._scene_name = None
         self._stream_id = None
         self._sample_rate = 0
+        self._channels = ()
         self._timestamps.clear()
         self._weights.clear()
         self._subscriptions = ()
@@ -315,10 +324,6 @@ class LiveStreamController:
         if stopped_callback is not None:
             stopped_callback()
 
-    def close(self) -> None:
-        self.stop(reset=True)
-
-
 _LIVE_STREAM_CONTROLLER: LiveStreamController | None = None
 
 
@@ -332,13 +337,5 @@ def get_live_stream_controller() -> LiveStreamController:
 def unregister_live_stream() -> None:
     global _LIVE_STREAM_CONTROLLER
     if _LIVE_STREAM_CONTROLLER is not None:
-        _LIVE_STREAM_CONTROLLER.close()
+        _LIVE_STREAM_CONTROLLER.stop(reset=True)
         _LIVE_STREAM_CONTROLLER = None
-
-
-__all__ = [
-    "LiveStreamController",
-    "LiveStreamError",
-    "get_live_stream_controller",
-    "unregister_live_stream",
-]

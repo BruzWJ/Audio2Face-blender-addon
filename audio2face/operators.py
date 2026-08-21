@@ -7,7 +7,7 @@ from typing import Callable
 import bpy
 
 from .live_stream import get_live_stream_controller
-from .preview import PreviewError, build_target_bindings, get_preview_controller
+from .preview import PreviewError, get_preview_controller
 from .properties import A2FSceneSettings
 from .result_io import AnimationResult, ResultValidationError, load_animation_result
 from .runtime import RuntimeController, get_controller
@@ -16,19 +16,11 @@ from .sidecar import SidecarError
 
 def _run_runtime(
     operator: bpy.types.Operator,
-    context: bpy.types.Context,
-    operation: Callable[[RuntimeController, bpy.types.Scene], None],
+    operation: Callable[[RuntimeController], None],
 ) -> set[str]:
-    if not context.scene.is_editable:
-        message = "Audio2Face requires an editable local or library-override scene"
-        operator.report({"ERROR"}, message)
-        return {"CANCELLED"}
     try:
-        operation(get_controller(), context.scene)
+        operation(get_controller())
     except (OSError, SidecarError, ValueError) as exc:
-        settings = context.scene.audio2face
-        settings.status = "ERROR"
-        settings.status_message = str(exc)
         operator.report({"ERROR"}, str(exc))
         return {"CANCELLED"}
     return {"FINISHED"}
@@ -58,7 +50,7 @@ class A2F_OT_start_worker(bpy.types.Operator):
     bl_description = "Start the add-on-managed local Audio2Face GPU worker"
 
     def execute(self, context: bpy.types.Context) -> set[str]:
-        return _run_runtime(self, context, lambda controller, scene: controller.start(scene))
+        return _run_runtime(self, lambda controller: controller.start(context.scene))
 
 
 class A2F_OT_install_runtime(bpy.types.Operator):
@@ -70,14 +62,13 @@ class A2F_OT_install_runtime(bpy.types.Operator):
 
     @classmethod
     def poll(cls, _context: bpy.types.Context) -> bool:
-        return not get_controller().install_in_progress
+        can_install, reason = get_controller().install_eligibility()
+        if not can_install:
+            cls.poll_message_set(reason)
+        return can_install
 
-    def execute(self, context: bpy.types.Context) -> set[str]:
-        return _run_runtime(
-            self,
-            context,
-            lambda controller, scene: controller.install_runtime(scene),
-        )
+    def execute(self, _context: bpy.types.Context) -> set[str]:
+        return _run_runtime(self, lambda controller: controller.install_runtime())
 
 
 class A2F_OT_cancel_runtime_install(bpy.types.Operator):
@@ -87,14 +78,13 @@ class A2F_OT_cancel_runtime_install(bpy.types.Operator):
 
     @classmethod
     def poll(cls, _context: bpy.types.Context) -> bool:
-        return get_controller().install_in_progress
+        in_progress = get_controller().install_in_progress
+        if not in_progress:
+            cls.poll_message_set("managed-runtime installation is not running")
+        return in_progress
 
-    def execute(self, context: bpy.types.Context) -> set[str]:
-        return _run_runtime(
-            self,
-            context,
-            lambda controller, scene: controller.cancel_runtime_install(scene),
-        )
+    def execute(self, _context: bpy.types.Context) -> set[str]:
+        return _run_runtime(self, lambda controller: controller.cancel_runtime_install())
 
 
 class A2F_OT_stop_worker(bpy.types.Operator):
@@ -103,7 +93,7 @@ class A2F_OT_stop_worker(bpy.types.Operator):
     bl_description = "Request graceful worker shutdown without blocking Blender"
 
     def execute(self, context: bpy.types.Context) -> set[str]:
-        return _run_runtime(self, context, lambda controller, scene: controller.stop(scene))
+        return _run_runtime(self, lambda controller: controller.stop(context.scene))
 
 
 class A2F_OT_generate(bpy.types.Operator):
@@ -112,7 +102,7 @@ class A2F_OT_generate(bpy.types.Operator):
     bl_description = "Generate a timestamped ARKit-52 value stream through the GPU worker"
 
     def execute(self, context: bpy.types.Context) -> set[str]:
-        return _run_runtime(self, context, lambda controller, scene: controller.generate(scene))
+        return _run_runtime(self, lambda controller: controller.generate(context.scene))
 
 
 class A2F_OT_cancel(bpy.types.Operator):
@@ -125,7 +115,7 @@ class A2F_OT_cancel(bpy.types.Operator):
         return context.scene.audio2face.status in {"GENERATING", "CANCELLING"}
 
     def execute(self, context: bpy.types.Context) -> set[str]:
-        return _run_runtime(self, context, lambda controller, scene: controller.cancel(scene))
+        return _run_runtime(self, lambda controller: controller.cancel(context.scene))
 
 
 class A2F_OT_stream_wav(bpy.types.Operator):
@@ -137,9 +127,7 @@ class A2F_OT_stream_wav(bpy.types.Operator):
 
     def execute(self, context: bpy.types.Context) -> set[str]:
         return _run_runtime(
-            self,
-            context,
-            lambda controller, scene: controller.start_wav_stream(scene),
+            self, lambda controller: controller.start_wav_stream(context.scene)
         )
 
 
@@ -153,31 +141,20 @@ class A2F_OT_stop_stream(bpy.types.Operator):
         return bool(context.scene.audio2face.stream_id)
 
     def execute(self, context: bpy.types.Context) -> set[str]:
-        return _run_runtime(
-            self,
-            context,
-            lambda controller, scene: controller.stop_stream(scene),
-        )
+        return _run_runtime(self, lambda controller: controller.stop_stream(context.scene))
 
 
 class A2F_OT_add_selected_targets(bpy.types.Operator):
     bl_idname = "a2f.add_selected_targets"
     bl_label = "Add Selected Meshes"
-    bl_description = "Subscribe selected meshes that have exact-name ARKit-52 shape keys"
+    bl_description = "Add selected mesh objects as model-channel targets"
     bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context: bpy.types.Context) -> set[str]:
         settings = context.scene.audio2face
-        selected = [
-            obj
-            for obj in context.selected_objects
-            if obj.type == "MESH" and build_target_bindings(obj)
-        ]
+        selected = [obj for obj in context.selected_objects if obj.type == "MESH"]
         if not selected:
-            self.report(
-                {"ERROR"},
-                "select at least one mesh with an exact-name ARKit-52 shape key",
-            )
+            self.report({"ERROR"}, "select at least one mesh object")
             return {"CANCELLED"}
 
         added = 0
@@ -195,14 +172,14 @@ class A2F_OT_add_selected_targets(bpy.types.Operator):
             existing.add(target.as_pointer())
             added += 1
         settings.target_mesh_index = max(0, len(settings.target_meshes) - 1)
-        self.report({"INFO"}, f"Added {added} ARKit mesh target(s)")
+        self.report({"INFO"}, f"Added {added} mesh target(s)")
         return {"FINISHED"}
 
 
 class A2F_OT_remove_target(bpy.types.Operator):
     bl_idname = "a2f.remove_target"
     bl_label = "Remove Target"
-    bl_description = "Remove the active ARKit mesh target"
+    bl_description = "Remove the active mesh target"
     bl_options = {"REGISTER", "UNDO"}
 
     @classmethod
@@ -219,8 +196,8 @@ class A2F_OT_remove_target(bpy.types.Operator):
 
 class A2F_OT_preview_play(bpy.types.Operator):
     bl_idname = "a2f.preview_play"
-    bl_label = "Play ARKit Preview"
-    bl_description = "Play selected audio and drive all subscribed mesh shape-key values"
+    bl_label = "Play Audio and Animation"
+    bl_description = "Play generated audio and deliver model channels to target Shape Keys in sync"
 
     @classmethod
     def poll(cls, context: bpy.types.Context) -> bool:
@@ -257,8 +234,8 @@ class A2F_OT_preview_play(bpy.types.Operator):
 
 class A2F_OT_preview_pause(bpy.types.Operator):
     bl_idname = "a2f.preview_pause"
-    bl_label = "Pause ARKit Preview"
-    bl_description = "Pause selected audio and hold current shape-key values"
+    bl_label = "Pause Audio and Animation"
+    bl_description = "Pause generated audio and hold the current Shape Key values"
 
     @classmethod
     def poll(cls, context: bpy.types.Context) -> bool:
@@ -275,8 +252,8 @@ class A2F_OT_preview_pause(bpy.types.Operator):
 
 class A2F_OT_preview_stop(bpy.types.Operator):
     bl_idname = "a2f.preview_stop"
-    bl_label = "Stop ARKit Preview"
-    bl_description = "Stop audio playback and the ARKit shape-key stream"
+    bl_label = "Stop Audio and Animation"
+    bl_description = "Stop audio playback and synchronized Shape Key updates"
 
     @classmethod
     def poll(cls, context: bpy.types.Context) -> bool:
@@ -303,6 +280,3 @@ CLASSES = (
     A2F_OT_preview_pause,
     A2F_OT_preview_stop,
 )
-
-
-__all__ = ["CLASSES"]

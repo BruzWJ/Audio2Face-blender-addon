@@ -320,7 +320,7 @@ def resolve_runtime_bundle(
     """Validate the installed bundle beneath ``package_root/runtime``.
 
     ``package_root`` must be Blender's writable per-extension data directory.
-    No implicit source-tree or system-path fallback is attempted.
+    Only the managed runtime inside that directory is considered.
     """
 
     if platform is None:
@@ -414,12 +414,3 @@ def resolve_runtime_bundle(
         audio2face_model=audio2face_model,
         audio2emotion_model=audio2emotion_model,
     )
-
-
-__all__ = [
-    "BundleError",
-    "BundleLaunchSpec",
-    "RUNTIME_SCHEMA",
-    "current_platform_id",
-    "resolve_runtime_bundle",
-]

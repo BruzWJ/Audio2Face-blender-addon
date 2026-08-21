@@ -1,4 +1,4 @@
-"""Strict I/O for the worker's canonical ARKit-52 animation result."""
+"""Strict I/O for model-described animation results."""
 
 from __future__ import annotations
 
@@ -9,10 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .arkit import ARKIT_52_CHANNELS
-
-
-RESULT_SCHEMA = "a2f-animation/1"
+RESULT_SCHEMA = "a2f-animation/2"
+RESULT_CHANNEL_COUNT = 52
 MAX_RESULT_FILE_BYTES = 512 * 1024 * 1024
 MAX_SAMPLE_RATE = (1 << 32) - 1
 MIN_SAMPLE_TIMESTAMP = -(1 << 63)
@@ -22,6 +20,7 @@ _RESULT_FIELDS = frozenset(
     {
         "schema",
         "job_id",
+        "channels",
         "sample_rate",
         "timestamps_samples",
         "weights",
@@ -30,7 +29,7 @@ _RESULT_FIELDS = frozenset(
 
 
 class ResultValidationError(ValueError):
-    """Raised when a result is unsafe or violates the fixed ARKit contract."""
+    """Raised when a result is unsafe or violates the output contract."""
 
 
 @dataclass(slots=True)
@@ -39,6 +38,7 @@ class AnimationResult:
     sample_rate: int
     weights: list[list[float]]
     job_id: str
+    channels: list[str]
 
 
 def _array(value: Any, field: str) -> list[Any]:
@@ -80,7 +80,29 @@ def _timestamps(value: Any) -> list[int]:
     return timestamps
 
 
-def _weights(value: Any, frame_count: int) -> list[list[float]]:
+def validate_output_channels(channels: Any) -> tuple[str, ...]:
+    """Validate and freeze the model-provided output bus description."""
+
+    if not isinstance(channels, (list, tuple)):
+        raise ResultValidationError("channels must be an array or sequence")
+    if len(channels) != RESULT_CHANNEL_COUNT:
+        raise ResultValidationError(
+            f"channels must contain exactly {RESULT_CHANNEL_COUNT} names"
+        )
+
+    validated: list[str] = []
+    seen: set[str] = set()
+    for index, name in enumerate(channels):
+        if not isinstance(name, str) or not name:
+            raise ResultValidationError(f"channels[{index}] must be a non-empty string")
+        if name in seen:
+            raise ResultValidationError(f"channels contains duplicate name {name!r}")
+        validated.append(name)
+        seen.add(name)
+    return tuple(validated)
+
+
+def _weights(value: Any, frame_count: int, channel_count: int) -> list[list[float]]:
     rows = _array(value, "weights")
     if len(rows) != frame_count:
         raise ResultValidationError(
@@ -89,9 +111,9 @@ def _weights(value: Any, frame_count: int) -> list[list[float]]:
     weights: list[list[float]] = []
     for frame_index, raw_row in enumerate(rows):
         row = _array(raw_row, f"weights[{frame_index}]")
-        if len(row) != len(ARKIT_52_CHANNELS):
+        if len(row) != channel_count:
             raise ResultValidationError(
-                f"weights[{frame_index}] must contain exactly {len(ARKIT_52_CHANNELS)} values"
+                f"weights[{frame_index}] must contain exactly {channel_count} values"
             )
         parsed: list[float] = []
         for channel_index, item in enumerate(row):
@@ -109,7 +131,7 @@ def _weights(value: Any, frame_count: int) -> list[list[float]]:
 
 
 def validate_result_document(document: dict[str, Any]) -> AnimationResult:
-    """Validate exactly one ``a2f-animation/1`` ARKit-52 document."""
+    """Validate exactly one ``a2f-animation/2`` output-described document."""
 
     if not isinstance(document, dict):
         raise ResultValidationError("result must be a JSON object")
@@ -133,12 +155,14 @@ def validate_result_document(document: dict[str, Any]) -> AnimationResult:
             f"job_id must be a non-empty string of at most {MAX_JOB_ID_LENGTH} characters"
         )
 
+    channels = validate_output_channels(_array(document["channels"], "channels"))
     timestamps = _timestamps(document["timestamps_samples"])
     return AnimationResult(
         timestamps=timestamps,
         sample_rate=sample_rate,
-        weights=_weights(document["weights"], len(timestamps)),
+        weights=_weights(document["weights"], len(timestamps), len(channels)),
         job_id=job_id,
+        channels=list(channels),
     )
 
 
@@ -196,13 +220,3 @@ def load_animation_result(
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise ResultValidationError(f"cannot read result file {resolved}: {exc}") from exc
     return validate_result_document(document)
-
-
-__all__ = [
-    "AnimationResult",
-    "RESULT_SCHEMA",
-    "ResultValidationError",
-    "load_animation_result",
-    "resolve_result_path",
-    "validate_result_document",
-]
