@@ -52,7 +52,7 @@ def _invoke_extension_uninstall(repo_directory: str, package_id: str) -> None:
 
     try:
         bpy.ops.extensions.package_uninstall(
-            "EXEC_DEFAULT" if bpy.app.background else "INVOKE_DEFAULT",
+            "EXEC_DEFAULT",
             repo_directory=repo_directory,
             pkg_id=package_id,
         )
@@ -141,6 +141,9 @@ class A2F_OT_uninstall(bpy.types.Operator):
         target = _uninstall_target(context)
         if target is None:
             self.report({"ERROR"}, "Audio2Face extension installation was not found")
+            return {"CANCELLED"}
+        if get_controller().install_in_progress:
+            self.report({"ERROR"}, "cancel the runtime install and wait first")
             return {"CANCELLED"}
         bpy.app.timers.register(
             partial(_invoke_extension_uninstall, *target),

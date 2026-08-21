@@ -83,6 +83,8 @@ def main() -> None:
         assert bpy.app.timers.is_registered(runtime._timer_callback)
         assert runtime._load_pre_handler in bpy.app.handlers.load_pre
         assert runtime._load_post_handler in bpy.app.handlers.load_post
+        assert hasattr(bpy.ops.a2f, "uninstall")
+        assert not bpy.ops.a2f.uninstall.poll()
         preference_names = set(A2FAddonPreferences.bl_rna.properties.keys())
         assert set(A2FAddonPreferences.__annotations__) == {
             "nvidia_terms_accepted"

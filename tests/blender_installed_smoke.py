@@ -26,6 +26,7 @@ def main() -> None:
     assert bpy.app.timers.is_registered(runtime._timer_callback)
     assert runtime._load_pre_handler in bpy.app.handlers.load_pre
     assert runtime._load_post_handler in bpy.app.handlers.load_post
+    assert bpy.ops.a2f.uninstall.poll()
     runtime.get_controller().poll()
     assert bpy.context.scene.audio2face.status == "IDLE"
 
