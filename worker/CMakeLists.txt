@@ -77,7 +77,6 @@ target_compile_features(a2f_blender_worker PRIVATE cxx_std_17)
 target_compile_definitions(a2f_blender_worker PRIVATE
   A2F_WORKER_VERSION="${PROJECT_VERSION}"
 )
-target_include_directories(a2f_blender_worker PRIVATE include)
 target_link_libraries(a2f_blender_worker PRIVATE
   audio2x-sdk::audio2x
   nlohmann_json::nlohmann_json)

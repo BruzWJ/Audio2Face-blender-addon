@@ -1,7 +1,7 @@
-#include "a2f_worker/backend.h"
+#include "backend.h"
 
-#include "a2f_worker/result_file.h"
-#include "a2f_worker/wav.h"
+#include "result_file.h"
+#include "wav.h"
 
 #include <audio2emotion/audio2emotion.h>
 #include <audio2face/audio2face.h>

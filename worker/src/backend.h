@@ -1,6 +1,6 @@
 #pragma once
 
-#include "a2f_worker/result_file.h"
+#include "result_file.h"
 
 #include <atomic>
 #include <cstdint>
