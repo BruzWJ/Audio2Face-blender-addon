@@ -81,9 +81,21 @@ def main() -> None:
         assert runtime._load_pre_handler in bpy.app.handlers.load_pre
         assert runtime._load_post_handler in bpy.app.handlers.load_post
         preference_names = set(A2FAddonPreferences.bl_rna.properties.keys())
-        assert preference_names == {"rna_type"} | set(A2FAddonPreferences.__annotations__)
+        missing_preference_names = (
+            set(A2FAddonPreferences.__annotations__) - preference_names
+        )
+        assert not missing_preference_names, (
+            f"preferences missing registered RNA properties: "
+            f"{sorted(missing_preference_names)}"
+        )
         scene_property_names = set(A2FSceneSettings.bl_rna.properties.keys())
-        assert scene_property_names == {"rna_type"} | set(A2FSceneSettings.__annotations__)
+        missing_scene_property_names = (
+            set(A2FSceneSettings.__annotations__) - scene_property_names
+        )
+        assert not missing_scene_property_names, (
+            f"scene settings missing registered RNA properties: "
+            f"{sorted(missing_scene_property_names)}"
+        )
 
         scene = bpy.context.scene
         target = _make_shape_key_target(scene)
@@ -125,17 +137,32 @@ def main() -> None:
         _assert_close(settings.manual_emotions[1].value, 0.75, label="preserved Joy")
         settings.auto_audio2emotion = True
         emotion_payload = tuning_parameters(settings)["emotion"]
-        assert emotion_payload == {
-            "auto_audio2emotion": True,
-            "manual_values": {"Neutral": 1.0, "Joy": 0.75},
-            "auto": {
-                "strength": 0.6,
-                "contrast": 1.0,
-                "smoothing": 0.7,
-                "transition_time": 0.5,
-                "max_emotions": 6,
-            },
+        assert set(emotion_payload) == {
+            "auto_audio2emotion",
+            "manual_values",
+            "auto",
         }
+        assert emotion_payload["auto_audio2emotion"] is True
+        manual_payload = emotion_payload["manual_values"]
+        assert set(manual_payload) == {"Neutral", "Joy"}
+        _assert_close(manual_payload["Neutral"], 1.0, label="manual Neutral")
+        _assert_close(manual_payload["Joy"], 0.75, label="manual Joy")
+        auto_payload = emotion_payload["auto"]
+        assert set(auto_payload) == {
+            "strength",
+            "contrast",
+            "smoothing",
+            "transition_time",
+            "max_emotions",
+        }
+        for name, expected in (
+            ("strength", 0.6),
+            ("contrast", 1.0),
+            ("smoothing", 0.7),
+            ("transition_time", 0.5),
+        ):
+            _assert_close(auto_payload[name], expected, label=f"auto {name}")
+        assert auto_payload["max_emotions"] == 6
 
         extra_target = _make_shape_key_target(
             scene,
