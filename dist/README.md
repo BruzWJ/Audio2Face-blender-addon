@@ -11,11 +11,15 @@ ZIP directly; rebuild it from the repository's `audio2face/` source directory.
 - Display name: `Audio2Face`
 - Extension ID: `audio2face`
 - Version: `0.1.0`
-- SHA-256: `7b62ae0afb2ce61c67f450b39ddeadfe692c3010a16fe8377e1950f09f65d723`
+- SHA-256: `4fff15b6a5c716ed3ef1a44f917cb7bb219daa81c63b7c28e3605fc6bddb7341`
 
 The ZIP contains the Blender add-on only. It does not embed CUDA, TensorRT, the
-native worker, Audio2Face, or Audio2Emotion. Those platform-specific assets are
-installed through **Install Runtime & Models** after the extension is enabled.
+native worker, Audio2Face, or Audio2Emotion. Add-on Preferences provides one
+NVIDIA terms acceptance, source buttons for both models, and one managed
+install action that downloads a reviewed artifact containing the runtime and
+both models. The same Preferences page provides **Uninstall Audio2Face**, which
+uses Blender's native extension removal to delete the add-on and all of its
+managed runtime, model, temporary, log, and result files.
 
 > [!IMPORTANT]
 > The checked-in runtime catalog currently publishes no platform archives.
@@ -28,13 +32,17 @@ installed through **Install Runtime & Models** after the extension is enabled.
 1. Open **Edit > Preferences > Extensions**.
 2. Open the Extensions menu and choose **Install from Disk**.
 3. Select `audio2face-0.1.0.zip`.
-4. Enable **Audio2Face** and allow online access when installing the managed
-   runtime and models.
-5. Open the **Audio2Face** tab in the 3D View sidebar.
+4. Enable **Audio2Face** and Blender Online Access.
+5. Open **Edit > Preferences > Add-ons > Audio2Face**, review the linked NVIDIA
+   terms, use the single acceptance checkbox, and click
+   **Install Runtime & Models** when a runtime artifact is published for the
+   platform. The Audio2Face and Audio2Emotion buttons show the exact model
+   sources used by that bundle.
+6. Open the **Audio2Face** tab in the 3D View sidebar. Runtime setup controls
+   stay in Add-on Preferences; the sidebar only reports readiness.
 
-If a pre-rename development package is installed, uninstall it before installing
-this package. The old and current packages are separate Blender extension
-identities and do not share preferences or managed runtime data.
+To remove Audio2Face cleanly, return to its Add-on Preferences and click
+**Uninstall Audio2Face**. This does not remove external WAV or `.blend` files.
 
 ## Build and verify
 
@@ -55,4 +63,4 @@ its root, not inside another directory. Blender derives the output filename
 from the manifest's `id` and `version` fields.
 
 The current package was built with Blender 5.2.0 LTS. Its extension validation,
-headless Blender smoke test, and 250-test Python suite passed.
+headless Blender smoke test, and Python suite passed.

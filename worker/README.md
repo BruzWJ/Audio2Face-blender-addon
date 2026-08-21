@@ -1,15 +1,15 @@
 # Audio2Face worker
 
-This directory builds the native child process used by the Blender 5.2
-extension. It runs NVIDIA Audio2Face-3D v3 diffusion and the device blendshape
-solver on CUDA device 0. End users never build, locate, configure, or host this
-executable; Blender's **Install Runtime & Models** workflow installs and launches
-it.
+This directory builds the native GPU child used by the Blender 5.2 extension.
+It runs Audio2Face-3D v3.0 and Audio2Emotion v3.0 on CUDA device 0 and emits
+model-described ARKit coefficient frames. End users do not build,
+locate, configure, or host the executable. Audio2Face Add-on Preferences
+installs it together with the runtime and both models.
 
-## Build for development
+## Development build
 
-The worker has one SDK integration input: a pinned NVIDIA
-Audio2Face-3D-SDK 1.0.0 source tree.
+The worker has one SDK source input: a pinned NVIDIA Audio2Face-3D-SDK 1.0.0
+tree.
 
 ```sh
 cmake -S worker -B build/worker \
@@ -18,16 +18,15 @@ cmake -S worker -B build/worker \
 cmake --build build/worker --config Release
 ```
 
-CMake verifies the SDK's `audio2x-sdk/VERSION.md`, adds that source tree
-directly, and links `audio2x-sdk::audio2x`. There is no SDK finder, include/lib
-override, binary-only SDK path, or SDK environment variable.
+CMake verifies `audio2x-sdk/VERSION.md`, adds that source tree directly, and
+links `audio2x-sdk::audio2x`. The SDK does not publish an installed CMake
+package, so the project has no SDK finder, include/library override, binary SDK
+path, or SDK environment variable. Building requires the CUDA and TensorRT
+development environment required by the pinned SDK.
 
-The source tree implements only the production backend. Building requires the
-CUDA and TensorRT development environment required by the pinned SDK.
+## Release runtime artifact
 
-## Build a managed runtime archive
-
-Release maintainers enable the strict staging target and provide only reviewed,
+Release maintainers enable strict runtime staging and provide reviewed,
 absolute inputs:
 
 ```sh
@@ -49,16 +48,13 @@ cmake --build build/worker-release \
 ```
 
 `A2F_BUNDLE_TRTEXEC` must be NVIDIA TensorRT `trtexec` built from the pinned
-release source recorded by its license and provenance files. A locally found
-binary is not accepted as release provenance.
+source recorded by its license and provenance files. Release staging accepts
+only Linux x64 and Windows x64. It requires the reviewed CUDA/TensorRT runtime
+filenames, both complete model input trees, and all license and notice inputs.
+It rejects symlinks, unsupported binary formats, unexpected layout, empty
+files, and prebuilt `.trt` or `.engine` files in either model tree.
 
-The staging path admits only Linux x86-64 and Windows AMD64 builds. It requires
-the exact reviewed CUDA/TensorRT runtime filenames, complete Audio2Face v3 and
-Audio2Emotion v3 model trees, and separate license inputs for both models. It
-rejects symlinks, unsupported binary formats, unexpected layout, empty files,
-and prebuilt `.trt` or `.engine` files in either model tree.
-
-The generated ZIP has one canonical payload:
+The one generated ZIP contains both models and the full managed runtime:
 
 ```text
 runtime/<platform>/
@@ -77,41 +73,51 @@ runtime/<platform>/
   licenses/...
 ```
 
-`StageRuntime.cmake` creates and validates that tree.
-`MeasureRuntimeArchive.cmake` verifies the ZIP member set against it and emits
-the platform's exact `sha256`, `size`, and `unpacked_size` fragment. Release
-automation adds the immutable HTTPS URL and inserts the artifact under the
-matching platform key in
+`StageRuntime.cmake` creates and validates this canonical tree.
+`MeasureRuntimeArchive.cmake` verifies the ZIP member set and emits the exact
+`sha256`, `size`, and `unpacked_size` values. Release automation adds the
+immutable HTTPS URL and inserts that record under the matching platform key in
 [`audio2face/runtime_catalog.json`](../audio2face/runtime_catalog.json).
 
-The downloadable archive remains GPU-neutral. During add-on installation,
-Blender uses the bundled `trtexec` and each model's `trt_info.json` to build the
-Audio2Face engine first and the Audio2Emotion engine second. Each build has its
-own progress stage and install log. Blender validates both generated
-`network.trt` files before atomically activating the one service-free runtime.
-The NVIDIA display driver remains a system requirement and is not bundled.
+The downloadable artifact is GPU-neutral. During Add-on Preferences setup,
+Blender verifies and extracts it, then runs the bundled `trtexec` once for
+Audio2Face and once for Audio2Emotion. Both generated `network.trt` files are
+validated before the runtime is activated atomically. The NVIDIA display
+driver remains a system requirement and is not bundled.
 
-The Audio2Emotion integration is experimental, and Audio2Emotion v3.0 is a
-gated model. Its acquisition and redistribution terms must be reviewed
-explicitly; release packaging does not embed credentials, download it from
-Hugging Face, or fabricate a catalog artifact. Archive contents and
-redistribution rights must be reviewed for every release.
-See [`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md). The checked-in
-catalog currently publishes no artifacts, so the source extension ZIP alone is
-not yet a complete end-user installation.
+The Preferences UI presents one NVIDIA terms link and acceptance, plus source
+buttons for
+[Audio2Face-3D v3.0](https://huggingface.co/nvidia/Audio2Face-3D-v3.0) and
+[Audio2Emotion v3.0](https://huggingface.co/nvidia/Audio2Emotion-v3.0). The
+buttons identify the model sources; the one managed artifact delivers both.
+Release maintainers must review model access and redistribution rights and may
+not embed credentials. See
+[`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md).
+
+The checked-in catalog contains no platform records, so install remains
+disabled until reviewed archives and their measured records are published.
 
 ## Runtime contract
 
 The process is silent until `hello {}` and communicates only through strict
-UTF-8 JSON Lines on stdin/stdout. One non-interactive diffusion/device-
-blendshape executor serves both input modes: a complete WAV produces one
-five-field `a2f-animation/1` result, while start/chunk/end PCM input emits
-incremental canonical ARKit-52 frames. There is no socket or separately hosted
-service. A loaded but idle model does not run inference, **Stop Stream** keeps
-the model ready, and **Stop Worker** releases its CUDA/model resources.
+`audio2face/3` UTF-8 JSON Lines on stdin/stdout. It reports worker profile
+`nvidia-a2f3-a2e3-gpu-arkit52/2`.
 
-The exact message, settings, ARKit-52, result, cancellation, and shutdown
-contracts are documented in [`docs/protocol.md`](../docs/protocol.md). Process
-ownership, managed installation, target meshes, and audio-clocked Blender
-preview are documented in
-[`docs/architecture.md`](../docs/architecture.md).
+`load_model` returns the model sample rate and one exact `model_schema` with
+`identities`, `channels`, `parameters`, and `emotion_channels`. Channels retain
+the model's exact 52-name order. Parameters are an object mapping opaque worker
+paths to numeric SDK defaults. SDK 1.0 has no parameter reflection, so the
+worker is the single typed adapter from those paths to the SDK structures;
+Blender owns no duplicate list or presentation metadata.
+
+One non-interactive diffusion/device-blendshape executor and one
+Audio2Emotion executor serve both modes. A complete WAV produces a six-field
+`a2f-animation/2` result. Start/chunk/end PCM input emits incremental frames in
+the negotiated channel order. The worker opens no socket. An idle loaded model
+does not run inference; **Stop Stream** keeps it ready, and **Stop Worker**
+releases its CUDA and model resources.
+
+The exact transport, settings, model schema, result, cancellation, and
+shutdown contracts are in [`docs/protocol.md`](../docs/protocol.md). Process
+ownership, managed installation, target delivery, and audio-clocked playback
+are in [`docs/architecture.md`](../docs/architecture.md).

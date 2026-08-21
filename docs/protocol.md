@@ -1,64 +1,65 @@
-# Worker protocol `audio2face/2`
+# Worker protocol `audio2face/3`
 
-## Transport
+## Transport and envelopes
 
 Blender starts one local child process and exchanges UTF-8 JSON Lines over its
-stdin and stdout. The process is silent until `hello {}`. stdout is
-protocol-only; diagnostics go to stderr. No socket or user-hosted service is
-involved.
+stdin and stdout. The worker is silent until `hello {}`. stdout is
+protocol-only and diagnostics use stderr. No socket or separately hosted
+service is involved.
 
-Each record contains exactly one JSON object and one LF or CRLF line ending.
-The JSON payload, excluding that ending, is limited to 1 MiB. Blank records,
-duplicate keys, non-finite JSON numbers, invalid UTF-8, and extra records are
-rejected.
+Each record is exactly one JSON object followed by LF or CRLF. The JSON payload
+excluding that ending is limited to 1 MiB. Duplicate keys, non-finite JSON
+numbers, malformed UTF-8, blank records, and additional records on the same
+line are rejected.
 
-Every request has exactly these fields:
+A request contains exactly:
 
 ```json
-{"protocol":"audio2face/2","type":"request","id":"1","method":"hello","params":{}}
+{"protocol":"audio2face/3","type":"request","id":"1","method":"hello","params":{}}
 ```
 
 `id` is a non-empty string of at most 128 characters. A successful response
-repeats it and contains an object result. A request error contains exact
-`code`, `message`, and `details` fields; `id` is present only when recoverable:
+repeats it and contains an object `result`:
 
 ```json
-{"protocol":"audio2face/2","type":"error","id":"1","error":{"code":"invalid_params","message":"invalid request","details":{}}}
+{"protocol":"audio2face/3","type":"response","id":"1","result":{}}
 ```
 
-Every asynchronous event has exact `event`, `job_id`, and object `data` fields
-alongside the common fields. `job_id` correlates either a selected generation
-job or a live stream:
+A request error contains exact `code`, `message`, and `details` fields. `id` is
+included only when it could be recovered safely:
 
 ```json
-{"protocol":"audio2face/2","type":"event","event":"stream_ended","job_id":"stream-1","data":{}}
+{"protocol":"audio2face/3","type":"error","id":"1","error":{"code":"invalid_params","message":"invalid request","details":{}}}
 ```
 
-The only request methods are `hello`, `load_model`, `generate`, `stream_start`,
-`stream_chunk`, `stream_end`, `cancel`, and `shutdown`. The only events are
+An asynchronous event contains exact `event`, `job_id`, and object `data`
+fields in addition to `protocol` and `type`:
+
+```json
+{"protocol":"audio2face/3","type":"event","event":"stream_ended","job_id":"stream-1","data":{}}
+```
+
+The request methods are `hello`, `load_model`, `generate`, `stream_start`,
+`stream_chunk`, `stream_end`, `cancel`, and `shutdown`. The event names are
 `progress`, `result`, `canceled`, `stream_frame`, `stream_ended`, and `error`.
+The worker accepts one active generation or stream operation. Its immediate
+response is always written before an event caused by that request.
 
-The worker accepts one active generation job or stream. For every asynchronous
-operation, its immediate response is written before any event from that
-operation.
-
-## Methods
-
-### `hello`
+## `hello`
 
 Parameters are exactly `{}`. The result is exactly:
 
 ```json
-{"worker_profile":"nvidia-a2f3-a2e3-gpu-arkit52/1","worker_version":"0.1.0"}
+{"worker_profile":"nvidia-a2f3-a2e3-gpu-arkit52/2","worker_version":"0.1.0"}
 ```
 
-Blender requires that profile and a non-empty version. `hello` must succeed
-before model or inference methods. CUDA/model allocation is not a handshake
-side effect.
+Blender requires that exact profile and a non-empty worker version. `hello`
+must complete before model or inference methods. It does not allocate CUDA or
+model resources.
 
-### `load_model`
+## `load_model`
 
-Parameters are exactly:
+Parameters contain exactly:
 
 ```json
 {
@@ -68,118 +69,80 @@ Parameters are exactly:
 }
 ```
 
-Both paths must be absolute managed files. `identity_index` must be a
-non-negative integer within the Audio2Face identity range. Loading creates the
-device-0 Audio2Face diffusion/blendshape executor, Audio2Emotion classifier
-executor and its checked result callback, their shared CUDA stream, and shared
-audio and emotion accumulators. The models must agree on sample rate and
-emotion-vector shape.
-Loading does not execute either model or start continuous inference.
+Both paths must be absolute managed files. `identity_index` is a non-negative
+integer within the Audio2Face identity range. Loading creates the device-0
+Audio2Face diffusion/blendshape executor, Audio2Emotion classifier executor,
+their shared CUDA stream, and shared audio and emotion accumulators. The models
+must agree on sample rate and emotion-vector width. Loading does not execute
+inference.
 
-The result has exactly `parameter_defaults`, `emotion_names`, and
-`sample_rate`. Nested keys are fixed. Values, the ordered emotion names, and
-the positive integer sample rate come from the managed models. The names and
-values below are illustrative; `manual_values` must have the exact name set,
-while `emotion_names` supplies its canonical order:
+The response contains exactly `sample_rate` and `model_schema`:
 
 ```json
 {
-  "parameter_defaults": {
-    "input_strength": 1.0,
-    "skin": {
-      "lower_face_smoothing": 0.0,
-      "upper_face_smoothing": 0.0,
-      "lower_face_strength": 1.0,
-      "upper_face_strength": 1.0,
-      "face_mask_level": 0.5,
-      "face_mask_softness": 0.1,
-      "skin_strength": 1.0,
-      "blink_strength": 1.0,
-      "eyelid_open_offset": 0.0,
-      "lip_open_offset": 0.0,
-      "blink_offset": 0.0
-    },
-    "emotion": {
-      "manual_values": {
-        "ModelEmotionA": 0.0,
-        "ModelEmotionB": 0.0
-      },
-      "auto": {
-        "strength": 0.6,
-        "contrast": 1.0,
-        "smoothing": 0.7,
-        "transition_time": 0.5,
-        "max_emotions": 2
-      }
-    }
-  },
-  "emotion_names": ["ModelEmotionA", "ModelEmotionB"],
-  "sample_rate": 16000
-}
-```
-
-`manual_values` is the Audio2Face model's default conditioning vector, keyed
-by the names reported by that model. `auto` contains the Audio2Emotion
-post-processing defaults. Blender builds its manual emotion controls from this
-response; it does not hard-code an emotion list.
-
-### Settings document
-
-Every `generate` and `stream_start` request contains this complete exact
-settings shape. The model-defined names shown here are illustrative and must
-match the active `load_model` response:
-
-```json
-{
-  "input_strength": 1.0,
-  "skin": {
-    "lower_face_smoothing": 0.0,
-    "upper_face_smoothing": 0.0,
-    "lower_face_strength": 1.0,
-    "upper_face_strength": 1.0,
-    "face_mask_level": 0.5,
-    "face_mask_softness": 0.1,
-    "skin_strength": 1.0,
-    "blink_strength": 1.0,
-    "eyelid_open_offset": 0.0,
-    "lip_open_offset": 0.0,
-    "blink_offset": 0.0
-  },
-  "emotion": {
-    "auto_audio2emotion": false,
-    "manual_values": {
-      "ModelEmotionA": 0.0,
-      "ModelEmotionB": 0.0
-    },
-    "auto": {
-      "strength": 0.6,
-      "contrast": 1.0,
-      "smoothing": 0.7,
-      "transition_time": 0.5,
-      "max_emotions": 2
-    }
+  "sample_rate": 16000,
+  "model_schema": {
+    "identities": ["<model identity>"],
+    "channels": ["<52 exact model-provided lowerCamel names in model order>"],
+    "parameters": {"/advertised/path": 0.0},
+    "emotion_channels": [{"name": "<model emotion>", "default": 0.0}]
   }
 }
 ```
 
-`manual_values` must contain exactly every name returned by `load_model`, with
-finite values in `[0, 1]`. `auto.strength` and `auto.smoothing` are finite in
-`[0, 1]`; `auto.contrast` is finite in `[0.1, 3]`; `auto.transition_time` is
-finite in `[0.1, 1]` seconds; and `auto.max_emotions` is an integer from one
-through the Audio2Emotion classifier's reported emotion count. All fields
-remain required regardless of the toggle.
+Angle-bracket values in this document are explanatory metavariables. The
+`channels` example abbreviates an array that contains exactly 52 strings.
 
-When `auto_audio2emotion` is false, `manual_values` is accumulated at timestamp
-zero as the constant emotion driver. When true, Audio2Emotion v3.0 analyzes the
-same operation audio and its timestamped output replaces the manual vector.
-There is no blending between the two modes, and preferred-emotion mixing is
-disabled. The selected-file and streaming paths use this identical switch and
-parameter contract.
+`model_schema` has exactly these four fields:
 
-### `generate`
+- `identities` is a non-empty ordered array of non-empty model names. Its array
+  position is the identity index.
+- `channels` contains 52 unique non-empty strings in the model's order.
+- `parameters` maps each unique opaque worker path to its finite numeric
+  default. JSON integer and float types define the control type.
+- `emotion_channels` is an ordered array of exact `{name, default}` objects.
+  Names are unique model-provided strings and defaults are finite values in
+  `[0.0, 1.0]`.
 
-Parameters are exactly `job_id`, absolute `audio_path`, absolute managed
-`result_path`, and the complete settings document:
+Output channels, identity names, emotion names, and their ordering come from
+the loaded Audio2Face model. Numeric defaults are read through the SDK. The
+worker's typed adapter defines the paths it can apply through the SDK's public
+parameter structures. SDK 1.0 has no parameter reflection; graph nodes and
+tensors are outside this contract.
+
+## Settings document
+
+Every `generate` and `stream_start` request includes a `settings` object with
+exactly:
+
+```json
+{
+  "auto_audio2emotion": false,
+  "manual_emotions": {
+    "<every model_schema emotion name>": 0.0
+  },
+  "parameters": {
+    "/every/advertised/parameter/path": 0.0
+  }
+}
+```
+
+`manual_emotions` contains every advertised emotion name exactly once and no
+other key. Values are finite in `[0.0, 1.0]`. `parameters` contains every
+advertised parameter path exactly once and no other key. Each value retains
+the advertised JSON numeric type and must be accepted by the applicable SDK
+setter. Partial documents and unknown keys are rejected.
+
+When `auto_audio2emotion` is false, the ordered manual values are accumulated
+at timestamp zero and form a constant emotion driver. When it is true,
+Audio2Emotion analyzes the operation's audio and its timestamped output fully
+replaces the manual vector. Manual values remain present in the document but
+are ignored. Selected WAV and Stream use this identical rule and parameter
+shape.
+
+## `generate`
+
+Parameters contain exactly:
 
 ```json
 {
@@ -187,212 +150,183 @@ Parameters are exactly `job_id`, absolute `audio_path`, absolute managed
   "audio_path": "/absolute/path/speech.wav",
   "result_path": "/absolute/managed/results/job-1.a2f.json",
   "settings": {
-    "input_strength": 1.0,
-    "skin": {
-      "lower_face_smoothing": 0.0,
-      "upper_face_smoothing": 0.0,
-      "lower_face_strength": 1.0,
-      "upper_face_strength": 1.0,
-      "face_mask_level": 0.5,
-      "face_mask_softness": 0.1,
-      "skin_strength": 1.0,
-      "blink_strength": 1.0,
-      "eyelid_open_offset": 0.0,
-      "lip_open_offset": 0.0,
-      "blink_offset": 0.0
-    },
-    "emotion": {
-      "auto_audio2emotion": false,
-      "manual_values": {
-        "ModelEmotionA": 0.0,
-        "ModelEmotionB": 0.0
-      },
-      "auto": {
-        "strength": 0.6,
-        "contrast": 1.0,
-        "smoothing": 0.7,
-        "transition_time": 0.5,
-        "max_emotions": 2
-      }
-    }
+    "auto_audio2emotion": false,
+    "manual_emotions": {"<model emotion>": 0.0},
+    "parameters": {"/advertised/path": 0.0}
   }
 }
 ```
 
-Partial or unknown settings and non-numeric/non-finite values are rejected.
-Audio is one complete RIFF/WAVE file of at most 512 MiB: integer PCM at 8, 16,
-24, or 32 bits, or IEEE float32. The worker downmixes channels and linearly
-resamples to model rate. Manual mode supplies the configured constant driver;
-Auto mode runs Audio2Emotion on that same decoded audio and binds its generated
-emotion stream to Audio2Face.
-
-`TongueOut` is already one of the model's 52 skin weights; the separate
-non-ARKit tongue-detail solver is not part of this protocol.
+`job_id` follows the 128-character ID bound. Both paths are absolute. Blender
+supplies `result_path` inside its managed results directory. The WAV is limited
+to 512 MiB and may contain 8-, 16-, 24-, or 32-bit integer PCM or float32. The
+worker downmixes channels and linearly resamples to the loaded model rate. It
+also bounds the decoded and resampled audio to 512 MiB of float samples.
 
 The immediate response is `{}`. Progress events contain exact finite
-`progress` in `[0,1]` and a non-empty `stage`. The worker feeds the same
-incremental executor used by Stream mode, collects all frames, atomically
-publishes the five-field result, then emits:
+`progress` in `[0.0, 1.0]` and a non-empty `stage`:
 
 ```json
-{"protocol":"audio2face/2","type":"event","event":"result","job_id":"job-1","data":{}}
+{"protocol":"audio2face/3","type":"event","event":"progress","job_id":"job-1","data":{"progress":0.5,"stage":"generating"}}
 ```
 
-Blender derives the managed `results/<job_id>.a2f.json` path it submitted and
-requires it to exist. The worker never replaces a result or publishes a partial
-document.
+After all frames are generated, the worker atomically publishes the result and
+emits an empty event:
 
-### `stream_start`
+```json
+{"protocol":"audio2face/3","type":"event","event":"result","job_id":"job-1","data":{}}
+```
 
-Parameters are exactly:
+Blender derives the managed path it submitted and requires the file to exist.
+The worker never replaces an existing result or exposes a partial document.
+
+## `stream_start`
+
+Parameters contain exactly:
 
 ```json
 {
   "stream_id": "stream-1",
   "sample_rate": 16000,
   "settings": {
-    "input_strength": 1.0,
-    "skin": {
-      "lower_face_smoothing": 0.0,
-      "upper_face_smoothing": 0.0,
-      "lower_face_strength": 1.0,
-      "upper_face_strength": 1.0,
-      "face_mask_level": 0.5,
-      "face_mask_softness": 0.1,
-      "skin_strength": 1.0,
-      "blink_strength": 1.0,
-      "eyelid_open_offset": 0.0,
-      "lip_open_offset": 0.0,
-      "blink_offset": 0.0
-    },
-    "emotion": {
-      "auto_audio2emotion": true,
-      "manual_values": {
-        "ModelEmotionA": 0.0,
-        "ModelEmotionB": 0.0
-      },
-      "auto": {
-        "strength": 0.6,
-        "contrast": 1.0,
-        "smoothing": 0.7,
-        "transition_time": 0.5,
-        "max_emotions": 2
-      }
-    }
+    "auto_audio2emotion": true,
+    "manual_emotions": {"<model emotion>": 0.0},
+    "parameters": {"/advertised/path": 0.0}
   }
 }
 ```
 
-`stream_id` follows the job-ID bounds. `sample_rate` must be the exact model
-rate returned by `load_model`; resampling belongs to the source adapter.
-Settings are validated and frozen until the stream ends. The worker resets its
-incremental executors and accumulators, installs either the manual driver or
-the Audio2Emotion binding selected by the toggle, and replies with exactly:
+`sample_rate` must equal the rate returned by `load_model`; source adapters own
+resampling. The worker freezes the complete settings, resets both incremental
+executors and accumulators, and selects the manual or automatic emotion
+driver. The response contains exactly:
 
 ```json
 {"sample_rate":16000,"prebuffer_samples":60000}
 ```
 
 `prebuffer_samples` is a non-negative integer at the returned sample rate. It
-is the Audio2Face audio lead required before the first face execution can be
-ready. In Auto mode it is the maximum of that lead and the Audio2Emotion
-executor's readiness window. A source must submit at least this initial lead
-before beginning synchronized audible playback; Blender integrations must use
-the returned value rather than hard-code it.
+is the Audio2Face input lead required before a face frame can become ready. In
+automatic emotion mode it is the greater of that lead and Audio2Emotion's
+readiness window. Sources must use the returned value before starting
+synchronized audible monitoring.
 
-### `stream_chunk`
+## `stream_chunk`
 
-Parameters are exactly:
+Parameters contain exactly:
 
 ```json
 {"stream_id":"stream-1","audio_f32le_base64":"AAAAAA=="}
 ```
 
-The base64 text must be canonical and decode to a non-empty block no longer
-than one model-rate second, with byte count divisible by four. Each
-little-endian float32 mono sample must be finite. The
-stream ID must match the active stream. The worker accumulates the samples,
-executes every model window made ready, and replies `{}` before publishing any
-frames unlocked by that request.
+The base64 text must be canonical and decode to a non-empty mono block of
+little-endian IEEE-754 float32 samples. Every sample is finite. A chunk covers
+at most one model-rate second; Blender additionally caps its decoded size at
+256 KiB. The ID must name the active stream. The worker replies `{}` before any
+frames unlocked by that chunk.
 
-Each frame event has exact data:
+A frame event has exact data fields `timestamp_sample` and `weights`:
 
 ```json
 {
-  "timestamp_sample": 0,
-  "weights": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  "protocol": "audio2face/3",
+  "type": "event",
+  "event": "stream_frame",
+  "job_id": "stream-1",
+  "data": {"timestamp_sample": 0, "weights": [0.0]}
 }
 ```
 
-`timestamp_sample` is a strictly increasing signed-64-bit model sample
-position. `weights` is the fixed 52-channel `arkit-52/1` order with finite
-values in `[0,1]`. Audio samples no longer needed by either inference stage are
-dropped from the accumulator.
+The weights example abbreviates exactly 52 finite values in `[0.0, 1.0]`, in
+the `model_schema.channels` order. `timestamp_sample` is a strictly
+increasing signed 64-bit model-sample position. The event does not repeat the
+channels. Audio samples no longer required by either inference
+stage are dropped from the shared accumulator.
 
-### `stream_end`
+## `stream_end`
 
 Parameters are exactly `{"stream_id":"stream-1"}`. The worker replies `{}`,
-closes input, drains all padded tail frames, waits for scheduled GPU work, and
-emits the terminal event only after all `stream_frame` events:
+closes input, drains padded tail frames, waits for scheduled GPU work, and then
+emits:
 
 ```json
-{"protocol":"audio2face/2","type":"event","event":"stream_ended","job_id":"stream-1","data":{}}
+{"protocol":"audio2face/3","type":"event","event":"stream_ended","job_id":"stream-1","data":{}}
 ```
 
-The model remains loaded and ready. No result file is written.
+Every final `stream_frame` precedes `stream_ended`. Both models remain loaded
+and no result file is written.
 
-### `cancel`
+## `cancel`
 
-Parameters are exactly `{"job_id":"<active-id>"}` and address either active
-operation type. A matching ID receives an immediate `{}` response.
+Parameters are exactly `{"job_id":"<active-id>"}`. The ID may address either
+operation type. A matching operation receives an immediate `{}` response.
 
-For selected generation, execution is interrupted, no partial result is
-published, and completion is `canceled {}`. For a stream, queued input and
-execution stop without draining and completion is `stream_ended {}`. An
-unmatched or inactive ID returns `job_not_found`. Atomic result publication
-that already won a cancellation race remains successful.
+For generation, execution stops, no partial result is published, and the
+terminal event is `canceled {}`. For a stream, queued input and execution stop
+without draining, and the terminal event is `stream_ended {}`. An unknown or
+inactive ID returns `job_not_found`. An atomic result commit that completed
+before cancellation remains a successful result.
 
-### `shutdown`
+## `shutdown`
 
-Parameters and result are both `{}`. Shutdown cancels the active operation,
+Parameters and result are both `{}`. Shutdown stops the active operation,
 joins its thread, responds, and exits the protocol loop. Backend destruction
-synchronizes CUDA and releases both executors, both model metadata objects, the
-shared accumulators, and the CUDA stream. Blender
-enforces bounded graceful, terminate, and kill deadlines.
+synchronizes CUDA and releases both executors, both model metadata objects,
+the shared accumulators, and the CUDA stream. Blender applies bounded graceful,
+terminate, and kill deadlines.
 
-## Result schema `a2f-animation/1`
+## Result schema `a2f-animation/2`
 
-The selected-mode document has exactly `schema`, `job_id`, `sample_rate`,
-`timestamps_samples`, and `weights`. The schema fixes the channel order to the
-52 names in [`audio2face/arkit.py`](../audio2face/arkit.py); names are not
-repeated in the file. Validation requires:
+The Selected WAV result has exactly six fields:
+
+```json
+{
+  "schema": "a2f-animation/2",
+  "job_id": "job-1",
+  "sample_rate": 16000,
+  "channels": ["<52 exact model-provided lowerCamel names in model order>"],
+  "timestamps_samples": [0],
+  "weights": [[0.0]]
+}
+```
+
+The channel and weight arrays are abbreviated above. Validation requires:
 
 - a non-empty `job_id` of at most 128 characters;
 - a positive uint32 `sample_rate`;
-- non-empty, strictly increasing signed-64-bit sample timestamps;
+- exactly 52 unique non-empty channel strings;
+- non-empty, strictly increasing signed 64-bit sample timestamps;
 - one weight row per timestamp;
-- exactly 52 numeric values per row; and
-- every coefficient finite and within `[0.0, 1.0]`.
+- exactly one finite `[0.0, 1.0]` value per channel in every row; and
+- the serialized channel list and row order to remain identical to the loaded
+  model's output description.
 
-The SDK skin names must be the exact unique lowerCamelCase ARKit-52 set. The
-worker resolves indices by name and emits the fixed PascalCase order. Six SDK
-eye-rotation components resolve into the eight `EyeLook*` values. Raw geometry,
-jaw transforms, eye rotations, and other solver outputs are absent.
+The worker preserves the model's skin channel order. It locates the eight
+lowerCamel eye-look semantics in that list and resolves six SDK eye-rotation
+components into those slots. No separate Python channel list, reorder table,
+raw geometry, jaw transform, or eye-rotation payload is part of the result.
 
-## Error codes
+## Terminal operation errors
 
-The stable request/operation codes are:
+An asynchronous operation failure uses an `error` event with exact `code` and
+`message` data:
 
-- `invalid_json`, `invalid_request`, `request_too_large`, `protocol_mismatch`
-- `method_not_found`, `invalid_params`, `invalid_state`, `busy`
-- `model_not_found`, `model_invalid`, `identity_invalid`, `model_not_loaded`
-- `audio_open_failed`, `audio_invalid`, `invalid_audio`, `unsupported_audio`,
-  `audio_too_large`
-- `job_not_found`, `generation_failed`, `sample_rate_mismatch`,
-  `stream_backpressure`
-- `sdk_error`, `gpu_error`, `internal_error`
-- `invalid_result_path`, `result_exists`, `result_directory_failed`
-- `result_too_large`, `result_write_failed`, `result_commit_failed`
+```json
+{"protocol":"audio2face/3","type":"event","event":"error","job_id":"job-1","data":{"code":"generation_failed","message":"operation failed"}}
+```
 
-Operation failures use an `error` event with exact `code` and `message` data.
-Request validation failures use the request error envelope.
+Request validation failures use the request error envelope. Worker error codes
+used by the implementation include:
+
+- `invalid_json`, `invalid_request`, `request_too_large`,
+  `protocol_mismatch`, `method_not_found`, `invalid_params`, `invalid_state`,
+  and `busy`;
+- `model_not_found`, `model_invalid`, `identity_invalid`, and
+  `model_not_loaded`;
+- `audio_open_failed`, `audio_invalid`, `invalid_audio`,
+  `unsupported_audio`, and `audio_too_large`;
+- `job_not_found`, `generation_failed`, `sample_rate_mismatch`, and
+  `stream_backpressure`;
+- `sdk_error`, `gpu_error`, and `internal_error`; and
+- `invalid_result_path`, `result_exists`, `result_directory_failed`,
+  `result_too_large`, `result_write_failed`, and `result_commit_failed`.

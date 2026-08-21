@@ -1,168 +1,162 @@
 # Audio2Face Blender Addon
 
-Audio2Face-blender-addon is a Blender 5.2 extension that runs NVIDIA Audio2Face-3D
-v3.0 and its Audio2Emotion v3.0 driver locally on an NVIDIA GPU. Blender
-launches one add-on-managed native child process; users do not host a service
-or select an executable, SDK, model, CUDA installation, or working directory.
+Audio2Face is a Blender 5.2 extension that runs NVIDIA Audio2Face-3D v3.0 and
+Audio2Emotion v3.0 locally on an NVIDIA GPU. Blender owns one managed native
+worker process. Users do not host a service or choose an executable, SDK,
+model, CUDA installation, or working directory.
 
-The worker generates one fixed `arkit-52/1` value stream from either a complete
-selected WAV or incremental mono float32 PCM. Blender writes those values to
-existing, exact-name Shape Key `value` properties on every enabled target
-mesh. Vertex data, Actions, F-curves, and bones are never modified.
+The extension produces 52-channel ARKit coefficients from a selected WAV or
+incremental mono float32 PCM. It drives existing Shape Key `value`
+properties on enabled mesh targets. It does not write vertices, bones,
+Actions, F-curves, or baked animation.
 
 ## Requirements
 
 - Blender 5.2.x on Linux x64 or Windows x64
 - A supported NVIDIA GPU and display driver
-- Blender Online Access while installing the managed runtime
-- Disk space for the runtime, Audio2Face v3.0 and Audio2Emotion v3.0 model
-  inputs, and their locally optimized TensorRT engines
+- Blender Online Access during managed installation
+- Space for the runtime, both model inputs, and two GPU-specific TensorRT
+  engines
+
+## Runtime setup
+
+Runtime setup lives in **Edit > Preferences > Add-ons > Audio2Face**. The setup
+box contains:
+
+- one [NVIDIA terms](https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/)
+  link and one acceptance checkbox;
+- source buttons for
+  [Audio2Face-3D v3.0](https://huggingface.co/nvidia/Audio2Face-3D-v3.0) and
+  [Audio2Emotion v3.0](https://huggingface.co/nvidia/Audio2Emotion-v3.0); and
+- **Install Runtime & Models** and **Uninstall Audio2Face** actions.
+
+The install action downloads one catalog-pinned artifact containing the worker,
+runtime libraries, model inputs for both models, TensorRT engine builder, and
+notices. It then builds both model engines for the local GPU. The source
+buttons identify the model sources; they are not separate install steps. The
+3D View sidebar only reports runtime readiness and directs setup to Add-on
+Preferences.
+
+The checked-in [`runtime_catalog.json`](audio2face/runtime_catalog.json) has no
+published artifacts. **Install Runtime & Models** therefore remains disabled
+in this source release. It becomes available only after release maintainers
+publish reviewed Linux and Windows archives with immutable HTTPS URLs, exact
+sizes, and SHA-256 digests. No URL, checksum, or model payload is inferred.
+
+**Uninstall Audio2Face** uses Blender's extension uninstaller. Blender first
+disables the add-on and stops its worker, streams, and playback, then removes
+the extension and its complete managed data directory: runtime libraries, both
+models and TensorRT engines, installer leftovers, logs, and generated results.
+Selected WAV files, `.blend` files, meshes, and shared NVIDIA driver caches are
+not managed by the add-on and are not removed.
 
 ## Workflow
 
-1. Install and enable the extension.
-2. Accept the applicable NVIDIA terms and click **Install Runtime & Models**.
-3. Choose **Selected WAV** or **Stream**, then select a WAV file.
-4. Select one or more meshes whose Shape Keys use canonical ARKit names such as
-   `EyeBlinkLeft`, `JawOpen`, and `MouthSmileRight`, then click **Add Selected**.
-5. Click **Start Worker**. The extension starts its bundled process, performs
-   the protocol handshake, and loads the managed Audio2Face v3.0 and
-   Audio2Emotion v3.0 models.
-6. Adjust the face and emotion controls. Leave **Auto Audio2Emotion** off to
-   use the model-defined manual emotion driver, or enable it to replace that
-   driver with emotions inferred from the input audio.
-7. In **Selected WAV**, click **Generate ARKit Values**, then **Play Selected
-   Audio** to drive the targets from the completed result.
-8. In **Stream**, click **Start WAV Stream** to decode, resample, and submit the
-   file as bounded PCM chunks. Playback starts after the first model frames are
-   buffered and drives the targets incrementally. **Stop Stream** ends only the
-   active stream and keeps the model ready.
-9. Click the worker **Stop** button to exit the child process and release its
-   model and CUDA resources.
+1. Install and enable the extension, then complete **Runtime setup** in its
+   Add-on Preferences.
+2. In the Audio2Face sidebar, choose **Selected WAV** or **Stream**. The
+   **Audio Playback** controls appear immediately below this mode selector.
+3. Choose a WAV for complete generation or for the built-in streamed-WAV
+   source. A Blender integration can use Stream mode without a WAV by pushing
+   live mono f32le PCM through [`audio2face.streaming`](audio2face/streaming.py).
+4. Select any mesh objects and click **Add Selected Meshes**. Shape Keys are
+   not required when a mesh is added.
+5. Click **Start Worker**. Blender launches the verified managed worker,
+   negotiates the protocol, and loads both managed models.
+6. Choose a model identity and adjust the controls reported by that model.
+7. Leave **Auto Audio2Emotion** off to use the manual emotion values. Enable it
+   to replace the manual driver with emotions inferred from the same audio.
+8. In Selected WAV mode, click **Generate ARKit Values**, then **Play Result**.
+   In Stream mode, click **Start WAV Stream** or submit live PCM through the
+   integration API.
+9. **Stop Stream** ends only the active stream and keeps the loaded model
+   ready. **Stop Worker** exits the child process and releases its model and
+   CUDA resources.
 
 Installing or enabling the extension does not start the worker. Loading the
-model does not start continuous inference. GPU inference runs only for an
-explicit selected-file job or an active PCM stream. Buffered selected-file
-playback can continue after the worker has stopped.
+models does not start continuous inference. GPU inference runs only for an
+explicit generation job or active PCM stream. A completed Selected WAV result
+can play after the worker has stopped.
 
-## Target meshes
+## Mesh targets and channel delivery
 
-Each target is an enabled Blender mesh object. A Shape Key is connected only
-when its name exactly matches one of the 52 PascalCase names in
-[`audio2face/arkit.py`](audio2face/arkit.py). Matching is case-sensitive.
-There are no aliases, destination selectors, multipliers, or offsets.
+Every enabled target mesh subscribes to the model channel stream, with no
+Shape Key admission check. At each frame, Blender uses each exact
+model-provided lowerCamel channel name to look up a Shape Key on each target.
+If that key exists, its value is assigned; if it does not, that channel is
+skipped for that target. Names are never translated or remapped, and there is
+no per-target multiplier, bake step, or direct mesh deformation.
 
-A target may implement any exact-name subset of the 52 channels. The worker
-always produces the complete ordered stream; Blender updates the matching keys
-that exist on each target. Objects sharing one Shape Key datablock are updated
-once per preview sample. Because Shape Key values belong to that shared
-datablock, linked objects reflect the same values even when only one is a
-target; make the mesh data single-user when independent motion is required.
+The loaded model supplies the exact ordered 52-channel list. A target can
+contain all, some, or none of those Shape Keys. Several objects may share one
+Shape Key datablock; delivery writes that shared datablock once per frame, so
+linked objects reflect the same values. Use single-user mesh data when objects
+need independent values.
 
-## Input modes and controls
+## Audio modes and playback
 
-**Selected WAV** reads the complete file in the native worker, writes one
-strict timestamped result, binds that result to the exact submitted WAV, and
-plays it against Blender's audio-device clock.
+**Selected WAV** sends one complete RIFF/WAVE file to the worker. The worker
+decodes, downmixes, resamples, generates all frames, and atomically publishes a
+strict result. **Audio Playback** uses Blender's audio-device clock to sample
+that result and provides play, pause/resume, stop, loop, volume, and
+reset-on-stop controls.
 
-**Stream** has an explicit `stream_start` / chunk / `stream_end` lifecycle. The
-built-in source incrementally decodes a selected WAV to mono f32le, resamples
-it to the model rate, and keeps a bounded lead over local playback. Integrations
-running inside Blender can instead use
-[`audio2face/streaming.py`](audio2face/streaming.py) to push source-agnostic
-live PCM at the model rate. That integration owns capture and audible monitoring;
-the built-in streamed-WAV source performs Blender audio playback itself. No port,
-network listener, or separately hosted service is involved.
+**Stream** uses one `stream_start` / chunk / `stream_end` lifecycle. The
+built-in source incrementally decodes a selected WAV, resamples it to the model
+rate, and keeps a bounded lead over Blender audio playback. Integrations can
+instead call `start_pcm_stream`, poll `get_pcm_stream_requirements`, and submit
+model-rate mono f32le chunks. Those integrations own capture, resampling, and
+audible monitoring. No port or network listener is opened.
 
-After `start_pcm_stream(scene)`, an integration polls
-`get_pcm_stream_requirements(scene)` until it returns
-`(model_sample_rate_hz, required_initial_lead_samples)`. Both functions default
-to `bpy.context.scene`. The source must submit PCM at that rate and queue at
-least the required lead before starting synchronized audible monitoring. The
-requirements function returns `None` while `stream_start` is still pending, so
-integrations never hard-code either model-dependent value.
+The worker reports the initial model-rate `prebuffer_samples` requirement.
+With automatic emotion enabled, it covers both Audio2Face and Audio2Emotion
+readiness. Streamed frames are buffered and sampled against the local audio or
+presentation clock; scene FPS is not used for synchronization.
 
-The v3 diffusion model has inherent audio lookahead. The worker reports the
-model-rate audio lead needed before its first Audio2Face frame can be ready.
-With Auto emotion enabled, that requirement is the larger of the Audio2Face
-and Audio2Emotion readiness windows. The built-in streamed-WAV source satisfies
-that requirement before synchronized playback begins.
+## Model-driven controls
 
-The face controls are:
+`load_model` returns a self-describing `model_schema` with exactly
+`identities`, `channels`, `parameters`, and `emotion_channels`. Blender builds
+its selectors and numeric controls from those values. `parameters` is one
+object mapping opaque worker paths to numeric defaults; JSON integer and float
+types select the corresponding Blender control. Labels and groups are derived
+mechanically from path segments instead of duplicating UI metadata.
 
-- input strength;
-- lower and upper face smoothing and strength;
-- face-mask level and softness;
-- skin and blink strength;
-- blink, eyelid-open, and lip-open offsets.
+NVIDIA SDK 1.0 exposes parameter structures but no parameter reflection. The
+worker therefore contains the one typed path-to-member adapter; Blender owns
+no parameter list. Defaults, identities, emotion channels, and output channels
+come from the loaded SDK/model. Internal graph nodes and tensors are not
+controls. Both input modes submit one exact settings object:
 
-The emotion driver exposes every emotion channel reported by the loaded
-Audio2Face model. With **Auto Audio2Emotion** disabled, their manual values form
-one constant conditioning vector for the operation. The sliders begin at the
-model's defaults and are preserved by name across model reloads. With the
-toggle enabled, Audio2Emotion v3.0 analyzes the same selected or streamed audio
-and replaces the manual vector with timestamped values. Its controls are
-strength, contrast, temporal smoothing, transition time, and the maximum number
-of simultaneous emotions. Auto is a full override: manual values are ignored,
-and preferred-emotion mixing is disabled.
+```json
+{
+  "auto_audio2emotion": false,
+  "manual_emotions": {"<model emotion name>": 0.0},
+  "parameters": {"/advertised/path": 0.0}
+}
+```
 
-The same complete, frozen face-and-emotion settings document is used by both
-modes. A live stream must be restarted to apply changed controls. The worker's
-stream prebuffer always covers Audio2Face readiness and additionally covers
-Audio2Emotion readiness when Auto is enabled.
+Manual emotion values are a constant, model-shaped conditioning vector. When
+`auto_audio2emotion` is true, Audio2Emotion analyzes the same input and fully
+replaces that vector. Manual values are ignored in automatic mode. The same
+semantics and complete frozen settings apply to Selected WAV and Stream; a
+stream must be restarted to apply changed controls.
 
-The model's canonical skin solver already contains `TongueOut`; its separate
-16-pose tongue-detail solver and geometry-only controls are intentionally not
-loaded into this ARKit-52 path.
+## Output contract
 
-## Managed runtime
+The worker reports the model's exact 52 unique lowerCamel channel names in
+model order. It resolves eye-look values into the corresponding
+model-provided channel slots without reordering the list. Raw geometry, jaw
+transforms, eye rotations, and other solver data are not serialized.
 
-The add-on catalog pins one immutable HTTPS archive for each supported
-platform. **Install Runtime & Models** downloads to temporary storage, verifies
-that the final URL remains credential-free HTTPS, verifies size and SHA-256,
-safely extracts the fixed bundle, builds both `network.trt` engines for the
-local GPU, and atomically activates the completed runtime below Blender's
-extension user-data directory.
-
-The archive must contain the production worker, Audio2X runtime, reviewed CUDA
-and TensorRT user-mode libraries, release-built NVIDIA TensorRT `trtexec`, both
-model input sets, and required licenses and notices. Separate `network.trt`
-engines are built for Audio2Face and Audio2Emotion. The NVIDIA display driver
-remains a system requirement. Start accepts only the catalog-pinned
-installation and its verified receipt. No external host application, hosted
-service, or user-selected executable is used.
-
-### Release status
-
-The catalog in this source checkout contains no platform artifacts. The source
-extension and worker architecture are implemented, but the install button
-cannot deliver a runtime until license-reviewed Linux and Windows archives are
-published at immutable HTTPS URLs and their measured sizes and SHA-256 digests
-are added to [`runtime_catalog.json`](audio2face/runtime_catalog.json).
-Audio2Emotion v3.0 is gated by NVIDIA on Hugging Face, and this integration is
-experimental until its GPU, platform, model-access, and license requirements
-have passed release validation. That validation must also confirm that the
-pinned Audio2Emotion post-processed vector ordering matches the pinned
-Audio2Face emotion ordering; SDK 1.0.0 exposes the resulting vector width but
-not output channel names. The project neither embeds access credentials nor
-assumes model redistribution permission.
-
-## ARKit output
-
-The Audio2Face SDK exposes the model's 52 skin channels in lowerCamelCase. The
-worker requires that exact unique set, resolves each channel by name, and emits
-the fixed PascalCase `arkit-52/1` order. Six SDK eye-rotation components resolve
-into the eight `EyeLook*` values. Raw geometry, jaw transforms, and eye rotations
-are not serialized. Selected mode stores those frames in `a2f-animation/1`;
-Stream mode emits the same ordered 52 values as incremental frame events and
-does not create a result or animation datablock.
-
-Every coefficient is finite and within `[0.0, 1.0]`. Frame timestamps remain
-integer audio-sample positions, so playback is synchronized to Blender's audio
-clock and does not depend on scene FPS.
+Selected mode stores `a2f-animation/2` with exactly `schema`, `job_id`,
+`sample_rate`, `channels`, `timestamps_samples`, and `weights`.
+Stream mode uses the same negotiated channel order for incremental frames and
+does not create a result file. Coefficients are finite and within `[0.0, 1.0]`;
+timestamps are integer audio-sample positions.
 
 See [architecture](docs/architecture.md), [protocol](docs/protocol.md), and the
-[worker build guide](worker/README.md) for the exact contracts.
+[worker build guide](worker/README.md) for the full contracts.
 
 ## Package and verify
 
@@ -180,12 +174,11 @@ Run the Python suite with:
 python3 -m pytest -q
 ```
 
-A production release must additionally pass real NVIDIA GPU inference,
-dependency, install, cancellation, and shutdown tests for every published
-platform archive.
+A production release must also pass real NVIDIA GPU inference, dependency,
+installation, cancellation, and shutdown tests for every published artifact.
 
 ## Licensing
 
-The add-on and worker source are GPL-3.0-or-later. NVIDIA runtime components and
-model files remain under their applicable terms. See
+The extension and worker source are GPL-3.0-or-later. NVIDIA runtime components
+and model files remain under their applicable terms. See
 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
