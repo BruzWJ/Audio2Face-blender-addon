@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import struct
 from pathlib import Path
 
@@ -12,6 +13,9 @@ from audio2face.wav_stream import (
     WavStreamError,
     WavStreamSource,
 )
+
+OUTPUT_SAMPLE_RATE = 16_000
+CHUNK_FRAMES = 1_600
 
 
 def _pcm_bytes(sample_width: int, samples: list[int]) -> bytes:
@@ -121,7 +125,11 @@ def test_metadata_chunks_and_context_lifecycle(tmp_path: Path) -> None:
         samples=[-32_768, -16_384, 0, 16_384, 32_767],
     )
 
-    with WavStreamSource(path, chunk_frames=2) as source:
+    with WavStreamSource(
+        path,
+        output_sample_rate=OUTPUT_SAMPLE_RATE,
+        chunk_frames=2,
+    ) as source:
         assert source.metadata.source_sample_rate == 16_000
         assert source.metadata.output_sample_rate == 16_000
         assert source.metadata.channels == 1
@@ -129,7 +137,6 @@ def test_metadata_chunks_and_context_lifecycle(tmp_path: Path) -> None:
         assert source.metadata.sample_width_bytes == 2
         assert source.metadata.input_frames == 5
         assert source.metadata.output_frames == 5
-        assert source.metadata.duration_seconds == 5 / 16_000
         chunks = list(source)
 
     assert source.closed
@@ -164,7 +171,11 @@ def test_all_integer_pcm_widths_downmix_to_finite_mono(
         ],
     )
 
-    with WavStreamSource(path) as source:
+    with WavStreamSource(
+        path,
+        output_sample_rate=OUTPUT_SAMPLE_RATE,
+        chunk_frames=CHUNK_FRAMES,
+    ) as source:
         samples = _unpack_chunks(list(source))
 
     assert samples == pytest.approx((0.0, -0.5, 0.25))
@@ -183,13 +194,21 @@ def test_extensible_integer_pcm_is_supported_without_relaxing_subformat(
     path = tmp_path / "extensible.wav"
     path.write_bytes(payload)
 
-    with WavStreamSource(path) as source:
+    with WavStreamSource(
+        path,
+        output_sample_rate=OUTPUT_SAMPLE_RATE,
+        chunk_frames=CHUNK_FRAMES,
+    ) as source:
         assert _unpack_chunks(list(source)) == pytest.approx((-0.5, 0.5))
 
     unknown_guid = bytes.fromhex("0700000000001000800000aa00389b71")
     path.write_bytes(payload.replace(pcm_guid, unknown_guid))
     with pytest.raises(WavStreamError, match="unsupported audio subformat"):
-        WavStreamSource(path)
+        WavStreamSource(
+            path,
+            output_sample_rate=OUTPUT_SAMPLE_RATE,
+            chunk_frames=CHUNK_FRAMES,
+        )
 
 
 @pytest.mark.parametrize("extensible", [False, True])
@@ -223,6 +242,18 @@ def test_ieee_float32_wav_downmixes_and_resamples(
     )
 
 
+def test_ieee_float32_samples_use_the_canonical_unit_range(tmp_path: Path) -> None:
+    path = tmp_path / "float-range.wav"
+    path.write_bytes(_float_wav_bytes(samples=[-2.0, -1.0, 1.0, 2.0]))
+
+    with WavStreamSource(
+        path,
+        output_sample_rate=OUTPUT_SAMPLE_RATE,
+        chunk_frames=CHUNK_FRAMES,
+    ) as source:
+        assert _unpack_chunks(list(source)) == (-1.0, -1.0, 1.0, 1.0)
+
+
 @pytest.mark.parametrize("extensible", [False, True])
 @pytest.mark.parametrize("bad_sample", [float("nan"), float("inf"), -float("inf")])
 def test_ieee_float32_wav_rejects_every_non_finite_sample(
@@ -234,7 +265,11 @@ def test_ieee_float32_wav_rejects_every_non_finite_sample(
     path.write_bytes(
         _float_wav_bytes(samples=[0.0, bad_sample], extensible=extensible)
     )
-    source = WavStreamSource(path)
+    source = WavStreamSource(
+        path,
+        output_sample_rate=OUTPUT_SAMPLE_RATE,
+        chunk_frames=CHUNK_FRAMES,
+    )
 
     with pytest.raises(WavStreamError, match="non-finite sample"):
         list(source)
@@ -258,7 +293,11 @@ def test_ieee_float_wav_rejects_every_non_32_bit_width(
     )
 
     with pytest.raises(WavStreamError, match="exactly 32 bits"):
-        WavStreamSource(path)
+        WavStreamSource(
+            path,
+            output_sample_rate=OUTPUT_SAMPLE_RATE,
+            chunk_frames=CHUNK_FRAMES,
+        )
 
 
 def test_extensible_float32_rejects_a_mismatched_valid_width(
@@ -274,7 +313,11 @@ def test_extensible_float32_rejects_a_mismatched_valid_width(
     )
 
     with pytest.raises(WavStreamError, match="valid bits"):
-        WavStreamSource(path)
+        WavStreamSource(
+            path,
+            output_sample_rate=OUTPUT_SAMPLE_RATE,
+            chunk_frames=CHUNK_FRAMES,
+        )
 
 
 def test_resampling_keeps_phase_across_read_and_output_chunk_boundaries(
@@ -310,7 +353,7 @@ def test_resampling_keeps_phase_across_read_and_output_chunk_boundaries(
     assert all(0 < len(chunk) <= 7 * 4 for chunk in chunks)
 
 
-def test_resampling_has_a_predictable_rounded_output_count(tmp_path: Path) -> None:
+def test_resampling_has_the_canonical_floor_output_count(tmp_path: Path) -> None:
     path = _write_wav(
         tmp_path / "downsample.wav",
         sample_rate=16_000,
@@ -319,11 +362,15 @@ def test_resampling_has_a_predictable_rounded_output_count(tmp_path: Path) -> No
         samples=[0, 1_000, 2_000, 3_000, 4_000],
     )
 
-    with WavStreamSource(path, output_sample_rate=8_000) as source:
-        assert source.metadata.output_frames == 3
+    with WavStreamSource(
+        path,
+        output_sample_rate=8_000,
+        chunk_frames=CHUNK_FRAMES,
+    ) as source:
+        assert source.metadata.output_frames == 2
         actual = _unpack_chunks(list(source))
 
-    assert actual == pytest.approx((0, 2_000 / 32_768, 4_000 / 32_768))
+    assert actual == pytest.approx((0, 2_000 / 32_768))
 
 
 @pytest.mark.parametrize(
@@ -352,7 +399,11 @@ def test_rejects_unsupported_or_inconsistent_pcm_headers(
     path = _write_wav(tmp_path / "invalid.wav", **arguments)
 
     with pytest.raises(WavStreamError, match=message):
-        WavStreamSource(path)
+        WavStreamSource(
+            path,
+            output_sample_rate=OUTPUT_SAMPLE_RATE,
+            chunk_frames=CHUNK_FRAMES,
+        )
 
 
 def test_rejects_non_frame_aligned_and_structurally_malformed_files(
@@ -366,7 +417,11 @@ def test_rejects_non_frame_aligned_and_structurally_malformed_files(
         samples=[0],
     )
     with pytest.raises(WavStreamError, match="whole number of sample frames"):
-        WavStreamSource(unaligned)
+        WavStreamSource(
+            unaligned,
+            output_sample_rate=OUTPUT_SAMPLE_RATE,
+            chunk_frames=CHUNK_FRAMES,
+        )
 
     wrong_riff_size = tmp_path / "wrong-size.wav"
     payload = bytearray(
@@ -380,7 +435,11 @@ def test_rejects_non_frame_aligned_and_structurally_malformed_files(
     struct.pack_into("<I", payload, 4, len(payload) + 100)
     wrong_riff_size.write_bytes(payload)
     with pytest.raises(WavStreamError, match="RIFF size"):
-        WavStreamSource(wrong_riff_size)
+        WavStreamSource(
+            wrong_riff_size,
+            output_sample_rate=OUTPUT_SAMPLE_RATE,
+            chunk_frames=CHUNK_FRAMES,
+        )
 
     truncated_chunk = _write_wav(
         tmp_path / "truncated.wav",
@@ -391,7 +450,11 @@ def test_rejects_non_frame_aligned_and_structurally_malformed_files(
         declared_data_size=100,
     )
     with pytest.raises(WavStreamError, match="extends beyond"):
-        WavStreamSource(truncated_chunk)
+        WavStreamSource(
+            truncated_chunk,
+            output_sample_rate=OUTPUT_SAMPLE_RATE,
+            chunk_frames=CHUNK_FRAMES,
+        )
 
 
 def test_safety_limits_are_enforced_without_large_fixtures(
@@ -408,12 +471,20 @@ def test_safety_limits_are_enforced_without_large_fixtures(
 
     monkeypatch.setattr(wav_stream, "MAX_WAV_FILE_BYTES", path.stat().st_size - 1)
     with pytest.raises(WavStreamError, match="safety limit"):
-        WavStreamSource(path)
+        WavStreamSource(
+            path,
+            output_sample_rate=OUTPUT_SAMPLE_RATE,
+            chunk_frames=CHUNK_FRAMES,
+        )
 
     monkeypatch.setattr(wav_stream, "MAX_WAV_FILE_BYTES", 1_000_000)
     monkeypatch.setattr(wav_stream, "MAX_DURATION_SECONDS", 0)
     with pytest.raises(WavStreamError, match="duration exceeds"):
-        WavStreamSource(path)
+        WavStreamSource(
+            path,
+            output_sample_rate=OUTPUT_SAMPLE_RATE,
+            chunk_frames=CHUNK_FRAMES,
+        )
 
 
 def test_constructor_and_iterator_limits_are_strict(tmp_path: Path) -> None:
@@ -426,15 +497,95 @@ def test_constructor_and_iterator_limits_are_strict(tmp_path: Path) -> None:
     )
 
     with pytest.raises(WavStreamError, match="output_sample_rate must be an integer"):
-        WavStreamSource(path, output_sample_rate=True)
+        WavStreamSource(
+            path,
+            output_sample_rate=True,
+            chunk_frames=CHUNK_FRAMES,
+        )
     with pytest.raises(WavStreamError, match="chunk_frames must be between"):
-        WavStreamSource(path, chunk_frames=MAX_CHUNK_FRAMES + 1)
+        WavStreamSource(
+            path,
+            output_sample_rate=OUTPUT_SAMPLE_RATE,
+            chunk_frames=MAX_CHUNK_FRAMES + 1,
+        )
 
-    source = WavStreamSource(path)
+    source = WavStreamSource(
+        path,
+        output_sample_rate=OUTPUT_SAMPLE_RATE,
+        chunk_frames=CHUNK_FRAMES,
+    )
     assert len(list(source)) == 1
     assert source.closed
     with pytest.raises(WavStreamError, match="closed"):
         iter(source)
+
+
+def test_wav_source_rejects_filesystem_aliases(tmp_path: Path) -> None:
+    target = _write_wav(
+        tmp_path / "target.wav",
+        sample_rate=16_000,
+        channels=1,
+        sample_width=2,
+        samples=[0],
+    )
+    source = tmp_path / "source.wav"
+    try:
+        source.symlink_to(target)
+    except OSError:
+        pytest.skip("symlinks are unavailable")
+
+    with pytest.raises(WavStreamError, match="filesystem alias"):
+        WavStreamSource(
+            source,
+            output_sample_rate=OUTPUT_SAMPLE_RATE,
+            chunk_frames=CHUNK_FRAMES,
+        )
+
+
+def test_wav_source_rejects_relative_path() -> None:
+    with pytest.raises(WavStreamError, match="canonical absolute path"):
+        WavStreamSource(
+            Path("relative.wav"),
+            output_sample_rate=OUTPUT_SAMPLE_RATE,
+            chunk_frames=CHUNK_FRAMES,
+        )
+
+
+def test_wav_source_rejects_normalizable_string_spelling(tmp_path: Path) -> None:
+    source = tmp_path / "voice.wav"
+    source.write_bytes(b"RIFF")
+    selected = f"{tmp_path}{os.sep}.{os.sep}voice.wav"
+
+    with pytest.raises(WavStreamError, match="canonical absolute path"):
+        WavStreamSource(
+            selected,
+            output_sample_rate=OUTPUT_SAMPLE_RATE,
+            chunk_frames=CHUNK_FRAMES,
+        )
+
+
+def test_wav_source_rejects_aliased_parent_directory(tmp_path: Path) -> None:
+    target_directory = tmp_path / "target"
+    target_directory.mkdir()
+    _write_wav(
+        target_directory / "speech.wav",
+        sample_rate=16_000,
+        channels=1,
+        sample_width=2,
+        samples=[0],
+    )
+    selected_directory = tmp_path / "selected"
+    try:
+        selected_directory.symlink_to(target_directory, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks are unavailable")
+
+    with pytest.raises(WavStreamError, match="filesystem alias"):
+        WavStreamSource(
+            selected_directory / "speech.wav",
+            output_sample_rate=OUTPUT_SAMPLE_RATE,
+            chunk_frames=CHUNK_FRAMES,
+        )
 
 
 def test_truncation_after_open_is_detected_during_streaming(tmp_path: Path) -> None:
@@ -445,7 +596,11 @@ def test_truncation_after_open_is_detected_during_streaming(tmp_path: Path) -> N
         sample_width=2,
         samples=[0] * 32,
     )
-    source = WavStreamSource(path, chunk_frames=4)
+    source = WavStreamSource(
+        path,
+        output_sample_rate=OUTPUT_SAMPLE_RATE,
+        chunk_frames=4,
+    )
     path.write_bytes(path.read_bytes()[:-16])
 
     with pytest.raises(WavStreamError, match="truncated WAV audio data"):

@@ -36,9 +36,7 @@ from audio2face.properties import (  # noqa: E402
 )
 
 
-MODEL_CHANNELS = ("jawOpen",) + tuple(
-    f"modelChannel{index}" for index in range(51)
-)
+MODEL_CHANNELS = ["jawOpen", *(f"modelChannel{index}" for index in range(51))]
 
 
 def _assert_close(actual: float, expected: float, *, label: str) -> None:
@@ -125,7 +123,7 @@ def main() -> None:
         settings = scene.audio2face
         model_schema = {
             "identities": ["Aki", "Mark"],
-            "channels": list(MODEL_CHANNELS),
+            "channels": MODEL_CHANNELS.copy(),
             "parameters": {
                 "/input_strength": 1.0,
                 "/audio2emotion/emotion_strength": 0.6,
@@ -136,7 +134,8 @@ def main() -> None:
                 {"name": "Joy", "default": 0.0},
             ],
         }
-        apply_model_schema(settings, model_schema)
+        model_signature = ("/models/audio2face", "/models/audio2emotion", 0)
+        apply_model_schema(settings, model_schema, model_signature)
         assert [item.name for item in settings.model_identities] == ["Aki", "Mark"]
         assert [(item.name, item.value) for item in settings.manual_emotions] == [
             ("Neutral", 1.0),
@@ -144,7 +143,7 @@ def main() -> None:
         ]
         settings.manual_emotions[1].value = 0.75
         settings.model_parameters[1].float_value = 0.8
-        apply_model_schema(settings, model_schema)
+        apply_model_schema(settings, model_schema, model_signature)
         _assert_close(settings.manual_emotions[1].value, 0.75, label="preserved Joy")
         _assert_close(
             settings.model_parameters[1].float_value,
@@ -209,7 +208,7 @@ def main() -> None:
         assert len(subscriptions) == 4
         preview_frame = [0.0] * len(MODEL_CHANNELS)
         preview_frame[MODEL_CHANNELS.index("jawOpen")] = 0.625
-        apply_shape_key_frame(subscriptions, MODEL_CHANNELS, preview_frame)
+        apply_shape_key_frame(subscriptions, tuple(MODEL_CHANNELS), tuple(preview_frame))
         _assert_close(
             target.data.shape_keys.key_blocks["jawOpen"].value,
             0.625,
@@ -227,8 +226,8 @@ def main() -> None:
         )
         apply_shape_key_frame(
             subscriptions,
-            MODEL_CHANNELS,
-            [0.0] * len(MODEL_CHANNELS),
+            tuple(MODEL_CHANNELS),
+            (0.0,) * len(MODEL_CHANNELS),
         )
         _assert_close(
             target.data.shape_keys.key_blocks["jawOpen"].value,
@@ -246,7 +245,10 @@ def main() -> None:
                 scene,
                 "blender-smoke-stream",
                 16_000,
-                MODEL_CHANNELS,
+                MODEL_CHANNELS.copy(),
+                audio_path=None,
+                playback_started=None,
+                playback_stopped=None,
             )
             streamed_frame = [0.0] * len(MODEL_CHANNELS)
             streamed_frame[MODEL_CHANNELS.index("jawOpen")] = 0.375

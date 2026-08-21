@@ -142,7 +142,7 @@ def test_sidecar_exchanges_jsonl_and_shuts_down_cleanly(tmp_path: Path) -> None:
         assert client.state is Lifecycle.STOPPED
         assert client.pid is None
     finally:
-        client.close()
+        client.close(timeout=1.0)
 
 
 def test_sidecar_terminates_worker_that_emits_invalid_utf8(tmp_path: Path) -> None:
@@ -166,4 +166,4 @@ def test_sidecar_terminates_worker_that_emits_invalid_utf8(tmp_path: Path) -> No
         assert client.state is Lifecycle.FAILED
         assert client.pid is None
     finally:
-        client.close()
+        client.close(timeout=1.0)

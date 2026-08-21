@@ -1,17 +1,42 @@
 from __future__ import annotations
 
 import math
+from pathlib import Path
 
 import pytest
 
 from audio2face.protocol import (
     MAX_CONTROL_LINE_BYTES,
     PROTOCOL_VERSION,
+    WORKER_PROFILE,
     ProtocolError,
     decode_message,
     encode_message,
     make_request,
 )
+
+
+WORKER_PROTOCOL_SOURCE = (
+    Path(__file__).resolve().parents[1] / "worker" / "src" / "protocol.cpp"
+).read_text(encoding="utf-8")
+
+
+def test_native_transport_requires_lf_and_rejects_cr() -> None:
+    assert "if (std::cin.eof())" in WORKER_PROTOCOL_SOURCE
+    assert '"JSONL request must end with LF"' in WORKER_PROTOCOL_SOURCE
+    assert "line.find('\\r')" in WORKER_PROTOCOL_SOURCE
+    assert '"JSONL request must not contain CR"' in WORKER_PROTOCOL_SOURCE
+
+
+def test_native_worker_mirrors_the_python_wire_identity() -> None:
+    assert f'constexpr const char* kProtocol = "{PROTOCOL_VERSION}";' in (
+        WORKER_PROTOCOL_SOURCE
+    )
+    assert f'{{"worker_profile", "{WORKER_PROFILE}"}}' in WORKER_PROTOCOL_SOURCE
+    assert "constexpr std::size_t kMaximumRequestBytes = 1024U * 1024U;" in (
+        WORKER_PROTOCOL_SOURCE
+    )
+    assert MAX_CONTROL_LINE_BYTES == 1024 * 1024
 
 
 def test_request_round_trip_is_compact_utf8_and_one_record() -> None:
@@ -30,7 +55,7 @@ def test_request_round_trip_is_compact_utf8_and_one_record() -> None:
     assert encoded.count("\n") == 1
     assert "脸" in encoded
     assert " " not in encoded
-    assert decode_message(encoded.encode("utf-8")) == message
+    assert decode_message(encoded) == message
 
 
 @pytest.mark.parametrize(
@@ -70,13 +95,17 @@ def test_decode_rejects_malformed_noncanonical_records(line: str | bytes) -> Non
             "protocol": PROTOCOL_VERSION,
             "type": "event",
             "event": "progress",
-            "job_id": 7,
+            "operation_id": 7,
             "data": {},
         },
     ],
 )
-def test_every_control_correlation_id_must_be_a_string(message: dict[str, object]) -> None:
-    with pytest.raises(ProtocolError, match="id must be a non-empty string"):
+def test_every_control_identifier_must_be_a_string(message: dict[str, object]) -> None:
+    expected_field = "operation_id" if message["type"] == "event" else "id"
+    with pytest.raises(
+        ProtocolError,
+        match=rf"{expected_field} must be a non-empty string",
+    ):
         encode_message(message)
 
 
@@ -99,20 +128,28 @@ def test_request_rejects_empty_id_unknown_method_and_extra_fields() -> None:
         encode_message(message)
 
 
-def test_canonical_result_event_requires_job_id_and_exact_fields() -> None:
+def test_canonical_result_event_requires_operation_id_and_exact_fields() -> None:
     event = {
         "protocol": PROTOCOL_VERSION,
         "type": "event",
         "event": "result",
-        "job_id": "job-1",
+        "operation_id": "operation-1",
         "data": {},
     }
     assert decode_message(encode_message(event))["data"] == {}
 
-    without_job = dict(event)
-    without_job.pop("job_id")
-    with pytest.raises(ProtocolError, match="missing fields: job_id"):
-        encode_message(without_job)
+    without_operation = dict(event)
+    without_operation.pop("operation_id")
+    with pytest.raises(ProtocolError, match="missing fields: operation_id"):
+        encode_message(without_operation)
+
+    old_vocabulary = dict(event)
+    old_vocabulary["job_id"] = old_vocabulary.pop("operation_id")
+    with pytest.raises(
+        ProtocolError,
+        match=r"missing fields: operation_id; unknown fields: job_id",
+    ):
+        encode_message(old_vocabulary)
 
 
 def test_stream_methods_and_events_are_canonical_protocol_members() -> None:
@@ -125,7 +162,7 @@ def test_stream_methods_and_events_are_canonical_protocol_members() -> None:
             "protocol": PROTOCOL_VERSION,
             "type": "event",
             "event": event_name,
-            "job_id": "stream-1",
+            "operation_id": "stream-1",
             "data": {},
         }
         assert decode_message(encode_message(event)) == event
@@ -183,8 +220,10 @@ def test_jsonl_limit_counts_payload_but_not_line_ending() -> None:
 
     assert len(encoded[:-1].encode("utf-8")) == MAX_CONTROL_LINE_BYTES
     assert decode_message(encoded) == message
-    assert decode_message(encoded[:-1] + "\r\n") == message
-    assert decode_message(encoded.encode("utf-8")) == message
+    with pytest.raises(ProtocolError, match="LF-delimited"):
+        decode_message(encoded[:-1] + "\r\n")
+    with pytest.raises(ProtocolError, match="UTF-8 text"):
+        decode_message(encoded.encode("utf-8"))  # type: ignore[arg-type]
 
     message["params"]["padding"] += "x"
     with pytest.raises(ProtocolError, match="1 MiB"):

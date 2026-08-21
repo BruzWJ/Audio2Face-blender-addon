@@ -1,33 +1,76 @@
 from __future__ import annotations
 
 import json
+import re
 import stat
 import struct
 from dataclasses import FrozenInstanceError
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import pytest
 
+import audio2face.runtime_bundle as runtime_bundle
 from audio2face.runtime_bundle import (
     BundleError,
     RUNTIME_SCHEMA,
     current_platform_id,
-    resolve_runtime_bundle as _resolve_runtime_bundle,
+    resolve_runtime_bundle,
 )
+from audio2face.runtime_contract import runtime_contract
 
 
-def resolve_runtime_bundle(package_root: Path, **kwargs: object):
-    """Supply this test tree's two external model selections."""
+def _set_host(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    system: str,
+    machine: str,
+    environment: dict[object, object] | None = None,
+) -> None:
+    monkeypatch.setattr(runtime_bundle.sys, "platform", system)
+    monkeypatch.setattr(runtime_bundle.host_platform, "machine", lambda: machine)
+    if system == "win32" and runtime_bundle.os.name != "nt":
+        monkeypatch.setattr(
+            runtime_bundle,
+            "_require_windows_directory",
+            lambda value, _description: PureWindowsPath(value),
+        )
+    if environment is not None:
+        monkeypatch.setattr(runtime_bundle.os, "environ", environment)
 
-    kwargs.setdefault(
-        "audio2face_model_directory",
-        package_root / "selected-models" / "audio2face",
+
+@pytest.fixture
+def package_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    root = tmp_path / "audio2face"
+    root.mkdir()
+    (root / "runtime_bundle.py").write_text("# test module\n", encoding="utf-8")
+    monkeypatch.setattr(runtime_bundle, "__file__", str(root / "runtime_bundle.py"))
+    _set_host(
+        monkeypatch,
+        system="linux",
+        machine="x86_64",
+        environment={
+            "PATH": "/usr/local/cuda/bin:/usr/bin",
+            "LD_LIBRARY_PATH": "/usr/local/cuda/lib64",
+            "LD_PRELOAD": "/ambient/libnvinfer.so",
+            "LD_AUDIT": "/ambient/audit.so",
+            "CUDA_HOME": "/ambient/cuda",
+            "CUDA_PATH_V12_9": "/ambient/cuda-12.9",
+            "CUDA_ROOT": "/ambient/cuda-root",
+            "CUDA_BIN_PATH": "/ambient/cuda-bin",
+            "CUDA_TOOLKIT_ROOT_DIR": "/ambient/cuda-toolkit",
+            "CUDATOOLKIT_ROOT": "/ambient/cudatoolkit",
+            "TENSORRT_ROOT": "/ambient/tensorrt",
+            "TENSORRT_ROOT_DIR": "/ambient/tensorrt-root",
+            "TRT_LIB_DIR": "/ambient/tensorrt-lib",
+            "TRT_OUT_DIR": "/ambient/tensorrt-out",
+            "CUDA_VISIBLE_DEVICES": "0",
+            "CUDA_CACHE_PATH": "/driver/cache",
+            "NVIDIA_VISIBLE_DEVICES": "all",
+            "NVIDIA_DRIVER_CAPABILITIES": "compute,utility",
+            "KEEP": "yes",
+        },
     )
-    kwargs.setdefault(
-        "audio2emotion_model_directory",
-        package_root / "selected-models" / "audio2emotion",
-    )
-    return _resolve_runtime_bundle(package_root, **kwargs)
+    return root
 
 
 def _write_elf_x64(path: Path, *, executable: bool = True) -> None:
@@ -58,16 +101,15 @@ def _write_pe_x64(path: Path) -> None:
 
 
 def _make_bundle(
-    data_root: Path,
+    package_root: Path,
     platform_id: str = "linux-x64",
-    *,
-    include_engine: bool = True,
 ) -> tuple[Path, dict[str, object]]:
-    root = data_root / "runtime" / platform_id
+    root = package_root / "runtime"
     root.mkdir(parents=True)
+    contract = runtime_contract(platform_id)
     windows = platform_id == "windows-x64"
-    worker_name = "audio2face_worker.exe" if windows else "audio2face_worker"
-    trtexec_name = "trtexec.exe" if windows else "trtexec"
+    worker_name = Path(contract.worker).name
+    trtexec_name = Path(contract.trtexec).name
     worker = root / "bin" / worker_name
     trtexec = root / "bin" / trtexec_name
     if windows:
@@ -77,29 +119,18 @@ def _make_bundle(
         _write_elf_x64(worker)
         _write_elf_x64(trtexec)
 
-    (root / "lib" / "audio2x").mkdir(parents=True)
-    for model_name in ("audio2face", "audio2emotion"):
-        model_dir = data_root / "selected-models" / model_name
-        model_dir.mkdir(parents=True)
-        (model_dir / "model.json").write_text(
-            '{"networkPath":"network.trt"}', encoding="utf-8"
-        )
-        (model_dir / "network.onnx").write_bytes(b"onnx")
-        (model_dir / "trt_info.json").write_text("{}", encoding="utf-8")
-        if include_engine:
-            (model_dir / "network.trt").write_bytes(b"engine")
-    license_dir = root / "licenses"
-    license_dir.mkdir()
-    (license_dir / "THIRD_PARTY.txt").write_text("notices", encoding="utf-8")
+    for packaged_file in contract.libraries:
+        path = root / packaged_file.path
+        if windows:
+            _write_pe_x64(path)
+        else:
+            _write_elf_x64(path, executable=False)
+    for packaged_file in contract.licenses:
+        path = root / packaged_file.path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("notice", encoding="utf-8")
 
-    manifest: dict[str, object] = {
-        "schema": RUNTIME_SCHEMA,
-        "platform": platform_id,
-        "worker": f"bin/{worker_name}",
-        "trtexec": f"bin/{trtexec_name}",
-        "library_directories": ["lib", "lib/audio2x"],
-        "licenses": ["licenses/THIRD_PARTY.txt"],
-    }
+    manifest = contract.manifest()
     (root / "bundle.json").write_text(json.dumps(manifest), encoding="utf-8")
     return root, manifest
 
@@ -116,9 +147,13 @@ def _rewrite_manifest(root: Path, manifest: dict[str, object]) -> None:
     ],
 )
 def test_current_platform_id_identifies_supported_x64(
-    system: str, machine: str, expected: str
+    monkeypatch: pytest.MonkeyPatch,
+    system: str,
+    machine: str,
+    expected: str,
 ) -> None:
-    assert current_platform_id(system=system, machine=machine) == expected
+    _set_host(monkeypatch, system=system, machine=machine)
+    assert current_platform_id() == expected
 
 
 @pytest.mark.parametrize(
@@ -127,46 +162,42 @@ def test_current_platform_id_identifies_supported_x64(
         ("darwin", "x86_64"),
         ("linux", "aarch64"),
         ("win32", "ARM64"),
+        ("win32", "amd64"),
         ("linux", "amd64"),
         ("win32", "x86_64"),
         ("linux", "x64"),
         ("linux", "x86-64"),
     ],
 )
-def test_current_platform_id_rejects_unsupported_targets(system: str, machine: str) -> None:
+def test_current_platform_id_rejects_unsupported_targets(
+    monkeypatch: pytest.MonkeyPatch,
+    system: str,
+    machine: str,
+) -> None:
+    _set_host(monkeypatch, system=system, machine=machine)
     with pytest.raises(BundleError):
-        current_platform_id(system=system, machine=machine)
+        current_platform_id()
 
 
-def test_resolve_linux_bundle_returns_immutable_child_launch_spec(tmp_path: Path) -> None:
-    root, _manifest = _make_bundle(tmp_path)
-    source_environment = {"PATH": "/usr/bin", "LD_LIBRARY_PATH": "/system/lib", "KEEP": "yes"}
+def test_resolve_linux_bundle_is_package_local_and_immutable(
+    package_root: Path,
+) -> None:
+    root, _manifest = _make_bundle(package_root)
+    source_environment = runtime_bundle.os.environ
     original = dict(source_environment)
 
-    spec = resolve_runtime_bundle(
-        tmp_path,
-        system="linux",
-        machine="x86_64",
-        environ=source_environment,
-    )
+    spec = resolve_runtime_bundle()
 
     assert spec.platform == "linux-x64"
     assert spec.root == root.resolve()
     assert spec.executable == (root / "bin" / "audio2face_worker").resolve()
     assert spec.trtexec == (root / "bin" / "trtexec").resolve()
-    assert spec.audio2face_model == (
-        tmp_path / "selected-models" / "audio2face" / "model.json"
-    ).resolve()
-    assert spec.audio2emotion_model == (
-        tmp_path / "selected-models" / "audio2emotion" / "model.json"
-    ).resolve()
-    expected_prefix = ":".join(
-        str(path.resolve())
-        for path in (root / "bin", root / "lib", root / "lib" / "audio2x")
-    )
-    assert spec.env["PATH"] == f"{expected_prefix}:/usr/bin"
-    assert spec.env["LD_LIBRARY_PATH"] == f"{expected_prefix}:/system/lib"
-    assert spec.env["KEEP"] == "yes"
+    assert spec.env["PATH"] == str((root / "bin").resolve())
+    assert spec.env["LD_LIBRARY_PATH"] == str((root / "lib").resolve())
+    assert dict(spec.env) == {
+        "PATH": str((root / "bin").resolve()),
+        "LD_LIBRARY_PATH": str((root / "lib").resolve()),
+    }
     assert source_environment == original
     with pytest.raises(TypeError):
         spec.env["NEW"] = "value"  # type: ignore[index]
@@ -174,114 +205,101 @@ def test_resolve_linux_bundle_returns_immutable_child_launch_spec(tmp_path: Path
         spec.platform = "other"  # type: ignore[misc]
 
 
-def test_resolve_windows_bundle_uses_windows_path_rules(tmp_path: Path) -> None:
-    root, _manifest = _make_bundle(tmp_path, "windows-x64")
-    source_environment = {"Path": r"C:\Windows\System32", "KEEP": "yes"}
-
-    spec = resolve_runtime_bundle(
-        tmp_path,
+def test_resolve_windows_bundle_overwrites_host_search_paths(
+    package_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, _manifest = _make_bundle(package_root, "windows-x64")
+    source_environment = {
+        "Path": r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9\bin",
+        "LD_LIBRARY_PATH": r"C:\TensorRT\lib",
+        "LD_PRELOAD": r"C:\TensorRT\inject.dll",
+        "LD_AUDIT": r"C:\TensorRT\audit.dll",
+        "CUDA_HOME": r"C:\ambient\cuda",
+        "CUDA_PATH_V12_9": r"C:\ambient\cuda-12.9",
+        "TENSORRT_ROOT_DIR": r"C:\ambient\TensorRT",
+        "TRT_LIB_DIR": r"C:\ambient\TensorRT\lib",
+        "CUDA_VISIBLE_DEVICES": "0",
+        "CUDA_CACHE_PATH": r"C:\driver-cache",
+        "NVIDIA_VISIBLE_DEVICES": "all",
+        "NVIDIA_DRIVER_CAPABILITIES": "compute,utility",
+        "SystemRoot": r"C:\Windows",
+        "KEEP": "yes",
+    }
+    _set_host(
+        monkeypatch,
         system="win32",
         machine="AMD64",
-        environ=source_environment,
+        environment=source_environment,
     )
 
-    expected_prefix = ";".join(
-        str(path.resolve())
-        for path in (root / "bin", root / "lib", root / "lib" / "audio2x")
-    )
+    spec = resolve_runtime_bundle()
+
     assert spec.executable.suffix == ".exe"
     assert spec.trtexec.suffix == ".exe"
-    assert spec.env["Path"] == expected_prefix + ";" + r"C:\Windows\System32"
-    assert "PATH" not in spec.env
-    assert "LD_LIBRARY_PATH" not in spec.env
-    assert source_environment == {"Path": r"C:\Windows\System32", "KEEP": "yes"}
-
-
-def test_resolver_requires_explicit_existing_writable_root(tmp_path: Path) -> None:
-    with pytest.raises(BundleError, match="data root is missing"):
-        resolve_runtime_bundle(tmp_path / "absent", system="linux", machine="x86_64")
-
-
-def test_resolver_accepts_an_explicit_catalog_platform(tmp_path: Path) -> None:
-    _make_bundle(tmp_path, "windows-x64")
-    spec = resolve_runtime_bundle(
-        tmp_path,
-        platform="windows-x64",
-        environ={},
-    )
-    assert spec.platform == "windows-x64"
-    with pytest.raises(BundleError, match="unsupported runtime platform"):
-        resolve_runtime_bundle(tmp_path, platform="darwin-x64", environ={})
-    with pytest.raises(BundleError, match="does not match"):
-        resolve_runtime_bundle(
-            tmp_path,
-            platform="windows-x64",
-            system="linux",
-            machine="x86_64",
-            environ={},
+    assert not (root / "lib").exists()
+    assert all(
+        (root / relative).parent == root / "bin"
+        for relative in (
+            packaged_file.path
+            for packaged_file in runtime_contract("windows-x64").libraries
         )
-
-
-def test_prebuild_validation_allows_onnx_without_engine(tmp_path: Path) -> None:
-    _make_bundle(tmp_path, include_engine=False)
-    spec = resolve_runtime_bundle(
-        tmp_path,
-        system="linux",
-        machine="x86_64",
-        environ={},
-        require_engine=False,
     )
-    assert spec.audio2face_model.with_name("network.onnx").is_file()
-    assert spec.audio2emotion_model.with_name("network.onnx").is_file()
-    with pytest.raises(BundleError, match="Audio2Face"):
-        resolve_runtime_bundle(
-            tmp_path,
-            system="linux",
-            machine="x86_64",
-            environ={},
-        )
+    assert spec.env["PATH"] == r"C:\Windows\System32"
+    assert dict(spec.env) == {
+        "SystemRoot": r"C:\Windows",
+        "PATH": r"C:\Windows\System32",
+    }
+    assert "NVIDIA GPU Computing Toolkit" not in spec.env["PATH"]
+    assert source_environment["Path"].startswith(r"C:\Program Files")
+
+
+def test_windows_bundle_requires_the_canonical_system_root(
+    package_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _make_bundle(package_root, "windows-x64")
+    _set_host(
+        monkeypatch,
+        system="win32",
+        machine="AMD64",
+        environment={"PATH": r"C:\Windows\System32"},
+    )
+    with pytest.raises(BundleError, match="SystemRoot"):
+        resolve_runtime_bundle()
 
 
 @pytest.mark.parametrize(
-    ("model_name", "missing"),
+    "system_root",
     [
-        ("audio2face", "model.json"),
-        ("audio2face", "network.onnx"),
-        ("audio2face", "trt_info.json"),
-        ("audio2emotion", "model.json"),
-        ("audio2emotion", "network.onnx"),
-        ("audio2emotion", "trt_info.json"),
+        r"Windows",
+        r"C:/Windows",
+        "C:\\Windows\\.",
+        "C:\\Windows\\",
+        r"C:\Windows\\System32\..\Windows",
+        r"\\server\share\Windows",
     ],
 )
-def test_resolver_requires_every_file_for_both_models(
-    tmp_path: Path,
-    model_name: str,
-    missing: str,
+def test_windows_bundle_rejects_noncanonical_system_root_spelling(
+    package_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    system_root: str,
 ) -> None:
-    root, _manifest = _make_bundle(tmp_path)
-    (tmp_path / "selected-models" / model_name / missing).unlink()
+    _make_bundle(package_root, "windows-x64")
+    _set_host(
+        monkeypatch,
+        system="win32",
+        machine="AMD64",
+        environment={"SystemRoot": system_root},
+    )
 
-    with pytest.raises(BundleError, match="Audio2Face|Audio2Emotion"):
-        resolve_runtime_bundle(
-            tmp_path,
-            system="linux",
-            machine="x86_64",
-            environ={},
-            require_engine=False,
-        )
+    with pytest.raises(BundleError, match="canonical absolute path"):
+        resolve_runtime_bundle()
 
 
-def test_resolver_requires_audio2emotion_engine_after_audio2face(tmp_path: Path) -> None:
-    root, _manifest = _make_bundle(tmp_path)
-    (tmp_path / "selected-models/audio2emotion/network.trt").unlink()
-
-    with pytest.raises(BundleError, match="Audio2Emotion"):
-        resolve_runtime_bundle(
-            tmp_path,
-            system="linux",
-            machine="x86_64",
-            environ={},
-        )
+def test_resolver_requires_the_package_local_runtime(package_root: Path) -> None:
+    with pytest.raises(BundleError, match="bundled linux-x64 runtime is missing"):
+        resolve_runtime_bundle()
 
 
 @pytest.mark.parametrize(
@@ -295,137 +313,243 @@ def test_resolver_requires_audio2emotion_engine_after_audio2face(tmp_path: Path)
     ],
 )
 def test_manifest_rejects_unsafe_or_misplaced_paths(
-    tmp_path: Path, field: str, unsafe: str
+    package_root: Path,
+    field: str,
+    unsafe: str,
 ) -> None:
-    root, manifest = _make_bundle(tmp_path)
+    root, manifest = _make_bundle(package_root)
     manifest[field] = unsafe
     _rewrite_manifest(root, manifest)
     with pytest.raises(BundleError, match=field):
-        resolve_runtime_bundle(tmp_path, system="linux", machine="x86_64", environ={})
+        resolve_runtime_bundle()
 
 
-def test_manifest_rejects_unknown_and_missing_fields(tmp_path: Path) -> None:
-    root, manifest = _make_bundle(tmp_path)
+def test_manifest_rejects_unknown_and_missing_fields(package_root: Path) -> None:
+    root, manifest = _make_bundle(package_root)
     manifest["unexpected"] = True
     del manifest["licenses"]
     _rewrite_manifest(root, manifest)
     with pytest.raises(BundleError, match="missing fields: licenses") as error:
-        resolve_runtime_bundle(tmp_path, system="linux", machine="x86_64", environ={})
+        resolve_runtime_bundle()
     assert "unknown fields: unexpected" in str(error.value)
 
 
-def test_manifest_rejects_schema_and_platform_mismatch(tmp_path: Path) -> None:
-    root, manifest = _make_bundle(tmp_path)
+def test_manifest_rejects_schema_and_host_platform_mismatch(
+    package_root: Path,
+) -> None:
+    root, manifest = _make_bundle(package_root)
     manifest["schema"] = "audio2face-runtime/99"
     _rewrite_manifest(root, manifest)
     with pytest.raises(BundleError, match="unsupported bundle schema"):
-        resolve_runtime_bundle(tmp_path, system="linux", machine="x86_64", environ={})
+        resolve_runtime_bundle()
 
     manifest["schema"] = RUNTIME_SCHEMA
     manifest["platform"] = "windows-x64"
     _rewrite_manifest(root, manifest)
-    with pytest.raises(BundleError, match="does not match"):
-        resolve_runtime_bundle(tmp_path, system="linux", machine="x86_64", environ={})
+    with pytest.raises(BundleError, match="does not match host"):
+        resolve_runtime_bundle()
 
 
-def test_manifest_rejects_duplicate_json_fields(tmp_path: Path) -> None:
-    root, _manifest = _make_bundle(tmp_path)
+def test_manifest_rejects_duplicate_json_fields(package_root: Path) -> None:
+    root, _manifest = _make_bundle(package_root)
     (root / "bundle.json").write_text(
         '{"schema":"audio2face-runtime/3","schema":"again"}', encoding="utf-8"
     )
     with pytest.raises(BundleError, match="duplicate field 'schema'"):
-        resolve_runtime_bundle(tmp_path, system="linux", machine="x86_64", environ={})
+        resolve_runtime_bundle()
 
 
-def test_linux_executables_require_x_bit_and_elf64_x64(tmp_path: Path) -> None:
-    root, _manifest = _make_bundle(tmp_path)
+def test_linux_executables_require_x_bit_and_elf64_x64(
+    package_root: Path,
+) -> None:
+    root, _manifest = _make_bundle(package_root)
     worker = root / "bin" / "audio2face_worker"
     worker.chmod(worker.stat().st_mode & ~(stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH))
     with pytest.raises(BundleError, match="worker is not executable"):
-        resolve_runtime_bundle(tmp_path, system="linux", machine="x86_64", environ={})
+        resolve_runtime_bundle()
 
     _write_elf_x64(worker)
     image = bytearray(worker.read_bytes())
-    struct.pack_into("<H", image, 18, 183)  # AArch64.
+    struct.pack_into("<H", image, 18, 183)
     worker.write_bytes(image)
     with pytest.raises(BundleError, match="ELF64 x86-64"):
-        resolve_runtime_bundle(tmp_path, system="linux", machine="x86_64", environ={})
+        resolve_runtime_bundle()
 
 
-def test_windows_executables_require_pe32_plus_amd64(tmp_path: Path) -> None:
-    root, _manifest = _make_bundle(tmp_path, "windows-x64")
+def test_windows_executables_require_pe32_plus_amd64(
+    package_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, _manifest = _make_bundle(package_root, "windows-x64")
+    _set_host(
+        monkeypatch,
+        system="win32",
+        machine="AMD64",
+        environment={"SystemRoot": r"C:\Windows"},
+    )
     trtexec = root / "bin" / "trtexec.exe"
     image = bytearray(trtexec.read_bytes())
     struct.pack_into("<H", image, 128 + 4, 0xAA64)
     trtexec.write_bytes(image)
     with pytest.raises(BundleError, match=r"PE32\+ AMD64"):
-        resolve_runtime_bundle(tmp_path, system="win32", machine="AMD64", environ={})
+        resolve_runtime_bundle()
 
 
-def test_manifest_members_cannot_escape_through_symlinks(tmp_path: Path) -> None:
-    root, manifest = _make_bundle(tmp_path)
+@pytest.mark.parametrize(
+    ("platform_id", "library"),
+    [
+        (platform_id, library)
+        for platform_id in ("linux-x64", "windows-x64")
+        for library in (
+            packaged_file.path
+            for packaged_file in runtime_contract(platform_id).libraries
+        )
+    ],
+)
+def test_every_contract_library_requires_its_native_binary_format(
+    package_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    platform_id: str,
+    library: str,
+) -> None:
+    root, _manifest = _make_bundle(package_root, platform_id)
+    if platform_id == "windows-x64":
+        _set_host(
+            monkeypatch,
+            system="win32",
+            machine="AMD64",
+            environment={"SystemRoot": r"C:\Windows"},
+        )
+    (root / library).write_bytes(b"corrupt native library")
+
+    with pytest.raises(BundleError, match=re.escape(f"library {Path(library).name}")):
+        resolve_runtime_bundle()
+
+
+@pytest.mark.parametrize("platform_id", ["linux-x64", "windows-x64"])
+def test_contract_libraries_reject_the_wrong_x64_architecture(
+    package_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    platform_id: str,
+) -> None:
+    root, _manifest = _make_bundle(package_root, platform_id)
+    if platform_id == "windows-x64":
+        _set_host(
+            monkeypatch,
+            system="win32",
+            machine="AMD64",
+            environment={"SystemRoot": r"C:\Windows"},
+        )
+    library = root / runtime_contract(platform_id).libraries[0].path
+    image = bytearray(library.read_bytes())
+    if platform_id == "linux-x64":
+        struct.pack_into("<H", image, 18, 183)
+        expected = "ELF64 x86-64"
+    else:
+        pe_offset = struct.unpack_from("<I", image, 0x3C)[0]
+        struct.pack_into("<H", image, pe_offset + 4, 0xAA64)
+        expected = r"PE32\+ AMD64"
+    library.write_bytes(image)
+
+    with pytest.raises(BundleError, match=expected):
+        resolve_runtime_bundle()
+
+
+def test_linux_contract_libraries_reject_big_endian_elf(
+    package_root: Path,
+) -> None:
+    root, _manifest = _make_bundle(package_root)
+    library = root / runtime_contract("linux-x64").libraries[0].path
+    image = bytearray(library.read_bytes())
+    image[5] = 2
+    library.write_bytes(image)
+
+    with pytest.raises(BundleError, match="little-endian"):
+        resolve_runtime_bundle()
+
+
+def test_manifest_members_cannot_escape_through_symlinks(
+    package_root: Path,
+    tmp_path: Path,
+) -> None:
+    root, manifest = _make_bundle(package_root)
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "license.txt").write_text("outside", encoding="utf-8")
-    link = root / "licenses" / "escape"
+    link = root / "licenses" / "audio2face-LICENSE.txt"
+    link.unlink()
     try:
-        link.symlink_to(outside, target_is_directory=True)
+        link.symlink_to(outside / "license.txt")
     except OSError:
         pytest.skip("symlinks are unavailable")
-    manifest["licenses"] = ["licenses/escape/license.txt"]
-    _rewrite_manifest(root, manifest)
-    with pytest.raises(BundleError, match="escapes"):
-        resolve_runtime_bundle(tmp_path, system="linux", machine="x86_64", environ={})
+    with pytest.raises(BundleError, match="filesystem alias"):
+        resolve_runtime_bundle()
 
 
-def test_model_companions_cannot_escape_through_symlinks(tmp_path: Path) -> None:
-    _root, _manifest = _make_bundle(tmp_path)
-    outside = tmp_path / "outside.onnx"
-    outside.write_bytes(b"outside")
-    network = tmp_path / "selected-models/audio2emotion/network.onnx"
-    network.unlink()
+@pytest.mark.parametrize("directory", ["bin", "lib", "licenses"])
+def test_runtime_rejects_extra_files(
+    package_root: Path,
+    directory: str,
+) -> None:
+    root, _manifest = _make_bundle(package_root)
+    (root / directory / "unexpected").write_bytes(b"not canonical")
+    with pytest.raises(BundleError, match=f"bundle {directory} must contain exactly"):
+        resolve_runtime_bundle()
+
+
+def test_runtime_rejects_extra_root_entries(package_root: Path) -> None:
+    root, _manifest = _make_bundle(package_root)
+    (root / "unexpected").mkdir()
+    with pytest.raises(BundleError, match="bundle root must contain exactly"):
+        resolve_runtime_bundle()
+
+
+def test_runtime_root_cannot_escape_through_a_symlink(
+    package_root: Path,
+    tmp_path: Path,
+) -> None:
+    outside_package = tmp_path / "outside-package"
+    outside_package.mkdir()
+    outside_runtime, _manifest = _make_bundle(outside_package)
     try:
-        network.symlink_to(outside)
+        (package_root / "runtime").symlink_to(
+            outside_runtime,
+            target_is_directory=True,
+        )
     except OSError:
         pytest.skip("symlinks are unavailable")
 
-    with pytest.raises(BundleError, match="Audio2Emotion.*outside|escapes"):
-        resolve_runtime_bundle(
-            tmp_path,
-            system="linux",
-            machine="x86_64",
-            environ={},
-            require_engine=False,
-        )
+    with pytest.raises(BundleError, match="filesystem alias"):
+        resolve_runtime_bundle()
 
 
-def test_runtime_root_cannot_escape_through_a_symlink(tmp_path: Path) -> None:
-    data_root = tmp_path / "data"
-    data_root.mkdir()
-    outside_root = tmp_path / "outside"
-    _make_bundle(outside_root)
+def test_runtime_rejects_an_aliased_package_ancestor(
+    package_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _make_bundle(package_root)
+    alias = tmp_path / "audio2face-alias"
     try:
-        (data_root / "runtime").symlink_to(
-            outside_root / "runtime", target_is_directory=True
-        )
+        alias.symlink_to(package_root, target_is_directory=True)
     except OSError:
         pytest.skip("symlinks are unavailable")
+    monkeypatch.setattr(runtime_bundle, "__file__", str(alias / "runtime_bundle.py"))
 
-    with pytest.raises(BundleError, match="runtime root escapes"):
-        resolve_runtime_bundle(
-            data_root,
-            system="linux",
-            machine="x86_64",
-            environ={},
-        )
+    with pytest.raises(BundleError, match="filesystem alias"):
+        resolve_runtime_bundle()
 
 
-def test_environment_values_must_be_strings(tmp_path: Path) -> None:
-    _make_bundle(tmp_path)
-    with pytest.raises(BundleError, match="keys and values must be strings"):
-        resolve_runtime_bundle(
-            tmp_path,
-            system="linux",
-            machine="x86_64",
-            environ={"PATH": 1},  # type: ignore[dict-item]
-        )
+def test_linux_child_environment_does_not_consume_ambient_values(
+    package_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _make_bundle(package_root)
+    _set_host(
+        monkeypatch,
+        system="linux",
+        machine="x86_64",
+        environment={"PATH": 1},
+    )
+    spec = resolve_runtime_bundle()
+    assert set(spec.env) == {"PATH", "LD_LIBRARY_PATH"}

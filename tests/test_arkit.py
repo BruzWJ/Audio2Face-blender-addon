@@ -33,6 +33,8 @@ def test_one_typed_adapter_reads_and_writes_sdk_parameters() -> None:
         assert f"SetExecutor{operation}" in SOURCE
     assert 'parameters.contains(binding.path)' in SOURCE
     assert 'parameter_value->at(binding.path)' in SOURCE
+    assert "value.is_number_float()" in SOURCE
+    assert "value.is_number()" not in SOURCE
 
 
 def test_output_keeps_model_order_and_named_eye_resolution() -> None:

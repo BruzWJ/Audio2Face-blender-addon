@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import importlib
-import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, call
@@ -67,10 +66,11 @@ def main() -> None:
         f"{sorted(missing_scene_property_names)}"
     )
 
-    data_root = runtime.get_controller().data_root(create=True)
-    isolated_extensions = os.environ.get("BLENDER_USER_EXTENSIONS")
-    if isolated_extensions:
-        data_root.relative_to(Path(isolated_extensions).resolve())
+    bundle = runtime.resolve_runtime_bundle()
+    package_directory = Path(package.__file__).resolve().parent
+    assert bundle.root == package_directory / "runtime"
+    assert bundle.executable.is_file()
+    assert bundle.trtexec.is_file()
     repo_directory, package_id = preferences._uninstall_target(bpy.context)
     assert package_id == "audio2face"
     assert Path(repo_directory).is_dir()
@@ -110,11 +110,11 @@ def main() -> None:
         dialog_operator,
         width=600,
     )
-    ready, reason = runtime.get_controller().runtime_availability()
-    assert not ready
-    assert "model folder" in reason or "GPU worker package" in reason
+    setup = runtime.get_controller().setup_snapshot()
+    assert setup.model_spec is None
+    assert "model folder" in setup.model_status.message
     assert package.__package__.startswith("bl_ext.")
-    print(f"Installed Audio2Face smoke test passed ({data_root})")
+    print(f"Installed Audio2Face smoke test passed ({bundle.platform})")
 
 
 if __name__ == "__main__":

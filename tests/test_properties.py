@@ -11,6 +11,7 @@ import pytest
 
 
 CHANNELS = tuple(f"modelChannel{index}" for index in range(52))
+MODEL_SIGNATURE = ("/models/audio2face/model.json", "/models/audio2emotion/model.json", 0)
 
 
 class _Collection(list[SimpleNamespace]):
@@ -56,6 +57,7 @@ def properties_module(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
 def _settings() -> SimpleNamespace:
     return SimpleNamespace(
         identity_index=0,
+        model_schema_signature="",
         model_identities=_Collection(lambda: SimpleNamespace(name="")),
         auto_audio2emotion=False,
         manual_emotions=_Collection(lambda: SimpleNamespace(name="", value=0.0)),
@@ -89,11 +91,18 @@ def _parameter_values(settings: SimpleNamespace) -> list[tuple[object, ...]]:
 
 def test_schema_materializes_model_controls(properties_module: ModuleType) -> None:
     settings = _settings()
-    settings.identity_index = 9
+    settings.identity_index = 1
 
-    assert properties_module.apply_model_schema(settings, _schema()) == CHANNELS
+    assert (
+        properties_module.apply_model_schema(
+            settings,
+            _schema(),
+            MODEL_SIGNATURE,
+        )
+        == CHANNELS
+    )
     assert [item.name for item in settings.model_identities] == ["Aki", "Mark"]
-    assert settings.identity_index == 0
+    assert settings.identity_index == 1
     assert _parameter_values(settings) == [
         ("/input_strength", "float", 0.9),
         ("/audio2emotion/max_emotions", "integer", 4),
@@ -104,13 +113,32 @@ def test_schema_materializes_model_controls(properties_module: ModuleType) -> No
     ]
 
 
-def test_reload_preserves_matching_values_and_serializes_exact_schema(
+def test_reload_preserves_values_only_for_the_exact_same_schema(
     properties_module: ModuleType,
 ) -> None:
     settings = _settings()
-    properties_module.apply_model_schema(settings, _schema())
+    properties_module.apply_model_schema(settings, _schema(), MODEL_SIGNATURE)
     settings.model_parameters[0].float_value = 1.7
     settings.model_parameters[1].int_value = 2
+    settings.manual_emotions[1].value = 0.82
+
+    properties_module.apply_model_schema(settings, _schema(), MODEL_SIGNATURE)
+    assert _parameter_values(settings) == [
+        ("/input_strength", "float", 1.7),
+        ("/audio2emotion/max_emotions", "integer", 2),
+    ]
+    assert [(item.name, item.value) for item in settings.manual_emotions] == [
+        ("Neutral", 0.5),
+        ("Joy", 0.82),
+    ]
+
+
+def test_changed_schema_resets_every_control_to_advertised_defaults(
+    properties_module: ModuleType,
+) -> None:
+    settings = _settings()
+    properties_module.apply_model_schema(settings, _schema(), MODEL_SIGNATURE)
+    settings.model_parameters[0].float_value = 1.7
     settings.manual_emotions[1].value = 0.82
 
     schema = _schema()
@@ -123,23 +151,46 @@ def test_reload_preserves_matching_values_and_serializes_exact_schema(
         {"name": "Joy", "default": 0.1},
         {"name": "Sadness", "default": 0.3},
     ]
-    properties_module.apply_model_schema(settings, schema)
+    properties_module.apply_model_schema(settings, schema, MODEL_SIGNATURE)
     settings.auto_audio2emotion = True
 
     assert _parameter_values(settings) == [
         ("/audio2emotion/max_emotions", "float", 3.5),
-        ("/input_strength", "float", 1.7),
+        ("/input_strength", "float", 0.5),
         ("/skin/skin_strength", "float", 1.1),
     ]
     assert properties_module.tuning_parameters(settings) == {
         "auto_audio2emotion": True,
-        "manual_emotions": {"Joy": 0.82, "Sadness": 0.3},
+        "manual_emotions": {"Joy": 0.1, "Sadness": 0.3},
         "parameters": {
             "/audio2emotion/max_emotions": 3.5,
-            "/input_strength": 1.7,
+            "/input_strength": 0.5,
             "/skin/skin_strength": 1.1,
         },
     }
+
+
+@pytest.mark.parametrize(
+    "corrupt",
+    (
+        lambda settings: settings.model_parameters.pop(),
+        lambda settings: setattr(settings.model_parameters[0], "path", "/renamed"),
+        lambda settings: setattr(settings.model_parameters[0], "kind", "integer"),
+        lambda settings: settings.manual_emotions.pop(),
+        lambda settings: setattr(settings.manual_emotions[0], "name", "Renamed"),
+        lambda settings: settings.model_identities.pop(),
+    ),
+)
+def test_exact_schema_signature_never_masks_corrupt_saved_collections(
+    properties_module: ModuleType,
+    corrupt: Callable[[SimpleNamespace], object],
+) -> None:
+    settings = _settings()
+    properties_module.apply_model_schema(settings, _schema(), MODEL_SIGNATURE)
+    corrupt(settings)
+
+    with pytest.raises(ValueError, match="saved|unsupported"):
+        properties_module.apply_model_schema(settings, _schema(), MODEL_SIGNATURE)
 
 
 @pytest.mark.parametrize(
@@ -148,6 +199,9 @@ def test_reload_preserves_matching_values_and_serializes_exact_schema(
         lambda schema: schema.update(extra=True),
         lambda schema: schema.update(channels=[]),
         lambda schema: schema.update(parameters={"/invalid": True}),
+        lambda schema: schema.update(
+            emotion_channels=[{"name": "Joy", "default": 0}]
+        ),
         lambda schema: schema["emotion_channels"].append(
             {"name": "Joy", "default": 0.1}
         ),
@@ -159,7 +213,7 @@ def test_invalid_schema_does_not_mutate_controls(
     mutate: Callable[[dict[str, object]], object],
 ) -> None:
     settings = _settings()
-    properties_module.apply_model_schema(settings, _schema())
+    properties_module.apply_model_schema(settings, _schema(), MODEL_SIGNATURE)
     before = copy.deepcopy(
         (_parameter_values(settings), [(item.name, item.value) for item in settings.manual_emotions])
     )
@@ -167,9 +221,48 @@ def test_invalid_schema_does_not_mutate_controls(
     mutate(schema)
 
     with pytest.raises(ValueError):
-        properties_module.apply_model_schema(settings, schema)
+        properties_module.apply_model_schema(settings, schema, MODEL_SIGNATURE)
 
     assert (
         _parameter_values(settings),
         [(item.name, item.value) for item in settings.manual_emotions],
     ) == before
+
+
+def test_schema_rejects_invalid_identity_instead_of_remapping_it(
+    properties_module: ModuleType,
+) -> None:
+    settings = _settings()
+    settings.identity_index = 9
+
+    with pytest.raises(ValueError, match="selected identity"):
+        properties_module.apply_model_schema(settings, _schema(), MODEL_SIGNATURE)
+
+    assert settings.model_identities == []
+
+
+def test_schema_rejects_duplicate_identities(
+    properties_module: ModuleType,
+) -> None:
+    schema = _schema()
+    schema["identities"] = ["Aki", "Aki"]
+    with pytest.raises(ValueError):
+        properties_module.apply_model_schema(_settings(), schema, MODEL_SIGNATURE)
+
+
+def test_model_parameter_identifiers_are_opaque_and_model_defined(
+    properties_module: ModuleType,
+) -> None:
+    settings = _settings()
+    schema = _schema()
+    schema["parameters"] = {
+        "SDK parameter with spaces": 0.5,
+        "/future/nested/Parameter": 3,
+    }
+
+    properties_module.apply_model_schema(settings, schema, MODEL_SIGNATURE)
+
+    assert _parameter_values(settings) == [
+        ("SDK parameter with spaces", "float", 0.5),
+        ("/future/nested/Parameter", "integer", 3),
+    ]
