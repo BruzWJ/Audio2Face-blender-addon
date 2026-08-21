@@ -73,7 +73,7 @@ class A2FAddonPreferences(bpy.types.AddonPreferences):
         setup = layout.box()
         setup.label(text="GPU Worker & Models", icon="PREFERENCES")
         setup.label(
-            text="Setup installs the native worker and optimizes both selected models.",
+            text="Setup installs this OS's worker and optimizes both selected models.",
             icon="INFO",
         )
         setup.label(text="The native worker path is managed automatically.")

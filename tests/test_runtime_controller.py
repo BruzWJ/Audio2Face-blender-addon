@@ -211,12 +211,17 @@ def test_install_eligibility_reports_the_release_artifact_blocker(
     monkeypatch.setattr(
         controller,
         "install_availability",
-        lambda: (False, "this release has no verified GPU worker package"),
+        lambda: (
+            False,
+            "this add-on release has not published its linux-x64 worker asset; "
+            "the host was not rejected",
+        ),
     )
 
     assert controller.install_eligibility() == (
         False,
-        "this release has no verified GPU worker package",
+        "this add-on release has not published its linux-x64 worker asset; "
+        "the host was not rejected",
     )
 
 
@@ -273,6 +278,19 @@ def test_model_availability_explains_a_missing_selection(
         False,
         "select the complete downloaded Audio2Face model folder in Add-on Preferences",
     )
+
+
+def test_install_availability_reports_unpublished_asset_not_host_rejection(
+    runtime_module: tuple[ModuleType, ModuleType],
+) -> None:
+    runtime, _bpy = runtime_module
+
+    available, reason = runtime.RuntimeController().install_availability()
+
+    assert available is False
+    assert "add-on release has not published" in reason
+    assert "worker asset" in reason
+    assert "host was not rejected" in reason
 
 
 def test_install_eligibility_requires_online_access_and_license_acceptance(

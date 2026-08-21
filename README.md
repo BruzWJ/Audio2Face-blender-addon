@@ -15,10 +15,15 @@ Actions, F-curves, or baked animation.
 
 - Blender 5.2.x on Linux x64 or Windows x64
 - A supported NVIDIA GPU and display driver
-- Blender Online Access while downloading the native worker package
+- Blender Online Access while downloading the OS-specific worker package
 - Complete Audio2Face-3D v3.0 and Audio2Emotion v3.0 Hugging Face repository
   roots on a writable local filesystem
 - Space in each selected root for its GPU-specific `network.trt` engine
+
+The user does not install a CUDA Toolkit, TensorRT, NIM, Docker, or a separate
+service. The downloaded worker archive carries the required CUDA/TensorRT
+user-mode libraries beside the worker; only the compatible NVIDIA display
+driver remains on the host.
 
 NVIDIA publishes the Audio2Face-3D SDK source and the Audio2Face and
 Audio2Emotion model inputs on Hugging Face. It does not publish a ready-to-run
@@ -53,10 +58,10 @@ root must contain the repository's top-level `model.json`; the add-on derives
 that exact path and performs no recursive search or fallback. It does not sign
 in to Hugging Face, download, copy, relocate, or delete model files.
 
-The setup action downloads the catalog-pinned native worker package for the
-current OS and architecture. That add-on-owned package contains the worker,
-runtime libraries, TensorRT engine builder, licenses, and notices, but no
-models. Setup validates `model.json`, `network.onnx`, and `trt_info.json` in
+The setup action resolves the current OS and architecture, then downloads the
+catalog-pinned worker archive for that platform. That add-on-owned package
+contains the worker, runtime libraries, TensorRT engine builder, licenses, and
+notices, but no models. Setup validates `model.json`, `network.onnx`, and `trt_info.json` in
 each selected root, rejects unresolved model references and Git LFS pointer
 files, then runs the bundled `trtexec` on CUDA device 0. It atomically creates
 or replaces `<selected-root>/network.trt`; both roots must therefore be
@@ -64,12 +69,20 @@ writable. The 3D View sidebar only reports readiness and directs setup to
 Add-on Preferences.
 
 The checked-in [`runtime_catalog.json`](audio2face/runtime_catalog.json) has no
-published worker packages. This is therefore a development package:
-**Install Worker & Optimize Models** remains disabled and managed GPU inference
-is not installable from it. Installation becomes available only after release
-maintainers publish reviewed Linux x64 and Windows x64 archives with immutable
-HTTPS URLs, exact sizes, and SHA-256 digests. No URL, checksum, native payload,
-or model location is inferred.
+published worker records. A ZIP built directly from this source tree is
+therefore a UI/development package, not a production inference package. Its
+diagnostic says the platform asset has not been published and explicitly does
+not treat that as a host rejection. A production release pins immutable HTTPS
+URLs, exact sizes, and SHA-256 digests for both platform archives. No system
+installation, executable, or model location is inferred.
+
+Release workers must be built in clean Windows and Linux CI from pinned NVIDIA
+sources and binary archives, never from a developer workstation's installed
+GPU development stack. NVIDIA documents this application-local deployment
+model for the [CUDA runtime and
+libraries](https://docs.nvidia.com/cuda/archive/12.9.0/cuda-c-best-practices-guide/index.html#cuda-runtime-and-libraries)
+and publishes [per-component CUDA archives for package maintainers and
+CI](https://docs.nvidia.com/cuda/archive/12.9.1/cuda-installation-guide-linux/index.html#tarball-and-zip-archive-deliverables).
 
 The top of Add-on Preferences includes the same right-aligned **Uninstall**
 action used for Blender 5.2 Legacy (User) add-ons. It opens Blender's two-line
@@ -84,7 +97,7 @@ files, meshes, and shared NVIDIA driver caches are likewise not removed.
 
 ## Workflow
 
-1. Install and enable the extension, then complete **Runtime setup** in its
+1. Install and enable the production extension, then complete **Runtime setup** in its
    Add-on Preferences.
 2. In the Audio2Face sidebar, choose **Selected WAV** or **Stream**. The
    **Audio Playback** controls appear immediately below this mode selector.

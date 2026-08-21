@@ -57,8 +57,8 @@ class RuntimeCatalog:
             return self.artifacts[platform]
         except KeyError as exc:
             raise RuntimeCatalogError(
-                "this Audio2Face add-on release does not include a verified "
-                f"GPU worker package for {platform}"
+                f"this add-on release has not published its {platform} worker asset; "
+                "the host was not rejected"
             ) from exc
 
 

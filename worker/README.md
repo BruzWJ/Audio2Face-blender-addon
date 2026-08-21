@@ -11,6 +11,14 @@ it does not publish this Blender worker. Release maintainers build and publish
 the worker and its native dependencies as separate Windows x64 and Linux x64
 packages for this add-on.
 
+Production archives must be built only in clean platform CI. The jobs fetch the
+pinned SDK source, NVIDIA's checksummed CUDA 12.9 component archives, the
+matching TensorRT 10.13 GA package, and the exact TensorRT source revision used
+for `trtexec`. They do not inspect or consume a GPU development stack installed
+on a developer machine. NVIDIA publishes the component manifest specifically
+for [package maintainers and CI/CD
+systems](https://docs.nvidia.com/cuda/archive/12.9.1/cuda-installation-guide-linux/index.html#tarball-and-zip-archive-deliverables).
+
 ## Development build
 
 The worker has one SDK source input: a pinned NVIDIA Audio2Face-3D-SDK 1.0.0
@@ -27,7 +35,8 @@ CMake verifies `audio2x-sdk/VERSION.md`, adds that source tree directly, and
 links `audio2x-sdk::audio2x`. The SDK does not publish an installed CMake
 package, so the project has no SDK finder, include/library override, binary SDK
 path, or SDK environment variable. Building requires the CUDA and TensorRT
-development environment required by the pinned SDK.
+development inputs required by the pinned SDK. A local development build may
+supply them explicitly; it is not the source of a publishable runtime archive.
 
 ## Release runtime artifact
 
@@ -94,7 +103,8 @@ redistribute their licenses. See
 The checked-in catalog contains no platform records. The current extension ZIP
 is therefore a development package: install remains disabled and GPU inference
 is unavailable until reviewed Windows x64 and Linux x64 archives and their
-measured records are published.
+measured records are published. The diagnostic calls this an unpublished
+release asset; it does not reject the detected host or GPU.
 
 ## Runtime contract
 

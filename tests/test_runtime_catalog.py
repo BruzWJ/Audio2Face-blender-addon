@@ -41,6 +41,7 @@ def test_catalog_validates_pinned_https_artifact_and_release() -> None:
     assert artifact.size == 1024
     assert artifact.unpacked_size == 4096
 
+
 @pytest.mark.parametrize(
     ("overrides", "match"),
     [
@@ -88,9 +89,12 @@ def test_catalog_rejects_invalid_top_level_contract(mutation: object, match: str
         validate_runtime_catalog(document)
 
 
-def test_catalog_missing_platform_fails_closed() -> None:
+def test_catalog_missing_platform_reports_unpublished_asset_not_host_rejection() -> None:
     catalog = validate_runtime_catalog(_catalog_document())
-    with pytest.raises(RuntimeCatalogError, match="verified GPU worker package"):
+    with pytest.raises(
+        RuntimeCatalogError,
+        match="release has not published.*windows-x64 worker asset.*host was not rejected",
+    ):
         catalog.artifact_for("windows-x64")
 
 

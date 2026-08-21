@@ -117,6 +117,22 @@ required CUDA/TensorRT user-mode libraries, a project-built `trtexec`, licenses,
 and notices. A worker package contains no model files or serialized TensorRT
 engines.
 
+Those two packages follow NVIDIA's application-local deployment pattern. A
+clean release job downloads the pinned Audio2Face SDK source, the exact CUDA
+12.9 component archives, the matching TensorRT 10.13 GA archive, and the
+matching TensorRT open-source tree. It builds the worker and `trtexec` without
+consulting any workstation or runner CUDA installation, then stages only the
+reviewed runtime dependency closure. CUDA's compiler, headers, import/static
+libraries, driver stubs, and the TensorRT development tree are build inputs;
+they are not shipped. The NVIDIA kernel/display driver is the one required
+host component.
+
+`trtexec` is built from the matching TensorRT source rather than copied from a
+preinstalled SDK. This preserves the model-defined `trt_info.json` command
+contract used by NVIDIA's Audio2Face SDK without inventing a second option
+schema. TensorRT engines are generated later on the user's GPU because a
+serialized engine is not a generally portable model artifact.
+
 Each published platform record contains an immutable HTTPS URL, exact
 compressed and unpacked sizes, and a SHA-256 digest. **Install Worker & Optimize
 Models**:
@@ -127,9 +143,9 @@ Models**:
    path resolved as a canonical relative, non-empty regular file confined to
    that root; Git LFS pointers are rejected;
 2. takes an OS-held lock shared by Blender processes;
-3. downloads the one platform worker archive to temporary storage;
+3. downloads only the catalog record selected for the detected platform;
 4. requires the final URL to remain credential-free HTTPS and verifies its
-   byte count and digest;
+   exact byte count and SHA-256 digest;
 5. extracts canonical paths under bounded member and total-size limits;
 6. validates `bundle.json`, x86-64 executables, runtime libraries, licenses,
    and notices;
@@ -169,7 +185,9 @@ The checked-in catalog contains no artifacts, so the current add-on ZIP is a
 development package. Its interface can be installed and tested, but managed
 GPU inference installation remains disabled until release maintainers publish
 license-reviewed Linux x64 and Windows x64 archives and enter their measured
-records. Release validation must exercise the supported model pair and
+records. The missing-record diagnostic identifies an unpublished release
+asset and explicitly does not reject the detected host. Release validation
+must exercise the supported model pair and
 confirm that Audio2Emotion's post-processed vector order agrees with
 Audio2Face's emotion order; SDK 1.0.0 reports the vector width but does not
 expose names for those output positions.
