@@ -1,110 +1,131 @@
-# Audio2Face worker
+# Audio2Face native runtime
 
-This directory builds the native GPU child used by the Blender 5.2 extension.
-It runs Audio2Face-3D v3.0 and Audio2Emotion v3.0 on CUDA device 0 and emits
-model-described ARKit coefficient frames. End users do not build,
-locate, configure, or host the executable. Audio2Face Add-on Preferences
-installs the native runtime separately from the user-selected models.
+This directory builds the native GPU child bundled in the Audio2Face Blender
+5.2 extension. It runs Audio2Face-3D v3.0 and Audio2Emotion v3.0 on CUDA device
+0 and emits model-described ARKit coefficient frames. End users do not build,
+install, locate, configure, or host this executable or any of its runtime
+libraries.
 
-NVIDIA publishes the Audio2Face-3D SDK source and the ONNX-based model inputs;
-it does not publish this Blender worker. Release maintainers build and publish
-the worker and its native dependencies as separate Windows x64 and Linux x64
-packages for this add-on.
+Each release has exactly two complete extension ZIPs:
 
-Production archives must be built only in clean platform CI. The jobs fetch the
-pinned SDK source, NVIDIA's checksummed CUDA 12.9 component archives, the
-matching TensorRT 10.13 GA package, and the exact TensorRT source revision used
-for `trtexec`. They do not inspect or consume a GPU development stack installed
-on a developer machine. NVIDIA publishes the component manifest specifically
-for [package maintainers and CI/CD
-systems](https://docs.nvidia.com/cuda/archive/12.9.1/cuda-installation-guide-linux/index.html#tarball-and-zip-archive-deliverables).
+- a Windows x64 ZIP containing PE executables and DLLs; and
+- a Linux x64 ZIP containing ELF executables and shared objects.
 
-## Development build
+The native formats are not interchangeable. The CUDA backend requires NVIDIA
+hardware and a compatible NVIDIA display driver. macOS and ARM are not
+supported.
 
-The worker has one SDK source input: a pinned NVIDIA Audio2Face-3D-SDK 1.0.0
-tree.
+## Canonical release build
+
+[`runtime-lock.json`](runtime-lock.json) is the complete release-input
+contract. It pins the Audio2Face-3D SDK revision, CUDA 12.9 component archives,
+TensorRT 10.13 binary archive and source revision, CMake distribution, Windows
+CRT package, Rocky Linux producer image and toolchain RPMs, and Rocky BaseOS
+GNU runtime RPMs. Artifact size and SHA-256 values are part of that lock.
+
+[`tools/build_runtime.py`](../tools/build_runtime.py) is the only supported
+native runtime build entry point. Run it natively on the target operating
+system: Windows builds `windows-x64`, and Linux builds `linux-x64`. A Windows
+release host provides the pinned Visual C++ toolset, Windows SDK, Git, and
+Python. A Linux release host provides Docker, Git, and Python; the compiler and
+system headers are installed from locked RPMs in the locked Rocky producer
+image. The script acquires every CUDA, TensorRT, CMake, SDK, Windows CRT, and
+Linux GNU runtime input from the lock into an isolated work directory.
+
+Windows is pinned to VCToolsVersion 14.43.34808, `cl` 19.43.34810, and Windows
+SDK 10.0.22621.0. Linux is pinned to the Rocky Linux 8.9 amd64 image digest,
+glibc 2.28, GCC Toolset 11.2.1, the old libstdc++ ABI, and generic x86-64 code
+generation. The Linux package carries the exact locked Rocky BaseOS
+`libstdc++.so.6` and `libgcc_s.so.1` bytes. Neither path claims bit-for-bit
+reproducible native binaries.
+
+The release build never discovers or consumes a host CUDA Toolkit, TensorRT
+SDK, Audio2Face installation, worker executable, or GPU development
+environment. It builds the worker and `trtexec` from the pinned sources, checks
+source revisions and native paths, stages only the reviewed runtime dependency
+closure, and records the required notices. CUDA compiler files, headers,
+import/static libraries, driver stubs, and TensorRT development sources are
+build inputs and are not shipped.
+
+Build on the native target host:
 
 ```sh
-cmake -S worker -B build/worker \
-  -DA2F_SDK_SOURCE_DIR=/absolute/path/to/Audio2Face-3D-SDK \
-  -DCMAKE_BUILD_TYPE=Release
-cmake --build build/worker --config Release
+# Windows x64
+python tools/build_runtime.py --platform windows-x64
+python tools/build_extension.py --blender "C:\Program Files\Blender Foundation\Blender 5.2\blender.exe" --platform windows-x64
+
+# Linux x64
+python3 tools/build_runtime.py --platform linux-x64
+python3 tools/build_extension.py --blender /absolute/path/to/blender --platform linux-x64
 ```
 
-CMake verifies `audio2x-sdk/VERSION.md`, adds that source tree directly, and
-links `audio2x-sdk::audio2x`. The SDK does not publish an installed CMake
-package, so the project has no SDK finder, include/library override, binary SDK
-path, or SDK environment variable. Building requires the CUDA and TensorRT
-development inputs required by the pinned SDK. A local development build may
-supply them explicitly; it is not the source of a publishable runtime archive.
+The runtime builder writes only `build/runtime/<platform>`, requires that
+handoff path not to exist before the build, and uses one temporary isolated
+working tree. The
+[`tools/build_extension.py`](../tools/build_extension.py) packaging step
+requires the exact handoff, validates Blender 5.2, embeds the runtime, and
+writes `dist/audio2face-0.1.0-<platform>.zip`. It does not invoke a compiler or
+inspect the build machine's GPU stack.
 
-## Release runtime artifact
+## Runtime layout
 
-Release maintainers enable strict runtime staging and provide reviewed,
-absolute inputs:
-
-```sh
-cmake -S worker -B build/worker-release \
-  -DA2F_SDK_SOURCE_DIR=/absolute/path/to/Audio2Face-3D-SDK \
-  -DA2F_WORKER_STAGE_RUNTIME=ON \
-  -DA2F_CUDA_RUNTIME_DIR=/absolute/path/to/reviewed/cuda-runtime \
-  -DA2F_TENSORRT_RUNTIME_DIR=/absolute/path/to/reviewed/tensorrt-runtime \
-  -DA2F_BUNDLE_TRTEXEC=/absolute/path/to/release-built/trtexec \
-  -DA2F_BUNDLE_TRTEXEC_SOURCE_LICENSE=/absolute/path/to/tensorrt-license \
-  -DA2F_BUNDLE_TRTEXEC_PROVENANCE=/absolute/path/to/trtexec-provenance \
-  -DCMAKE_BUILD_TYPE=Release
-cmake --build build/worker-release \
-  --target audio2face_runtime_archive --config Release
-```
-
-`A2F_BUNDLE_TRTEXEC` must be NVIDIA TensorRT `trtexec` built from the pinned
-source recorded by its license and provenance files. Release staging accepts
-only Linux x64 and Windows x64. It requires the reviewed CUDA/TensorRT runtime
-filenames and all native dependency license and notice inputs. It rejects
-symlinks, unsupported binary formats, unexpected layout, and empty files.
-
-Those platform checks are required: Windows packages carry PE executables and
-DLLs, while Linux packages carry ELF executables and shared objects. One
-format cannot be loaded in place of the other. The worker is CUDA-only, so
-this release design does not support macOS or ARM systems.
-
-The generated ZIP contains only the platform-specific managed runtime:
+Windows staging produces exactly:
 
 ```text
-runtime/<platform>/
+runtime/windows-x64/
   bundle.json
-  bin/audio2face_worker[.exe]
-  bin/trtexec[.exe]
-  lib/...
+  bin/audio2face_worker.exe
+  bin/trtexec.exe
+  bin/*.dll
   licenses/...
 ```
 
-`StageRuntime.cmake` creates and validates this canonical tree.
-`MeasureRuntimeArchive.cmake` verifies the ZIP member set and emits the exact
-`sha256`, `size`, and `unpacked_size` values. Release automation adds the
-immutable HTTPS URL and inserts that record under the matching platform key in
-[`audio2face/runtime_catalog.json`](../audio2face/runtime_catalog.json).
+Linux staging produces exactly:
 
-Each downloadable artifact is OS/architecture-specific and contains no model
-files, model licenses, or GPU-specific serialized engines. Users download the
-gated NVIDIA Audio2Face and Audio2Emotion model packages themselves and select
-each package's `model.json` in Add-on Preferences. The add-on remembers those
-locations and uses the bundled project-built `trtexec` to create each model's
-local `network.trt` for CUDA device 0. The NVIDIA display driver remains a
-system requirement and is not bundled.
+```text
+runtime/linux-x64/
+  bundle.json
+  bin/audio2face_worker
+  bin/trtexec
+  lib/*.so*
+  licenses/...
+```
 
-The Preferences UI links to the two gated model sources:
-[Audio2Face-3D v3.0](https://huggingface.co/nvidia/Audio2Face-3D-v3.0) and
-[Audio2Emotion v3.0](https://huggingface.co/nvidia/Audio2Emotion-v3.0).
-The add-on does not download these gated assets, embed credentials, or
-redistribute their licenses. See
-[`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md).
+Windows DLLs live beside the two executables so the application directory is
+the canonical package-local DLL source. They are not copied into a second
+directory. Linux executables use the one sibling `lib` directory.
 
-The checked-in catalog contains no platform records. The current extension ZIP
-is therefore a development package: install remains disabled and GPU inference
-is unavailable until reviewed Windows x64 and Linux x64 archives and their
-measured records are published. The diagnostic calls this an unpublished
-release asset; it does not reject the detected host or GPU.
+The platform extension builder copies the contents of that tree to the
+immutable package location:
+
+```text
+audio2face/runtime/
+  bundle.json
+  bin/...
+  lib/...  # Linux x64 only
+  licenses/...
+```
+
+`bundle.json` is the exact package-local resolver contract. The installed
+extension verifies that its platform matches the host, checks every packaged
+executable and DLL/shared object, confines every declared path to this tree,
+and launches the child with only the platform's package-local native directory
+in its search path. There is no separate runtime setup, runtime mutation,
+executable selector, or online request.
+
+The bundled runtime contains no Audio2Face or Audio2Emotion model files and no
+serialized TensorRT engines. Users obtain both complete model repositories
+from NVIDIA and select their exact roots in Audio2Face Add-on Preferences:
+
+- [Audio2Face-3D v3.0](https://huggingface.co/nvidia/Audio2Face-3D-v3.0)
+- [Audio2Emotion v3.0](https://huggingface.co/nvidia/Audio2Emotion-v3.0)
+
+Preferences validate the two top-level `model.json`, `network.onnx`, and
+`trt_info.json` inputs, then run the bundled `trtexec` to build a
+GPU-specific `network.trt` beside each `model.json`. Both candidates must
+succeed before the current engine pair is atomically replaced. Uninstalling
+the extension removes the bundled native runtime but does not delete either
+external model root or its generated engine.
 
 ## Runtime contract
 
@@ -128,5 +149,6 @@ releases its CUDA and model resources.
 
 The exact transport, settings, model schema, result, cancellation, and
 shutdown contracts are in [`docs/protocol.md`](../docs/protocol.md). Process
-ownership, managed installation, target delivery, and audio-clocked playback
-are in [`docs/architecture.md`](../docs/architecture.md).
+ownership, package-local runtime validation, target delivery, and
+audio-clocked playback are in
+[`docs/architecture.md`](../docs/architecture.md).
