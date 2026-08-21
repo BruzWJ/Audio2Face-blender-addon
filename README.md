@@ -245,9 +245,11 @@ ZIPs.
 Tagged Windows and Linux packages are built and published only by manually
 running the native [GitHub release workflow](docs/releasing.md) on the
 repository's default branch. The workflow compares that branch with the latest
-published release, derives `v<version>` from
-`audio2face/blender_manifest.toml`, creates the tag automatically, then freezes
-that commit for both native builds. The release jobs reclaim the standard
+published release, generates the current UTC calendar version as `YYYY.M.D`,
+tests and commits that version to `audio2face/blender_manifest.toml`, then
+freezes the resulting commit for both native builds. The matching `vYYYY.M.D`
+tag is created automatically immediately before the verified draft is
+published. The release jobs reclaim the standard
 `windows-latest` and `ubuntu-latest` GitHub-hosted images, use verified portable
 Blender 5.2.0 archives, and run the same two production build scripts shown
 above.

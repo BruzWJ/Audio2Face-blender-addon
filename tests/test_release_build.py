@@ -1360,7 +1360,7 @@ def test_extension_zip_uses_package_files_at_root(tmp_path: Path) -> None:
         )
 
 
-def test_release_workflow_derives_and_creates_manifest_tag() -> None:
+def test_release_workflow_stamps_dated_manifest_and_publishes_by_id() -> None:
     workflow = (
         REPOSITORY_ROOT / ".github" / "workflows" / "release.yml"
     ).read_text(encoding="utf-8")
@@ -1375,24 +1375,52 @@ def test_release_workflow_derives_and_creates_manifest_tag() -> None:
     assert "fetch-tags: true" in workflow
     assert workflow.count("persist-credentials: false") == 3
     assert "DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}" in workflow
-    assert "manual releases must use the protected default branch" in workflow
-    assert '"release_tag": f"v{version}"' in workflow
-    assert 'releases?per_page=100"' in workflow
+    assert "manual releases must use the repository default branch" in workflow
+    assert "release_day = datetime.now(UTC).date()" in workflow
+    assert 'version = f"{release_day.year}.{release_day.month}.{release_day.day}"' in workflow
+    assert 'release_tag = f"v{version}"' in workflow
+    assert '"release_tag": release_tag' in workflow
+    assert 'f\'version = "{version}"\'' in workflow
+    assert "manifest_path.write_text(stamped_manifest" in workflow
+    assert "source_sha: ${{ steps.stamp.outputs.source_sha }}" in workflow
+    assert "mutation($input: CreateCommitOnBranchInput!, $path: String!)" in workflow
+    assert "createCommitOnBranch(input: $input)" in workflow
+    assert '"expectedHeadOid": os.environ["DISPATCH_SHA"]' in workflow
+    assert '"headline": f"chore(release): {os.environ[\'RELEASE_TAG\']}"' in workflow
+    assert '"additions": [{' in workflow
+    assert "Dated manifest commit is not a direct child of dispatch source" in workflow
+    assert "Committed manifest bytes differ from the tested manifest" in workflow
+    assert "Default branch child does not contain the exact dated manifest" in workflow
+    assert workflow.count("gh api graphql --paginate --slurp") == 2
+    assert "targetCommitish" not in workflow
+    assert "target_commitish" in workflow
     assert "resolve pending draft releases" in workflow
+    assert "dated release {os.environ['RELEASE_TAG']} is already published" in workflow
     assert "latestRelease { tagName }" in workflow
-    assert 'git merge-base --is-ancestor "$previous_sha" "$SOURCE_SHA"' in workflow
-    assert 'git rev-list --count "$previous_sha..$SOURCE_SHA"' in workflow
+    assert 'git merge-base --is-ancestor "$previous_sha" "$DISPATCH_SHA"' in workflow
+    assert 'git rev-list --count "$previous_sha..$DISPATCH_SHA"' in workflow
     assert 'git show "$previous_sha:audio2face/blender_manifest.toml"' in workflow
-    assert "selected source manifest version must be newer" in workflow
+    assert "generated dated manifest version must be newer" in workflow
     assert 'ref(qualifiedName: $qualified)' in workflow
-    assert '--method POST "repos/$GITHUB_REPOSITORY/git/refs"' in workflow
-    assert '--raw-field sha="$SOURCE_SHA"' in workflow
-    assert '--notes-start-tag "$PREVIOUS_TAG"' in workflow
+    assert '--method POST "repos/$GITHUB_REPOSITORY/releases"' in workflow
+    assert '--raw-field tag_name="$RELEASE_TAG"' in workflow
+    assert '--raw-field target_commitish="$SOURCE_SHA"' in workflow
+    assert '--raw-field name="Audio2Face $RELEASE_TAG"' in workflow
+    assert "--field draft=true" in workflow
+    assert "--field prerelease=false" in workflow
+    assert "--field generate_release_notes=true" in workflow
+    assert "created draft has invalid release ID" in workflow
+    assert "gh release create" not in workflow
     assert "release_id: ${{ steps.release.outputs.release_id }}" in workflow
     assert workflow.count("RELEASE_ID: ${{ needs.prepare.outputs.release_id }}") == 3
     assert 'asset.get("digest") != identity["digest"]' in workflow
     assert workflow.count("ref: ${{ needs.prepare.outputs.source_sha }}") == 2
-    assert "PREPARED_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}" in workflow
-    assert 'if [[ "$object_type" != "commit" ]]' in workflow
-    assert "--draft=false" in workflow
-    assert "--latest" in workflow
+    assert workflow.count("https://uploads.github.com/repos/") == 2
+    assert "gh release upload" not in workflow
+    assert '--method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID"' in workflow
+    assert "--raw-field make_latest=true" in workflow
+    assert "published_sha" in workflow
+    assert "Published release was not marked Latest" in workflow
+    assert workflow.count('--method POST "repos/$GITHUB_REPOSITORY/git/refs"') == 1
+    assert '--raw-field ref="$qualified_tag"' in workflow
+    assert '--raw-field sha="$SOURCE_SHA"' in workflow

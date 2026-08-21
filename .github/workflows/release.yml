@@ -21,10 +21,9 @@ jobs:
       version: ${{ steps.identity.outputs.version }}
       windows_asset: ${{ steps.identity.outputs.windows_asset }}
       linux_asset: ${{ steps.identity.outputs.linux_asset }}
-      source_sha: ${{ steps.identity.outputs.source_sha }}
+      source_sha: ${{ steps.stamp.outputs.source_sha }}
       release_tag: ${{ steps.identity.outputs.release_tag }}
       release_id: ${{ steps.release.outputs.release_id }}
-      tag_ref_sha: ${{ steps.release.outputs.tag_ref_sha }}
     steps:
       - name: Check out selected branch commit
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -52,23 +51,27 @@ jobs:
           import re
           import subprocess
           import tomllib
+          from datetime import UTC, datetime
           from pathlib import Path
 
-          manifest = tomllib.loads(
-              Path("audio2face/blender_manifest.toml").read_text(encoding="utf-8")
-          )
+          manifest_path = Path("audio2face/blender_manifest.toml")
+          manifest_text = manifest_path.read_text(encoding="utf-8")
+          manifest = tomllib.loads(manifest_text)
           extension_id = manifest.get("id")
-          version = manifest.get("version")
           if extension_id != "audio2face":
               raise SystemExit(f"unexpected extension id: {extension_id!r}")
           stable_semver = r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
-          if not isinstance(version, str) or re.fullmatch(stable_semver, version) is None:
-              raise SystemExit(f"invalid extension version: {version!r}")
+          current_version = manifest.get("version")
+          if (
+              not isinstance(current_version, str)
+              or re.fullmatch(stable_semver, current_version) is None
+          ):
+              raise SystemExit(f"invalid source extension version: {current_version!r}")
           dispatch_ref = os.environ.get("DISPATCH_REF", "")
           expected_ref = f"refs/heads/{os.environ.get('DEFAULT_BRANCH', '')}"
           if dispatch_ref != expected_ref:
               raise SystemExit(
-                  "manual releases must use the protected default branch in the "
+                  "manual releases must use the repository default branch in the "
                   f"Run workflow selector; expected {expected_ref!r}, got {dispatch_ref!r}"
               )
           source_sha = subprocess.run(
@@ -84,12 +87,23 @@ jobs:
               raise SystemExit(
                   f"checked-out source differs from dispatch SHA: {source_sha!r} != {dispatch_sha!r}"
               )
+          release_day = datetime.now(UTC).date()
+          version = f"{release_day.year}.{release_day.month}.{release_day.day}"
+          release_tag = f"v{version}"
+          version_pattern = re.compile(r'^version = "[^"]+"$', re.MULTILINE)
+          if len(version_pattern.findall(manifest_text)) != 1:
+              raise SystemExit("manifest must contain exactly one canonical version assignment")
+          stamped_manifest = version_pattern.sub(
+              f'version = "{version}"',
+              manifest_text,
+          )
+          manifest_path.write_text(stamped_manifest, encoding="utf-8")
           outputs = {
               "version": version,
-              "release_tag": f"v{version}",
+              "release_tag": release_tag,
               "windows_asset": f"{extension_id}-{version}-windows-x64.zip",
               "linux_asset": f"{extension_id}-{version}-linux-x64.zip",
-              "source_sha": source_sha,
+              "dispatch_sha": source_sha,
           }
           with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as stream:
               for name, value in outputs.items():
@@ -97,18 +111,36 @@ jobs:
           PY
 
       - name: Compare selected source with latest release
-        id: baseline
         shell: bash
         env:
           CURRENT_VERSION: ${{ steps.identity.outputs.version }}
+          DISPATCH_SHA: ${{ steps.identity.outputs.dispatch_sha }}
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.identity.outputs.release_tag }}
-          SOURCE_SHA: ${{ steps.identity.outputs.source_sha }}
         run: |
           set -euo pipefail
           releases_json="$RUNNER_TEMP/releases.json"
-          gh api --paginate --slurp \
-            "repos/$GITHUB_REPOSITORY/releases?per_page=100" > "$releases_json"
+          repository_owner="${GITHUB_REPOSITORY%%/*}"
+          repository_name="${GITHUB_REPOSITORY#*/}"
+          # shellcheck disable=SC2016
+          gh api graphql --paginate --slurp \
+            -f owner="$repository_owner" \
+            -f name="$repository_name" \
+            -f query='query($owner: String!, $name: String!, $endCursor: String) {
+              repository(owner: $owner, name: $name) {
+                releases(
+                  first: 100
+                  after: $endCursor
+                  orderBy: {field: CREATED_AT, direction: DESC}
+                ) {
+                  nodes {
+                    tagName
+                    isDraft
+                  }
+                  pageInfo { hasNextPage endCursor }
+                }
+              }
+            }' > "$releases_json"
           RELEASES_JSON="$releases_json" python - <<'PY'
           import json
           import os
@@ -117,25 +149,38 @@ jobs:
           pages = json.loads(
               Path(os.environ["RELEASES_JSON"]).read_text(encoding="utf-8")
           )
-          if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
-              raise SystemExit("GitHub releases response is not a paginated array")
-          releases = [release for page in pages for release in page]
+          if not isinstance(pages, list) or any(not isinstance(page, dict) for page in pages):
+              raise SystemExit("GitHub releases response is not a paginated GraphQL array")
+          try:
+              releases = [
+                  release
+                  for page in pages
+                  for release in page["data"]["repository"]["releases"]["nodes"]
+              ]
+          except (KeyError, TypeError) as error:
+              raise SystemExit("GitHub releases response has an invalid GraphQL shape") from error
           if any(not isinstance(release, dict) for release in releases):
               raise SystemExit("GitHub releases response contains a non-object")
           pending = [
-              release.get("tag_name")
+              release.get("tagName")
               for release in releases
-              if release.get("draft") is True
-              and release.get("tag_name") != os.environ["RELEASE_TAG"]
+              if release.get("isDraft") is True
+              and release.get("tagName") != os.environ["RELEASE_TAG"]
           ]
           if pending:
               raise SystemExit(
                   "resolve pending draft releases before starting a new version: "
                   + ", ".join(repr(tag) for tag in pending)
               )
+          if any(
+              release.get("tagName") == os.environ["RELEASE_TAG"]
+              and release.get("isDraft") is False
+              for release in releases
+          ):
+              raise SystemExit(
+                  f"dated release {os.environ['RELEASE_TAG']} is already published"
+              )
           PY
-          repository_owner="${GITHUB_REPOSITORY%%/*}"
-          repository_name="${GITHUB_REPOSITORY#*/}"
           # shellcheck disable=SC2016
           previous_tag="$(
             gh api graphql \
@@ -154,11 +199,11 @@ jobs:
           if [[ -n "$previous_tag" ]]; then
             git check-ref-format "refs/tags/$previous_tag"
             previous_sha="$(git rev-parse --verify "refs/tags/$previous_tag^{commit}")"
-            if ! git merge-base --is-ancestor "$previous_sha" "$SOURCE_SHA"; then
-              echo "Latest release $previous_tag ($previous_sha) is not an ancestor of selected source $SOURCE_SHA." >&2
+            if ! git merge-base --is-ancestor "$previous_sha" "$DISPATCH_SHA"; then
+              echo "Latest release $previous_tag ($previous_sha) is not an ancestor of selected source $DISPATCH_SHA." >&2
               exit 1
             fi
-            commit_count="$(git rev-list --count "$previous_sha..$SOURCE_SHA")"
+            commit_count="$(git rev-list --count "$previous_sha..$DISPATCH_SHA")"
             if [[ ! "$commit_count" =~ ^[1-9][0-9]*$ ]]; then
               echo "Selected source has no commits after latest release $previous_tag." >&2
               exit 1
@@ -186,17 +231,15 @@ jobs:
           if previous.get("id") != "audio2face":
               raise SystemExit("latest release tag does not contain the Audio2Face manifest")
           previous_version = parse_version(previous.get("version"), "latest release manifest")
-          current_version = parse_version(os.environ["CURRENT_VERSION"], "selected source manifest")
+          current_version = parse_version(os.environ["CURRENT_VERSION"], "generated dated manifest")
           if current_version <= previous_version:
               raise SystemExit(
-                  "selected source manifest version must be newer than the latest release: "
+                  "generated dated manifest version must be newer than the latest release: "
                   f"{os.environ['CURRENT_VERSION']} <= {previous.get('version')}"
               )
           PY
             rm -f -- "$previous_manifest"
           fi
-
-          printf 'previous_tag=%s\n' "$previous_tag" >> "$GITHUB_OUTPUT"
 
       - name: Run source tests
         shell: bash
@@ -204,64 +247,266 @@ jobs:
           python -m pip install --disable-pip-version-check "pytest==7.2.1"
           python -m pytest -q
 
-      - name: Create or verify release tag and draft
-        id: release
+      - name: Commit dated manifest to selected branch
+        id: stamp
         shell: bash
         env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          DISPATCH_SHA: ${{ steps.identity.outputs.dispatch_sha }}
           GH_TOKEN: ${{ github.token }}
-          PREVIOUS_TAG: ${{ steps.baseline.outputs.previous_tag }}
           RELEASE_TAG: ${{ steps.identity.outputs.release_tag }}
-          SOURCE_SHA: ${{ steps.identity.outputs.source_sha }}
-          VERSION: ${{ steps.identity.outputs.version }}
         run: |
           set -euo pipefail
           repository_owner="${GITHUB_REPOSITORY%%/*}"
           repository_name="${GITHUB_REPOSITORY#*/}"
-          qualified_tag="refs/tags/$RELEASE_TAG"
+          qualified_branch="refs/heads/$DEFAULT_BRANCH"
 
-          query_tag() {
+          query_branch() {
             # shellcheck disable=SC2016
             gh api graphql \
               -f owner="$repository_owner" \
               -f name="$repository_name" \
-              -f qualified="$qualified_tag" \
+              -f qualified="$qualified_branch" \
               -f query='query($owner: String!, $name: String!, $qualified: String!) {
                 repository(owner: $owner, name: $name) {
-                  ref(qualifiedName: $qualified) {
-                    target { __typename oid }
+                  ref(qualifiedName: $qualified) { target { oid } }
+                }
+              }' \
+              --jq '.data.repository.ref.target.oid // ""'
+          }
+
+          branch_sha="$(query_branch)"
+          if [[ ! "$branch_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Default branch did not resolve to a canonical commit SHA: ${branch_sha:-missing}." >&2
+            exit 1
+          fi
+          manifest_path="audio2face/blender_manifest.toml"
+          if [[ "$branch_sha" != "$DISPATCH_SHA" ]]; then
+            resumed_json="$RUNNER_TEMP/resumed-manifest-commit.json"
+            gh api "repos/$GITHUB_REPOSITORY/commits/$branch_sha" > "$resumed_json"
+            RESUMED_JSON="$resumed_json" \
+            BRANCH_SHA="$branch_sha" \
+            STAMPED_BLOB_SHA="$(git hash-object "$manifest_path")" \
+            MANIFEST_PATH="$manifest_path" \
+            python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          commit = json.loads(
+              Path(os.environ["RESUMED_JSON"]).read_text(encoding="utf-8")
+          )
+          expected_message = f"chore(release): {os.environ['RELEASE_TAG']}"
+          parents = commit.get("parents")
+          files = commit.get("files")
+          if commit.get("sha") != os.environ["BRANCH_SHA"]:
+              raise SystemExit("Default branch query and resumed commit identity differ")
+          if (
+              not isinstance(parents, list)
+              or len(parents) != 1
+              or not isinstance(parents[0], dict)
+              or parents[0].get("sha") != os.environ["DISPATCH_SHA"]
+          ):
+              raise SystemExit("Default branch moved beyond the dispatch source")
+          if commit.get("commit", {}).get("message") != expected_message:
+              raise SystemExit("Default branch child is not this run's dated manifest commit")
+          if (
+              not isinstance(files, list)
+              or len(files) != 1
+              or not isinstance(files[0], dict)
+              or files[0].get("filename") != os.environ["MANIFEST_PATH"]
+              or files[0].get("sha") != os.environ["STAMPED_BLOB_SHA"]
+          ):
+              raise SystemExit("Default branch child does not contain the exact dated manifest")
+          PY
+            rm -f -- "$resumed_json"
+            source_sha="$branch_sha"
+          elif git diff --quiet -- "$manifest_path"; then
+            source_sha="$DISPATCH_SHA"
+          else
+            mapfile -t changed_paths < <(git diff --name-only)
+            if (( ${#changed_paths[@]} != 1 )) || [[ "${changed_paths[0]}" != "$manifest_path" ]]; then
+              echo "Dated release stamping may only change $manifest_path." >&2
+              printf 'Changed path: %s\n' "${changed_paths[@]}" >&2
+              exit 1
+            fi
+            request_json="$RUNNER_TEMP/create-manifest-commit.json"
+            response_json="$RUNNER_TEMP/create-manifest-commit-response.json"
+            stamped_blob_sha="$(git hash-object "$manifest_path")"
+            MANIFEST_PATH="$manifest_path" \
+            python - <<'PY' > "$request_json"
+          import base64
+          import json
+          import os
+          from pathlib import Path
+
+          manifest_path = Path(os.environ["MANIFEST_PATH"])
+          print(json.dumps({
+              "query": """
+                  mutation($input: CreateCommitOnBranchInput!, $path: String!) {
+                    createCommitOnBranch(input: $input) {
+                      commit {
+                        oid
+                        parents(first: 2) {
+                          totalCount
+                          nodes { oid }
+                        }
+                        file(path: $path) {
+                          path
+                          type
+                          oid
+                          object { __typename oid }
+                        }
+                      }
+                      ref {
+                        name
+                        prefix
+                        target { __typename oid }
+                      }
+                    }
                   }
+              """,
+              "variables": {
+                  "path": manifest_path.as_posix(),
+                  "input": {
+                      "branch": {
+                          "repositoryNameWithOwner": os.environ["GITHUB_REPOSITORY"],
+                          "branchName": os.environ["DEFAULT_BRANCH"],
+                      },
+                      "expectedHeadOid": os.environ["DISPATCH_SHA"],
+                      "message": {
+                          "headline": f"chore(release): {os.environ['RELEASE_TAG']}"
+                      },
+                      "fileChanges": {
+                          "additions": [{
+                              "path": manifest_path.as_posix(),
+                              "contents": base64.b64encode(
+                                  manifest_path.read_bytes()
+                              ).decode("ascii"),
+                          }]
+                      },
+                  }
+              },
+          }))
+          PY
+            gh api graphql --input "$request_json" > "$response_json"
+            source_sha="$(
+              RESPONSE_JSON="$response_json" \
+              STAMPED_BLOB_SHA="$stamped_blob_sha" \
+              MANIFEST_PATH="$manifest_path" \
+              python - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          response = json.loads(
+              Path(os.environ["RESPONSE_JSON"]).read_text(encoding="utf-8")
+          )
+          try:
+              payload = response["data"]["createCommitOnBranch"]
+              commit = payload["commit"]
+              updated_ref = payload["ref"]
+          except (KeyError, TypeError) as error:
+              raise SystemExit("Create commit response has an invalid GraphQL shape") from error
+          source_sha = commit.get("oid")
+          if not isinstance(source_sha, str) or re.fullmatch(r"[0-9a-f]{40}", source_sha) is None:
+              raise SystemExit(f"Create commit returned invalid SHA {source_sha!r}")
+          parent_connection = commit.get("parents", {})
+          parents = parent_connection.get("nodes")
+          if (
+              parent_connection.get("totalCount") != 1
+              or not isinstance(parents, list)
+              or len(parents) != 1
+              or not isinstance(parents[0], dict)
+              or parents[0].get("oid") != os.environ["DISPATCH_SHA"]
+          ):
+              raise SystemExit("Dated manifest commit is not a direct child of dispatch source")
+          committed_file = commit.get("file")
+          if (
+              not isinstance(committed_file, dict)
+              or committed_file.get("path") != os.environ["MANIFEST_PATH"]
+              or committed_file.get("type") != "blob"
+              or committed_file.get("oid") != os.environ["STAMPED_BLOB_SHA"]
+              or committed_file.get("object", {}).get("__typename") != "Blob"
+              or committed_file.get("object", {}).get("oid") != os.environ["STAMPED_BLOB_SHA"]
+          ):
+              raise SystemExit("Committed manifest bytes differ from the tested manifest")
+          if (
+              updated_ref.get("prefix") != "refs/heads/"
+              or updated_ref.get("name") != os.environ["DEFAULT_BRANCH"]
+              or updated_ref.get("target", {}).get("__typename") != "Commit"
+              or updated_ref.get("target", {}).get("oid") != source_sha
+          ):
+              raise SystemExit("Updated branch ref does not identify dated manifest commit")
+          print(source_sha, end="")
+          PY
+            )"
+            rm -f -- "$request_json" "$response_json"
+            branch_sha="$(query_branch)"
+            if [[ "$branch_sha" != "$source_sha" ]]; then
+              echo "Default branch does not identify dated manifest commit $source_sha; got ${branch_sha:-missing}." >&2
+              exit 1
+            fi
+          fi
+          printf 'source_sha=%s\n' "$source_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Create or verify dated draft release
+        id: release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.identity.outputs.release_tag }}
+          SOURCE_SHA: ${{ steps.stamp.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          repository_owner="${GITHUB_REPOSITORY%%/*}"
+          repository_name="${GITHUB_REPOSITORY#*/}"
+          # shellcheck disable=SC2016
+          tag_state="$(
+            gh api graphql \
+              -f owner="$repository_owner" \
+              -f name="$repository_name" \
+              -f qualified="refs/tags/$RELEASE_TAG" \
+              -f query='query($owner: String!, $name: String!, $qualified: String!) {
+                repository(owner: $owner, name: $name) {
+                  ref(qualifiedName: $qualified) { target { __typename oid } }
                 }
               }' \
               --jq '.data.repository.ref.target // {} |
                 if .oid == null then "" else [.__typename, .oid] | @tsv end'
-          }
-
-          tag_state="$(query_tag)"
-          if [[ -z "$tag_state" ]]; then
-            create_error="$RUNNER_TEMP/create-tag-error.txt"
-            if ! gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
-              --raw-field ref="$qualified_tag" \
-              --raw-field sha="$SOURCE_SHA" \
-              > /dev/null 2> "$create_error"; then
-              tag_state="$(query_tag)"
-              IFS=$'\t' read -r raced_type raced_sha <<< "$tag_state"
-              if [[ "$raced_type" != "Commit" || "$raced_sha" != "$SOURCE_SHA" ]]; then
-                cat "$create_error" >&2
-                exit 1
-              fi
+          )"
+          if [[ -n "$tag_state" ]]; then
+            IFS=$'\t' read -r tag_type tag_sha <<< "$tag_state"
+            if [[ "$tag_type" != "Commit" || "$tag_sha" != "$SOURCE_SHA" ]]; then
+              echo "Existing release tag must be a lightweight tag at $SOURCE_SHA; got $tag_type $tag_sha." >&2
+              exit 1
             fi
-            rm -f -- "$create_error"
           fi
-
-          tag_state="$(query_tag)"
-          IFS=$'\t' read -r tag_type tag_ref_sha <<< "$tag_state"
-          if [[ "$tag_type" != "Commit" || "$tag_ref_sha" != "$SOURCE_SHA" ]]; then
-            echo "Release tag $RELEASE_TAG must be a lightweight tag at $SOURCE_SHA; got $tag_type $tag_ref_sha." >&2
-            exit 1
-          fi
-
-          resolve_release_id() {
-            RELEASES_JSON="$1" python - <<'PY'
+          releases_json="$RUNNER_TEMP/releases.json"
+          # shellcheck disable=SC2016
+          gh api graphql --paginate --slurp \
+            -f owner="$repository_owner" \
+            -f name="$repository_name" \
+            -f query='query($owner: String!, $name: String!, $endCursor: String) {
+              repository(owner: $owner, name: $name) {
+                releases(
+                  first: 100
+                  after: $endCursor
+                  orderBy: {field: CREATED_AT, direction: DESC}
+                ) {
+                  nodes {
+                    databaseId
+                    tagName
+                    name
+                    isDraft
+                    isPrerelease
+                  }
+                  pageInfo { hasNextPage endCursor }
+                }
+              }
+            }' > "$releases_json"
+          release_id="$(RELEASES_JSON="$releases_json" python - <<'PY'
           import json
           import os
           from pathlib import Path
@@ -269,16 +514,23 @@ jobs:
           pages = json.loads(
               Path(os.environ["RELEASES_JSON"]).read_text(encoding="utf-8")
           )
-          if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
-              raise SystemExit("GitHub releases response is not a paginated array")
-          releases = [release for page in pages for release in page]
+          if not isinstance(pages, list) or any(not isinstance(page, dict) for page in pages):
+              raise SystemExit("GitHub releases response is not a paginated GraphQL array")
+          try:
+              releases = [
+                  release
+                  for page in pages
+                  for release in page["data"]["repository"]["releases"]["nodes"]
+              ]
+          except (KeyError, TypeError) as error:
+              raise SystemExit("GitHub releases response has an invalid GraphQL shape") from error
           if any(not isinstance(release, dict) for release in releases):
               raise SystemExit("GitHub releases response contains a non-object")
           pending = [
-              release.get("tag_name")
+              release.get("tagName")
               for release in releases
-              if release.get("draft") is True
-              and release.get("tag_name") != os.environ["RELEASE_TAG"]
+              if release.get("isDraft") is True
+              and release.get("tagName") != os.environ["RELEASE_TAG"]
           ]
           if pending:
               raise SystemExit(
@@ -288,25 +540,25 @@ jobs:
           matches = [
               release
               for release in releases
-              if release.get("tag_name") == os.environ["RELEASE_TAG"]
+              if release.get("tagName") == os.environ["RELEASE_TAG"]
           ]
           if matches:
               if len(matches) != 1:
                   raise SystemExit("generated tag resolves to multiple releases")
               release = matches[0]
-              if release.get("draft") is not True:
+              if release.get("isDraft") is not True:
                   raise SystemExit(
                       f"release {os.environ['RELEASE_TAG']} already exists and is not a draft"
                   )
-              if release.get("prerelease") is not False:
+              if release.get("isPrerelease") is not False:
                   raise SystemExit("existing draft must not be a prerelease")
-              expected_name = f"Audio2Face {os.environ['VERSION']}"
+              expected_name = f"Audio2Face {os.environ['RELEASE_TAG']}"
               if release.get("name") != expected_name:
                   raise SystemExit(
                       f"existing draft name must be {expected_name!r}; "
                       f"got {release.get('name')!r}"
                   )
-              release_id = release.get("id")
+              release_id = release.get("databaseId")
               if (
                   isinstance(release_id, bool)
                   or not isinstance(release_id, int)
@@ -315,36 +567,57 @@ jobs:
                   raise SystemExit(f"existing draft has invalid release ID {release_id!r}")
               print(release_id, end="")
           PY
-          }
-
-          releases_json="$RUNNER_TEMP/releases.json"
-          gh api --paginate --slurp \
-            "repos/$GITHUB_REPOSITORY/releases?per_page=100" > "$releases_json"
-          release_id="$(resolve_release_id "$releases_json")"
-          if [[ -z "$release_id" ]]; then
-            create=(
-              gh release create "$RELEASE_TAG"
-              --repo "$GITHUB_REPOSITORY"
-              --draft
-              --generate-notes
-              --title "Audio2Face $VERSION"
-              --verify-tag
-            )
-            if [[ -n "$PREVIOUS_TAG" ]]; then
-              create+=(--notes-start-tag "$PREVIOUS_TAG")
-            fi
-            "${create[@]}"
-            gh api --paginate --slurp \
-              "repos/$GITHUB_REPOSITORY/releases?per_page=100" > "$releases_json"
-            release_id="$(resolve_release_id "$releases_json")"
-            if [[ -z "$release_id" ]]; then
-              echo "Created draft release cannot be resolved by its generated tag." >&2
+          )"
+          if [[ -n "$release_id" ]]; then
+            existing="$(
+              gh api "repos/$GITHUB_REPOSITORY/releases/$release_id" \
+                --jq '[.id, .tag_name, .target_commitish, .name, .draft, .prerelease] | @tsv'
+            )"
+            IFS=$'\t' read -r existing_id existing_tag existing_target existing_name draft prerelease \
+              <<< "$existing"
+            if [[ "$existing_id" != "$release_id" || "$existing_tag" != "$RELEASE_TAG" ||
+                  "$existing_target" != "$SOURCE_SHA" ||
+                  "$existing_name" != "Audio2Face $RELEASE_TAG" || "$draft" != "true" ||
+                  "$prerelease" != "false" ]]; then
+              echo "Existing draft REST identity does not match the dated release." >&2
               exit 1
             fi
+          else
+            created_json="$RUNNER_TEMP/created-release.json"
+            gh api --method POST "repos/$GITHUB_REPOSITORY/releases" \
+              --raw-field tag_name="$RELEASE_TAG" \
+              --raw-field target_commitish="$SOURCE_SHA" \
+              --raw-field name="Audio2Face $RELEASE_TAG" \
+              --field draft=true \
+              --field prerelease=false \
+              --field generate_release_notes=true > "$created_json"
+            release_id="$(CREATED_JSON="$created_json" python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          release = json.loads(
+              Path(os.environ["CREATED_JSON"]).read_text(encoding="utf-8")
+          )
+          expected_name = f"Audio2Face {os.environ['RELEASE_TAG']}"
+          if release.get("tag_name") != os.environ["RELEASE_TAG"]:
+              raise SystemExit("created draft returned an unexpected tag")
+          if release.get("target_commitish") != os.environ["SOURCE_SHA"]:
+              raise SystemExit("created draft returned an unexpected target commit")
+          if release.get("name") != expected_name:
+              raise SystemExit(f"created draft returned an unexpected name: {release.get('name')!r}")
+          if release.get("draft") is not True or release.get("prerelease") is not False:
+              raise SystemExit("created release is not the expected full draft")
+          release_id = release.get("id")
+          if isinstance(release_id, bool) or not isinstance(release_id, int) or release_id <= 0:
+              raise SystemExit(f"created draft has invalid release ID {release_id!r}")
+          print(release_id, end="")
+          PY
+            )"
+            rm -f -- "$created_json"
           fi
           rm -f -- "$releases_json"
           printf 'release_id=%s\n' "$release_id" >> "$GITHUB_OUTPUT"
-          printf 'tag_ref_sha=%s\n' "$tag_ref_sha" >> "$GITHUB_OUTPUT"
 
   build_windows:
     name: Build Windows x64 extension
@@ -508,15 +781,10 @@ jobs:
           $release = $releaseJson | ConvertFrom-Json
           if ([string]$release.id -cne $env:RELEASE_ID -or
               $release.tag_name -cne $env:RELEASE_TAG -or
+              $release.target_commitish -cne $env:SOURCE_SHA -or
               $release.draft -cne $true -or
               $release.prerelease -cne $false) {
             throw "Prepared draft release identity changed before Windows upload"
-          }
-          $tagJson = gh api "repos/$env:GITHUB_REPOSITORY/git/ref/tags/$env:RELEASE_TAG"
-          if ($LASTEXITCODE -ne 0) { throw "Cannot resolve prepared release tag $env:RELEASE_TAG" }
-          $tag = $tagJson | ConvertFrom-Json
-          if ($tag.object.type -cne "commit" -or $tag.object.sha -cne $env:SOURCE_SHA) {
-            throw "Prepared release tag changed before Windows upload"
           }
           $asset = Join-Path $env:GITHUB_WORKSPACE "dist\$env:ASSET_NAME"
           if (-not (Test-Path -LiteralPath $asset -PathType Leaf)) {
@@ -527,8 +795,37 @@ jobs:
             throw "GitHub release asset must be non-empty and smaller than 2 GiB; got $size bytes"
           }
           $sha256 = (Get-FileHash -LiteralPath $asset -Algorithm SHA256).Hash.ToLowerInvariant()
-          gh release upload $env:RELEASE_TAG $asset --repo $env:GITHUB_REPOSITORY --clobber
-          if ($LASTEXITCODE -ne 0) { throw "GitHub release upload failed with exit code $LASTEXITCODE" }
+          $assetsJson = gh api "repos/$env:GITHUB_REPOSITORY/releases/$env:RELEASE_ID/assets?per_page=100"
+          if ($LASTEXITCODE -ne 0) { throw "Cannot list draft assets for release $env:RELEASE_ID" }
+          $existing = @($assetsJson | ConvertFrom-Json | Where-Object { $_.name -ceq $env:ASSET_NAME })
+          if ($existing.Count -gt 1) {
+            throw "Draft contains duplicate assets named $env:ASSET_NAME"
+          }
+          if ($existing.Count -eq 1) {
+            gh api --method DELETE "repos/$env:GITHUB_REPOSITORY/releases/assets/$($existing[0].id)" | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "Cannot replace existing draft asset $env:ASSET_NAME" }
+          }
+          $encodedName = [Uri]::EscapeDataString($env:ASSET_NAME)
+          $uploadUrl = "https://uploads.github.com/repos/$env:GITHUB_REPOSITORY/releases/$env:RELEASE_ID/assets?name=$encodedName"
+          $headers = @{
+            Accept = "application/vnd.github+json"
+            Authorization = "Bearer $env:GH_TOKEN"
+            "X-GitHub-Api-Version" = "2022-11-28"
+          }
+          $response = Invoke-WebRequest `
+            -UseBasicParsing `
+            -Method Post `
+            -Uri $uploadUrl `
+            -Headers $headers `
+            -ContentType "application/octet-stream" `
+            -InFile $asset
+          $uploaded = $response.Content | ConvertFrom-Json
+          if ($uploaded.name -cne $env:ASSET_NAME -or
+              $uploaded.state -cne "uploaded" -or
+              [long]$uploaded.size -ne $size -or
+              $uploaded.digest -cne "sha256:$sha256") {
+            throw "GitHub returned an unexpected Windows asset identity"
+          }
           "sha256=$sha256" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "size=$size" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
@@ -667,21 +964,13 @@ jobs:
           set -euo pipefail
           release="$(
             gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
-              --jq '[.id, .tag_name, .draft, .prerelease] | @tsv'
+              --jq '[.id, .tag_name, .target_commitish, .draft, .prerelease] | @tsv'
           )"
-          IFS=$'\t' read -r current_release_id current_tag draft prerelease <<< "$release"
+          IFS=$'\t' read -r current_release_id current_tag release_target draft prerelease <<< "$release"
           if [[ "$current_release_id" != "$RELEASE_ID" || "$current_tag" != "$RELEASE_TAG" ||
-                "$draft" != "true" || "$prerelease" != "false" ]]; then
+                "$release_target" != "$SOURCE_SHA" || "$draft" != "true" ||
+                "$prerelease" != "false" ]]; then
             echo "Prepared draft release identity changed before Linux upload." >&2
-            exit 1
-          fi
-          tag="$(
-            gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" \
-              --jq '.object | [.type, .sha] | @tsv'
-          )"
-          IFS=$'\t' read -r tag_type tag_sha <<< "$tag"
-          if [[ "$tag_type" != "commit" || "$tag_sha" != "$SOURCE_SHA" ]]; then
-            echo "Prepared release tag changed before Linux upload." >&2
             exit 1
           fi
           asset="$GITHUB_WORKSPACE/dist/$ASSET_NAME"
@@ -692,7 +981,62 @@ jobs:
             exit 1
           fi
           sha256="$(sha256sum "$asset" | cut --delimiter=' ' --fields=1)"
-          gh release upload "$RELEASE_TAG" "$asset" --repo "$GITHUB_REPOSITORY" --clobber
+          assets_json="$RUNNER_TEMP/linux-release-assets.json"
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?per_page=100" > "$assets_json"
+          existing_id="$(ASSETS_JSON="$assets_json" python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          assets = json.loads(Path(os.environ["ASSETS_JSON"]).read_text(encoding="utf-8"))
+          if not isinstance(assets, list):
+              raise SystemExit("Draft assets response is not an array")
+          matches = [asset for asset in assets if asset.get("name") == os.environ["ASSET_NAME"]]
+          if len(matches) > 1:
+              raise SystemExit(f"Draft contains duplicate assets named {os.environ['ASSET_NAME']}")
+          if matches:
+              asset_id = matches[0].get("id")
+              if isinstance(asset_id, bool) or not isinstance(asset_id, int) or asset_id <= 0:
+                  raise SystemExit(f"Existing draft asset has invalid ID {asset_id!r}")
+              print(asset_id, end="")
+          PY
+          )"
+          if [[ -n "$existing_id" ]]; then
+            gh api --method DELETE \
+              "repos/$GITHUB_REPOSITORY/releases/assets/$existing_id" > /dev/null
+          fi
+          uploaded_json="$RUNNER_TEMP/linux-uploaded-asset.json"
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            --header "Content-Type: application/octet-stream" \
+            --data-binary "@$asset" \
+            "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?name=$ASSET_NAME" \
+            > "$uploaded_json"
+          UPLOADED_JSON="$uploaded_json" \
+          EXPECTED_SIZE="$size" \
+          EXPECTED_SHA256="$sha256" \
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          asset = json.loads(
+              Path(os.environ["UPLOADED_JSON"]).read_text(encoding="utf-8")
+          )
+          expected = {
+              "name": os.environ["ASSET_NAME"],
+              "state": "uploaded",
+              "size": int(os.environ["EXPECTED_SIZE"]),
+              "digest": f"sha256:{os.environ['EXPECTED_SHA256']}",
+          }
+          actual = {key: asset.get(key) for key in expected}
+          if actual != expected:
+              raise SystemExit(f"GitHub returned an unexpected Linux asset identity: {actual!r}")
+          PY
+          rm -f -- "$assets_json" "$uploaded_json"
           printf 'sha256=%s\n' "$sha256" >> "$GITHUB_OUTPUT"
           printf 'size=%s\n' "$size" >> "$GITHUB_OUTPUT"
 
@@ -721,13 +1065,13 @@ jobs:
     permissions:
       contents: write
     env:
-      EXPECTED_VERSION: ${{ needs.prepare.outputs.version }}
       GH_TOKEN: ${{ github.token }}
       LINUX_ASSET: ${{ needs.prepare.outputs.linux_asset }}
       LINUX_SHA256: ${{ needs.build_linux.outputs.asset_sha256 }}
       LINUX_SIZE: ${{ needs.build_linux.outputs.asset_size }}
       RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
       RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+      SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
       WINDOWS_ASSET: ${{ needs.prepare.outputs.windows_asset }}
       WINDOWS_SHA256: ${{ needs.build_windows.outputs.asset_sha256 }}
       WINDOWS_SIZE: ${{ needs.build_windows.outputs.asset_size }}
@@ -747,11 +1091,13 @@ jobs:
               raise SystemExit("draft release ID does not match the prepared release")
           if release.get("tag_name") != os.environ["RELEASE_TAG"]:
               raise SystemExit("draft release tag does not match the workflow tag")
+          if release.get("target_commitish") != os.environ["SOURCE_SHA"]:
+              raise SystemExit("draft release target does not match the dated manifest commit")
           if release.get("draft") is not True:
               raise SystemExit("release is no longer a draft")
           if release.get("prerelease") is not False:
               raise SystemExit("draft release unexpectedly became a prerelease")
-          expected_name = f"Audio2Face {os.environ['EXPECTED_VERSION']}"
+          expected_name = f"Audio2Face {os.environ['RELEASE_TAG']}"
           if release.get("name") != expected_name:
               raise SystemExit(
                   f"draft release name must be {expected_name!r}; got {release.get('name')!r}"
@@ -795,46 +1141,106 @@ jobs:
                   )
           PY
 
-      - name: Verify release tag has not moved
+      - name: Create or verify dated release tag
         shell: bash
-        env:
-          PREPARED_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
-          PREPARED_TAG_REF_SHA: ${{ needs.prepare.outputs.tag_ref_sha }}
         run: |
           set -euo pipefail
-          current="$(
-            gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" \
-              --jq '.object | [.type, .sha] | @tsv'
-          )"
-          IFS=$'\t' read -r object_type current_sha <<< "$current"
-          if [[ "$object_type" != "commit" ]]; then
-            echo "Release tag must remain a lightweight commit tag; got $object_type." >&2
-            exit 1
+          repository_owner="${GITHUB_REPOSITORY%%/*}"
+          repository_name="${GITHUB_REPOSITORY#*/}"
+          qualified_tag="refs/tags/$RELEASE_TAG"
+
+          query_tag() {
+            # shellcheck disable=SC2016
+            gh api graphql \
+              -f owner="$repository_owner" \
+              -f name="$repository_name" \
+              -f qualified="$qualified_tag" \
+              -f query='query($owner: String!, $name: String!, $qualified: String!) {
+                repository(owner: $owner, name: $name) {
+                  ref(qualifiedName: $qualified) { target { __typename oid } }
+                }
+              }' \
+              --jq '.data.repository.ref.target // {} |
+                if .oid == null then "" else [.__typename, .oid] | @tsv end'
+          }
+
+          tag_state="$(query_tag)"
+          if [[ -z "$tag_state" ]]; then
+            create_error="$RUNNER_TEMP/create-release-tag-error.txt"
+            if ! gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+              --raw-field ref="$qualified_tag" \
+              --raw-field sha="$SOURCE_SHA" \
+              > /dev/null 2> "$create_error"; then
+              tag_state="$(query_tag)"
+              IFS=$'\t' read -r raced_type raced_sha <<< "$tag_state"
+              if [[ "$raced_type" != "Commit" || "$raced_sha" != "$SOURCE_SHA" ]]; then
+                cat "$create_error" >&2
+                exit 1
+              fi
+            fi
+            rm -f -- "$create_error"
           fi
-          if [[ "$current_sha" != "$PREPARED_TAG_REF_SHA" ]]; then
-            echo "Release tag moved during the workflow: expected $PREPARED_TAG_REF_SHA, got $current_sha" >&2
-            exit 1
-          fi
-          if [[ "$current_sha" != "$PREPARED_SOURCE_SHA" ]]; then
-            echo "Release tag no longer identifies prepared source $PREPARED_SOURCE_SHA; got $current_sha" >&2
+          tag_state="$(query_tag)"
+          IFS=$'\t' read -r object_type current_sha <<< "$tag_state"
+          if [[ "$object_type" != "Commit" || "$current_sha" != "$SOURCE_SHA" ]]; then
+            echo "Release tag must be a lightweight tag at $SOURCE_SHA; got $object_type $current_sha." >&2
             exit 1
           fi
 
-      - name: Publish verified release
+      - name: Publish verified release and dated tag
         shell: bash
         run: |
           set -euo pipefail
-          gh release edit "$RELEASE_TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --draft=false \
-            --latest
-          published="$(
-            gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
-              --jq '[.id, .tag_name, .draft, .prerelease] | @tsv'
+          published_json="$RUNNER_TEMP/published-release.json"
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+            --field draft=false \
+            --field prerelease=false \
+            --raw-field make_latest=true > "$published_json"
+          PUBLISHED_JSON="$published_json" python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          release = json.loads(
+              Path(os.environ["PUBLISHED_JSON"]).read_text(encoding="utf-8")
+          )
+          expected = {
+              "id": int(os.environ["RELEASE_ID"]),
+              "tag_name": os.environ["RELEASE_TAG"],
+              "target_commitish": os.environ["SOURCE_SHA"],
+              "name": f"Audio2Face {os.environ['RELEASE_TAG']}",
+              "draft": False,
+              "prerelease": False,
+          }
+          actual = {key: release.get(key) for key in expected}
+          if actual != expected:
+              raise SystemExit(f"Published release identity differs from verified draft: {actual!r}")
+          PY
+          rm -f -- "$published_json"
+          published_tag="$(
+            gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" \
+              --jq '.object | [.type, .sha] | @tsv'
           )"
-          IFS=$'\t' read -r current_release_id current_tag draft prerelease <<< "$published"
-          if [[ "$current_release_id" != "$RELEASE_ID" || "$current_tag" != "$RELEASE_TAG" ||
-                "$draft" != "false" || "$prerelease" != "false" ]]; then
-            echo "Published release postcondition does not match the verified draft." >&2
+          IFS=$'\t' read -r object_type published_sha <<< "$published_tag"
+          if [[ "$object_type" != "commit" || "$published_sha" != "$SOURCE_SHA" ]]; then
+            echo "Published tag must be a lightweight tag at $SOURCE_SHA; got $object_type $published_sha." >&2
+            exit 1
+          fi
+          repository_owner="${GITHUB_REPOSITORY%%/*}"
+          repository_name="${GITHUB_REPOSITORY#*/}"
+          # shellcheck disable=SC2016
+          latest_tag="$(
+            gh api graphql \
+              -f owner="$repository_owner" \
+              -f name="$repository_name" \
+              -f query='query($owner: String!, $name: String!) {
+                repository(owner: $owner, name: $name) {
+                  latestRelease { tagName }
+                }
+              }' \
+              --jq '.data.repository.latestRelease.tagName // ""'
+          )"
+          if [[ "$latest_tag" != "$RELEASE_TAG" ]]; then
+            echo "Published release was not marked Latest: expected $RELEASE_TAG, got ${latest_tag:-missing}." >&2
             exit 1
           fi

@@ -2,35 +2,48 @@
 
 `.github/workflows/release.yml` is the only GitHub release path. It runs only
 when started manually from GitHub Actions. The branch selected in the **Run
-workflow** interface must be the repository's protected default branch; there
-are no workflow inputs. The workflow freezes that branch's dispatch commit,
-compares it with the published release marked **Latest**, and derives
-`v<version>` from `audio2face/blender_manifest.toml`. After the source tests
-pass, it creates that tag at the frozen commit. It then starts two native builds,
-uploads the two complete platform extension ZIPs to one draft release, verifies
-that the draft contains exactly those assets, and publishes it. For manifest
-version `0.1.0`, the generated tag and assets are:
+workflow** interface must be the repository's default branch; there are no
+workflow inputs. The workflow freezes that branch's dispatch commit, compares
+it with the published release marked **Latest**, and generates the current UTC
+date as a stable semantic version. After the source tests pass, it commits that
+version to `audio2face/blender_manifest.toml`, freezes the resulting commit, and
+uses the same calendar identity for the GitHub release. For August 21, 2026, the
+generated manifest version, tag, and assets are:
 
 ```text
-v0.1.0
-audio2face-0.1.0-windows-x64.zip
-audio2face-0.1.0-linux-x64.zip
+2026.8.21
+v2026.8.21
+audio2face-2026.8.21-windows-x64.zip
+audio2face-2026.8.21-linux-x64.zip
 ```
+
+Calendar components are deliberately not zero-padded. Blender requires the
+manifest `version` to follow semantic versioning, whose numeric identifiers
+cannot contain leading zeroes. The Git tag is exactly the stamped manifest
+version with a `v` prefix. One published release is allowed per UTC date; a
+rerun can reuse that date's exact manifest commit and draft after a failed run.
 
 The latest published release tag must resolve to an ancestor of the selected
 commit, and the range from that tag to the selected commit must contain at least
-one commit. The selected manifest version must also be newer than the version
-embedded at the latest release tag. This makes the manifest the sole version
-source of truth; the workflow does not infer a semantic-version bump from commit
-subjects.
+one commit. The generated calendar version must also be newer than the version
+embedded at the latest release tag. Before committing the dated manifest, the
+workflow verifies that the default branch still identifies the dispatch commit.
+It updates the branch atomically only when the expected dispatch commit is still
+its head. When a version commit is needed, it is a direct child that changes
+only the manifest; same-date retries verify and reuse that exact child instead
+of creating another commit.
 
-The workflow reuses an existing lightweight tag and draft only when both still
-point to the same frozen source commit, so a failed job can be rerun without
-deleting the draft. It refuses a moved tag or an already-published release.
-It also refuses to skip over an unrelated pending draft. Native uploads use
-`--clobber`; the final job publishes only after both jobs succeed and the draft
-contains exactly the two expected assets with the SHA-256 digests and byte sizes
-reported by their native build jobs.
+GitHub gives unpublished releases an internal `untagged-*` web URL. That is
+normal and is not the release tag. The workflow captures the numeric release ID
+from the Create Release API response, or resolves the ID through GraphQL when it
+reuses an existing draft. Reuse requires an exact date, title, and target commit,
+and every draft upload uses that immutable ID. The workflow refuses an
+already-published release or an unrelated pending draft. The final job publishes
+only after the draft contains
+exactly the two expected assets with the SHA-256 digests and byte sizes reported
+by their native build jobs. It then creates the dated Git tag at the frozen
+manifest commit, publishes the draft, and explicitly marks the release as
+**Latest**.
 
 ## Standard GitHub-hosted runners
 
@@ -75,29 +88,32 @@ files are deliberately not part of the extension package.
 
 ## Release lifecycle
 
-1. Confirm `version` in `audio2face/blender_manifest.toml` is the intended stable
-   semantic version. After the first release, it must be newer than the manifest
-   version at the release marked **Latest**. Merge the complete release source to
-   the protected default branch.
+1. Merge the complete release source to the repository's default branch. Do not
+   edit the manifest for the release date; the workflow owns that version stamp.
 2. In GitHub Actions, open **Release platform extensions**, keep the branch
    selector on the repository's default branch, choose **Run workflow**, and
    start the workflow. There are no workflow inputs.
 3. The prepare job freezes the dispatch SHA, resolves the latest published
    release tag, requires that tag to be an ancestor, and requires a non-empty
-   commit range. It also verifies the selected manifest version increased.
-4. The prepare job runs the Python tests, creates `v<manifest version>` as a
-   lightweight tag at the frozen SHA, and creates or verifies the corresponding
-   draft. Generated notes start at the previous published release tag.
+   commit range. It generates `YYYY.M.D` from the current UTC date and verifies
+   that version is newer than the manifest embedded in the latest release.
+4. The prepare job tests the source with the dated manifest, confirms the branch
+   has not moved, atomically commits only the manifest when needed, and freezes
+   the stamped source SHA. A rerun verifies and reuses the exact stamp if it
+   already exists. The job then creates or verifies the dated draft and retains
+   its numeric ID. GitHub generates the notes from the previous published
+   release.
 5. Each native job checks out the same frozen SHA, reclaims its standard runner,
    selects Python 3.11.9, and builds the locked runtime. Windows first installs
    and verifies the exact Visual Studio 2022 components listed above.
 6. The native jobs download the official portable Blender 5.2.0 archives,
    verify their pinned SHA-256 digests, discard the downloaded archives after
    extraction, run Blender smoke tests, package the platform extensions,
-   enforce GitHub's per-asset size limit, and upload directly to the draft.
+   enforce GitHub's per-asset size limit, and upload directly to the draft by ID.
 7. The final job requires exactly the Windows and Linux asset names, sizes, and
-   SHA-256 digests, confirms that the tag was not moved during the run, publishes
-   the draft, and explicitly marks it as the latest release.
+   SHA-256 digests, atomically creates the lightweight date tag or verifies an
+   exact existing one, publishes the draft, verifies the tag again, and confirms
+   that the release is marked **Latest**.
 
 GitHub Releases requires every individual asset to be smaller than 2 GiB. The
 workflow enforces that limit before upload and again before publication. If a
