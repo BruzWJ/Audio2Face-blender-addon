@@ -118,12 +118,11 @@ class A2FAddonPreferences(bpy.types.AddonPreferences):
             removal.label(
                 text="Removes Audio2Face and all managed runtime, model, and result files."
             )
-            operator = removal.operator(
-                "extensions.package_uninstall",
+            removal.operator(
+                "a2f.uninstall",
                 text="Uninstall Audio2Face",
                 icon="TRASH",
             )
-            operator.repo_directory, operator.pkg_id = uninstall_target
 
 
 def get_preferences(

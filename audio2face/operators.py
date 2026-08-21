@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from functools import partial
+from pathlib import Path
 from typing import Callable
 
 import bpy
 
 from .live_stream import get_live_stream_controller
 from .preview import PreviewError, get_preview_controller
+from .preferences import _uninstall_target
 from .properties import A2FSceneSettings
 from .result_io import AnimationResult, ResultValidationError, load_animation_result
 from .runtime import RuntimeController, get_controller
@@ -42,6 +45,19 @@ def _load_selected_result(settings: A2FSceneSettings) -> AnimationResult:
             f"stale result job ID {result.job_id!r}; active job is {settings.current_job_id!r}"
         )
     return result
+
+
+def _invoke_extension_uninstall(repo_directory: str, package_id: str) -> None:
+    """Hand removal to Blender after the confirming operator has returned."""
+
+    try:
+        bpy.ops.extensions.package_uninstall(
+            "EXEC_DEFAULT" if bpy.app.background else "INVOKE_DEFAULT",
+            repo_directory=repo_directory,
+            pkg_id=package_id,
+        )
+    except RuntimeError as exc:
+        print(f"Audio2Face uninstall failed: {exc}")
 
 
 class A2F_OT_start_worker(bpy.types.Operator):
@@ -85,6 +101,52 @@ class A2F_OT_cancel_runtime_install(bpy.types.Operator):
 
     def execute(self, _context: bpy.types.Context) -> set[str]:
         return _run_runtime(self, lambda controller: controller.cancel_runtime_install())
+
+
+class A2F_OT_uninstall(bpy.types.Operator):
+    bl_idname = "a2f.uninstall"
+    bl_label = "Remove Add-on"
+    bl_description = "Remove Audio2Face and all files managed by this extension"
+
+    @classmethod
+    def poll(cls, context: bpy.types.Context) -> bool:
+        if _uninstall_target(context) is None:
+            cls.poll_message_set("Audio2Face is not installed in a removable repository")
+            return False
+        if get_controller().install_in_progress:
+            cls.poll_message_set("cancel the runtime install and wait first")
+            return False
+        return True
+
+    def draw(self, context: bpy.types.Context) -> None:
+        target = _uninstall_target(context)
+        if target is None:
+            return
+        repo_directory, package_id = target
+        self.layout.label(text="Remove Add-on: 'Audio2Face'?")
+        self.layout.label(text=f"Path: {str(Path(repo_directory, package_id))!r}")
+        self.layout.label(
+            text="Managed runtime, models, installer files, and results will also be removed.",
+            icon="ERROR",
+        )
+
+    def invoke(
+        self,
+        context: bpy.types.Context,
+        _event: bpy.types.Event,
+    ) -> set[str]:
+        return context.window_manager.invoke_props_dialog(self, width=600)
+
+    def execute(self, context: bpy.types.Context) -> set[str]:
+        target = _uninstall_target(context)
+        if target is None:
+            self.report({"ERROR"}, "Audio2Face extension installation was not found")
+            return {"CANCELLED"}
+        bpy.app.timers.register(
+            partial(_invoke_extension_uninstall, *target),
+            first_interval=0.0,
+        )
+        return {"FINISHED"}
 
 
 class A2F_OT_stop_worker(bpy.types.Operator):
@@ -268,6 +330,7 @@ class A2F_OT_preview_stop(bpy.types.Operator):
 CLASSES = (
     A2F_OT_install_runtime,
     A2F_OT_cancel_runtime_install,
+    A2F_OT_uninstall,
     A2F_OT_start_worker,
     A2F_OT_stop_worker,
     A2F_OT_generate,
