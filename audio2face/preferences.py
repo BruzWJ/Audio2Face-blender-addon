@@ -39,6 +39,15 @@ class A2FAddonPreferences(bpy.types.AddonPreferences):
         from .runtime import get_controller
 
         layout = self.layout
+        if _uninstall_target(_context) is not None:
+            removal = layout.row()
+            removal.alignment = "RIGHT"
+            removal.operator(
+                "a2f.uninstall",
+                text="Uninstall",
+            )
+            layout.separator(type="LINE")
+
         controller = get_controller()
         runtime_ready, runtime_message = controller.runtime_availability()
         can_install, blocked_reason = controller.install_eligibility()
@@ -110,19 +119,6 @@ class A2FAddonPreferences(bpy.types.AddonPreferences):
             reason.label(text=blocked_reason, icon="ERROR")
         elif controller.install_message:
             setup.label(text=controller.install_message, icon="INFO")
-
-        uninstall_target = _uninstall_target(_context)
-        if uninstall_target is not None:
-            removal = layout.box()
-            removal.label(text="Clean Uninstall", icon="TRASH")
-            removal.label(
-                text="Removes Audio2Face and all managed runtime, model, and result files."
-            )
-            removal.operator(
-                "a2f.uninstall",
-                text="Uninstall Audio2Face",
-                icon="TRASH",
-            )
 
 
 def get_preferences(

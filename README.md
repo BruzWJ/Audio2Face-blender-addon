@@ -28,7 +28,7 @@ box contains:
 - source buttons for
   [Audio2Face-3D v3.0](https://huggingface.co/nvidia/Audio2Face-3D-v3.0) and
   [Audio2Emotion v3.0](https://huggingface.co/nvidia/Audio2Emotion-v3.0); and
-- **Install Runtime & Models** and **Uninstall Audio2Face** actions.
+- **Install Runtime & Models**.
 
 The install action downloads one catalog-pinned artifact containing the worker,
 runtime libraries, model inputs for both models, TensorRT engine builder, and
@@ -43,14 +43,15 @@ in this source release. It becomes available only after release maintainers
 publish reviewed Linux and Windows archives with immutable HTTPS URLs, exact
 sizes, and SHA-256 digests. No URL, checksum, or model payload is inferred.
 
-**Uninstall Audio2Face** opens a legacy-style **Remove Add-on** confirmation
-showing the installed package path. After confirmation it delegates to
-Blender's extension uninstaller, which first disables the add-on and stops its
-worker, streams, and playback, then removes the extension and its complete
-managed data directory: runtime libraries, both models and TensorRT engines,
-installer leftovers, logs, and generated results. Selected WAV files, `.blend`
-files, meshes, and shared NVIDIA driver caches are not managed by the add-on
-and are not removed.
+The top of Add-on Preferences includes the same right-aligned **Uninstall**
+action used for Blender 5.2 Legacy (User) add-ons. It opens Blender's two-line
+**Remove Add-on** confirmation with the add-on name and installed package path.
+After confirmation it delegates to Blender's extension uninstaller, which
+first disables the add-on and stops its worker, streams, and playback, then
+removes the extension and its complete managed data directory: runtime
+libraries, both models and TensorRT engines, installer leftovers, logs, and
+generated results. Selected WAV files, `.blend` files, meshes, and shared
+NVIDIA driver caches are not managed by the add-on and are not removed.
 
 ## Workflow
 

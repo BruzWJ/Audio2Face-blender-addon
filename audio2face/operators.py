@@ -106,7 +106,7 @@ class A2F_OT_cancel_runtime_install(bpy.types.Operator):
 class A2F_OT_uninstall(bpy.types.Operator):
     bl_idname = "a2f.uninstall"
     bl_label = "Remove Add-on"
-    bl_description = "Remove Audio2Face and all files managed by this extension"
+    bl_description = "Delete the Audio2Face add-on from the file system"
 
     @classmethod
     def poll(cls, context: bpy.types.Context) -> bool:
@@ -123,11 +123,10 @@ class A2F_OT_uninstall(bpy.types.Operator):
         if target is None:
             return
         repo_directory, package_id = target
-        self.layout.label(text="Remove Add-on: 'Audio2Face'?")
-        self.layout.label(text=f"Path: {str(Path(repo_directory, package_id))!r}")
+        self.layout.label(text="Remove Add-on: 'Audio2Face'?", translate=False)
         self.layout.label(
-            text="Managed runtime, models, installer files, and results will also be removed.",
-            icon="ERROR",
+            text=f"Path: {str(Path(repo_directory, package_id))!r}",
+            translate=False,
         )
 
     def invoke(

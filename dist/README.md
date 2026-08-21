@@ -11,16 +11,16 @@ ZIP directly; rebuild it from the repository's `audio2face/` source directory.
 - Display name: `Audio2Face`
 - Extension ID: `audio2face`
 - Version: `0.1.0`
-- SHA-256: `4fff15b6a5c716ed3ef1a44f917cb7bb219daa81c63b7c28e3605fc6bddb7341`
+- SHA-256: `4ffbc3f10cad66c5237bb6155116736877b5b7f82e265f6644fa109840a3d091`
 
 The ZIP contains the Blender add-on only. It does not embed CUDA, TensorRT, the
 native worker, Audio2Face, or Audio2Emotion. Add-on Preferences provides one
 NVIDIA terms acceptance, source buttons for both models, and one managed
 install action that downloads a reviewed artifact containing the runtime and
-both models. The same Preferences page provides **Uninstall Audio2Face**, which
-shows a legacy-style path confirmation before using Blender's native extension
-removal to delete the add-on and all of its managed runtime, model, temporary,
-log, and result files.
+both models. The same Preferences page provides the right-aligned
+**Uninstall** action used for Blender 5.2 Legacy (User) add-ons and its two-line
+path confirmation before Blender's native extension removal deletes the add-on
+and all of its managed runtime, model, temporary, log, and result files.
 
 > [!IMPORTANT]
 > The checked-in runtime catalog currently publishes no platform archives.
@@ -42,8 +42,8 @@ log, and result files.
 6. Open the **Audio2Face** tab in the 3D View sidebar. Runtime setup controls
    stay in Add-on Preferences; the sidebar only reports readiness.
 
-To remove Audio2Face cleanly, return to its Add-on Preferences and click
-**Uninstall Audio2Face**. This does not remove external WAV or `.blend` files.
+To remove Audio2Face, return to its Add-on Preferences and click **Uninstall**
+at the top. This does not remove external WAV or `.blend` files.
 
 ## Build and verify
 
