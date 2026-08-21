@@ -15,7 +15,7 @@ license = ["SPDX:GPL-3.0-or-later"]
 
 [permissions]
 files = "Install the managed runtime and read selected WAV files"
-network = "Download the managed GPU runtime, Audio2Face model, and Audio2Emotion model"
+network = "Download the managed GPU runtime and required models"
 
 [build]
 paths_exclude_pattern = [

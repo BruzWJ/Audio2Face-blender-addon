@@ -21,3 +21,8 @@ def test_extension_is_limited_to_blender_52() -> None:
     # Blender interprets blender_version_max as the first unsupported version.
     assert fields["blender_version_max"] == "5.3.0"
     assert 'platforms = ["windows-x64", "linux-x64"]' in manifest
+
+    for field in ("tagline", "files", "network"):
+        description = fields[field]
+        assert 0 < len(description) <= 64
+        assert description[-1].isalnum()
