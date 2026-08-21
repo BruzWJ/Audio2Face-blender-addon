@@ -8,10 +8,8 @@ venv/
 
 # Native worker build output
 build/
-worker/build/
 dist/*
 !dist/README.md
-out/
 *.o
 *.obj
 *.so
@@ -24,7 +22,5 @@ out/
 *.blend1
 *.blend2
 
-# Generated Audio2Face results and local NVIDIA assets
+# Generated Audio2Face results
 *.a2f.json
-models/
-trt_models/

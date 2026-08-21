@@ -14,8 +14,7 @@ platforms = ["windows-x64", "linux-x64"]
 license = ["SPDX:GPL-3.0-or-later"]
 
 [permissions]
-files = "Read WAV/model folders; write engines; install GPU worker"
-network = "Download the platform-specific GPU worker package"
+files = "Read WAV and model folders; write TensorRT engines"
 
 [build]
 paths_exclude_pattern = [

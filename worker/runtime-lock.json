@@ -1,0 +1,382 @@
+{
+  "schema": "audio2face-runtime-inputs/1",
+  "audio2face_sdk": {
+    "version": "1.0.0",
+    "repository": "https://github.com/NVIDIA/Audio2Face-3D-SDK.git",
+    "commit": "1ca0f02535ed774f5dbcd724a31cd486368dc783"
+  },
+  "tensorrt_source": {
+    "version": "10.13.3",
+    "tag": "v10.13.3",
+    "repository": "https://github.com/NVIDIA/TensorRT.git",
+    "commit": "94e2b9ef6d2cce74c76cdad499cca36cc4949197",
+    "submodules": {
+      "parsers/onnx": "9a9f7883dd7b8cb0a718395bac2075fab6f97da8",
+      "parsers/onnx/third_party/onnx": "e709452ef2bbc1d113faf678c24e6d3467696e83",
+      "third_party/cub": "397357e9aca61f244b0aed2e77efca25f8a95d74",
+      "third_party/protobuf": "e29507ff0db6943a226c5c798b79fc4abca847d1"
+    }
+  },
+  "cmake": {
+    "version": "3.31.8",
+    "artifacts": {
+      "windows-x64": {
+        "url": "https://github.com/Kitware/CMake/releases/download/v3.31.8/cmake-3.31.8-windows-x86_64.zip",
+        "size": 46709267,
+        "sha256": "81aa9964dbabd71fe02e7ec50472fd3ad56138c49944515ece9001efbff8d719"
+      },
+      "linux-x64": {
+        "url": "https://github.com/Kitware/CMake/releases/download/v3.31.8/cmake-3.31.8-linux-x86_64.tar.gz",
+        "size": 55012213,
+        "sha256": "630615d8e98ac33eba7fbe472626dff5c899c85af3c024585ae109166a6909d0"
+      }
+    }
+  },
+  "cuda": {
+    "version": "12.9.1",
+    "base_url": "https://developer.download.nvidia.com/compute/cuda/redist/",
+    "manifest": {
+      "url": "https://developer.download.nvidia.com/compute/cuda/redist/redistrib_12.9.1.json",
+      "size": 54256,
+      "sha256": "8335301010b0023ee1ff61eb11e2600ca62002d76780de4089011ad77e0c7630"
+    },
+    "components": {
+      "cuda_nvcc": {
+        "version": "12.9.86",
+        "artifacts": {
+          "windows-x64": {
+            "relative_path": "cuda_nvcc/windows-x86_64/cuda_nvcc-windows-x86_64-12.9.86-archive.zip",
+            "size": 126917884,
+            "sha256": "227b109663b5e57d2718bcabb24a4ba0d9d4e52d958e327dc476f7c28691be85"
+          },
+          "linux-x64": {
+            "relative_path": "cuda_nvcc/linux-x86_64/cuda_nvcc-linux-x86_64-12.9.86-archive.tar.xz",
+            "size": 81100244,
+            "sha256": "7a1a5b652e5ef85c82b721d10672fc9a2dbaab44e9bd3c65a69517bf53998c35"
+          }
+        }
+      },
+      "cuda_cudart": {
+        "version": "12.9.79",
+        "artifacts": {
+          "windows-x64": {
+            "relative_path": "cuda_cudart/windows-x86_64/cuda_cudart-windows-x86_64-12.9.79-archive.zip",
+            "size": 3521238,
+            "sha256": "179e9c43b0735ffe67207b3da556eb5a0c50f3047961882b7657d3b822d34ef8"
+          },
+          "linux-x64": {
+            "relative_path": "cuda_cudart/linux-x86_64/cuda_cudart-linux-x86_64-12.9.79-archive.tar.xz",
+            "size": 1514676,
+            "sha256": "1f6ad42d4f530b24bfa35894ccf6b7209d2354f59101fd62ec4a6192a184ce99"
+          }
+        }
+      },
+      "cuda_cccl": {
+        "version": "12.9.27",
+        "artifacts": {
+          "windows-x64": {
+            "relative_path": "cuda_cccl/windows-x86_64/cuda_cccl-windows-x86_64-12.9.27-archive.zip",
+            "size": 3127658,
+            "sha256": "17aaa7c6b8f94a417d8f3261780b7e34b9cbdfab7513bce86768623b06aa28b5"
+          },
+          "linux-x64": {
+            "relative_path": "cuda_cccl/linux-x86_64/cuda_cccl-linux-x86_64-12.9.27-archive.tar.xz",
+            "size": 997888,
+            "sha256": "8b1a5095669e94f2f9afd7715533314d418179e9452be61e2fde4c82a3e542aa"
+          }
+        }
+      },
+      "cuda_nvtx": {
+        "version": "12.9.79",
+        "artifacts": {
+          "windows-x64": {
+            "relative_path": "cuda_nvtx/windows-x86_64/cuda_nvtx-windows-x86_64-12.9.79-archive.zip",
+            "size": 87029,
+            "sha256": "b9d506ce9ba056bf171b60e9dada06fb3d8bed5453a6399d0541960bf9b81659"
+          },
+          "linux-x64": {
+            "relative_path": "cuda_nvtx/linux-x86_64/cuda_nvtx-linux-x86_64-12.9.79-archive.tar.xz",
+            "size": 64496,
+            "sha256": "819bc39192955e6ba2067de39b85f30e157de462945e54b12bfdeda429d793fb"
+          }
+        }
+      },
+      "cuda_nvrtc": {
+        "version": "12.9.86",
+        "artifacts": {
+          "windows-x64": {
+            "relative_path": "cuda_nvrtc/windows-x86_64/cuda_nvrtc-windows-x86_64-12.9.86-archive.zip",
+            "size": 314608748,
+            "sha256": "1aa0644fa53c8ca34cdc73db17bcc73530557bdd3f582c7bfdbd7916c8b48f65"
+          },
+          "linux-x64": {
+            "relative_path": "cuda_nvrtc/linux-x86_64/cuda_nvrtc-linux-x86_64-12.9.86-archive.tar.xz",
+            "size": 114231976,
+            "sha256": "82913658363892dbc0f2638b070476234476e06e084fed60db861cb7e161a6af"
+          }
+        }
+      },
+      "cuda_profiler_api": {
+        "version": "12.9.79",
+        "artifacts": {
+          "windows-x64": {
+            "relative_path": "cuda_profiler_api/windows-x86_64/cuda_profiler_api-windows-x86_64-12.9.79-archive.zip",
+            "size": 20352,
+            "sha256": "b05519f8ce4f02167bfc859358f62eb771d89ac2af3a6952a82317f2af4bc5bd"
+          },
+          "linux-x64": {
+            "relative_path": "cuda_profiler_api/linux-x86_64/cuda_profiler_api-linux-x86_64-12.9.79-archive.tar.xz",
+            "size": 16316,
+            "sha256": "8c50636bfb97e9420905aa795b9fa6e3ad0b30ec6a6c8b0b8db519beb9241ce6"
+          }
+        }
+      },
+      "libcublas": {
+        "version": "12.9.1.4",
+        "artifacts": {
+          "windows-x64": {
+            "relative_path": "libcublas/windows-x86_64/libcublas-windows-x86_64-12.9.1.4-archive.zip",
+            "size": 549755186,
+            "sha256": "d534d98b0b453a98914dbf3adf47d7e84b55037abf02f87466439e1dcef581ed"
+          },
+          "linux-x64": {
+            "relative_path": "libcublas/linux-x86_64/libcublas-linux-x86_64-12.9.1.4-archive.tar.xz",
+            "size": 933611504,
+            "sha256": "546addc4a9d82b8f23aa9ba9274b6bc0429a63008a31c759884ac24880796057"
+          }
+        }
+      },
+      "libcurand": {
+        "version": "10.3.10.19",
+        "artifacts": {
+          "windows-x64": {
+            "relative_path": "libcurand/windows-x86_64/libcurand-windows-x86_64-10.3.10.19-archive.zip",
+            "size": 67904600,
+            "sha256": "d0411f0b8c07e90d0fb6e01bfa7a54c9cb80f2ddf67e4ded2d96a50e19aadad6"
+          },
+          "linux-x64": {
+            "relative_path": "libcurand/linux-x86_64/libcurand-linux-x86_64-10.3.10.19-archive.tar.xz",
+            "size": 89582256,
+            "sha256": "48281b4caadb1cf790d44ac76b23c77d06f474c0b1799814f314aafec9258ad6"
+          }
+        }
+      }
+    }
+  },
+  "tensorrt": {
+    "version": "10.13.3.9",
+    "cuda": "12.9",
+    "artifacts": {
+      "windows-x64": {
+        "url": "https://developer.download.nvidia.com/compute/machine-learning/tensorrt/10.13.3/zip/TensorRT-10.13.3.9.Windows.win10.cuda-12.9.zip",
+        "size": 1741539421,
+        "sha256": "d7fd63dc111dc68bc7bdf3b0b494c669ed50315502b016ec3022ac7cb3ba0615"
+      },
+      "linux-x64": {
+        "url": "https://developer.download.nvidia.com/compute/machine-learning/tensorrt/10.13.3/tars/TensorRT-10.13.3.9.Linux.x86_64-gnu.cuda-12.9.tar.gz",
+        "size": 6933500463,
+        "sha256": "a40650fd51f096969db072edf216a5026e61c71157bc87f475a8549681e09d34"
+      }
+    }
+  },
+  "msvc_runtime": {
+    "product_version": "14.44.35211.0",
+    "package_id": "Microsoft.VC.14.44.17.14.CRT.Redist.X64.base",
+    "package_version": "14.44.35211",
+    "artifact": {
+      "url": "https://download.visualstudio.microsoft.com/download/pr/45d3b8dd-bced-4b37-9974-142f748d710c/4aaf54db0bfc9435f7c3660e1a00237a4b556042bfeea64bde44c2e0194e6ee5/Microsoft.VC.14.44.17.14.CRT.Redist.X64.base.vsix",
+      "size": 3224191,
+      "sha256": "4aaf54db0bfc9435f7c3660e1a00237a4b556042bfeea64bde44c2e0194e6ee5"
+    },
+    "manifest_member": "manifest.json",
+    "files": {
+      "msvcp140.dll": {
+        "member": "Contents/VC/Redist/MSVC/14.44.35112/x64/Microsoft.VC143.CRT/msvcp140.dll",
+        "size": 557728,
+        "sha256": "0f885b509a685d2bbfa652fed26b5fb31d88fbdab0a978c641d1c7b8aa460aa9"
+      },
+      "vcruntime140.dll": {
+        "member": "Contents/VC/Redist/MSVC/14.44.35112/x64/Microsoft.VC143.CRT/vcruntime140.dll",
+        "size": 124544,
+        "sha256": "d5e4d9a3e835fa679450145d6a7d94e36573a509317111904d9b3712c30d9066"
+      },
+      "vcruntime140_1.dll": {
+        "member": "Contents/VC/Redist/MSVC/14.44.35112/x64/Microsoft.VC143.CRT/vcruntime140_1.dll",
+        "size": 49792,
+        "sha256": "1f2d41c4aa5db0bc33ebf7b66d72943a817d7ce6cbe880502a9403823633093f"
+      }
+    }
+  },
+  "windows_toolchain": {
+    "vctools_version": "14.43.34808",
+    "cl_version": "19.43.34810",
+    "windows_sdk_version": "10.0.22621.0\\"
+  },
+  "linux_toolchain": {
+    "distribution_id": "rocky",
+    "distribution_version": "8.9",
+    "glibc_version": "2.28",
+    "glibc_nevra": "glibc-2.28-236.el8_9.7.x86_64",
+    "producer_image": {
+      "reference": "quay.io/rockylinux/rockylinux@sha256:2fefe8993465ffa179682aeb5f2104fae221330ffbb3acadbc7aa218921fa647",
+      "architecture": "amd64",
+      "config_sha256": "20917bc29576fedbc00e9c5d0df20bee45b9952dae4936a26a0d623e6b023f4e"
+    },
+    "packages": {
+      "gcc_toolset_runtime": {
+        "name": "gcc-toolset-11-runtime",
+        "nevra": "gcc-toolset-11-runtime-11.1-1.el8.x86_64",
+        "artifact": {
+          "url": "https://dl.rockylinux.org/vault/rocky/8.9/AppStream/x86_64/os/Packages/g/gcc-toolset-11-runtime-11.1-1.el8.x86_64.rpm",
+          "size": 24348,
+          "sha256": "d57f1b8ca87240cd4dbd58f549e85673c39be4ae19c5890ac297c2235c96f9d8"
+        }
+      },
+      "binutils": {
+        "name": "gcc-toolset-11-binutils",
+        "nevra": "gcc-toolset-11-binutils-2.36.1-4.el8_9.x86_64",
+        "artifact": {
+          "url": "https://dl.rockylinux.org/vault/rocky/8.9/AppStream/x86_64/os/Packages/g/gcc-toolset-11-binutils-2.36.1-4.el8_9.x86_64.rpm",
+          "size": 6781380,
+          "sha256": "f83d15d509db54c670a7c5245684fd82090799c13ce9a7a90d11ece8b629dd40"
+        }
+      },
+      "gcc": {
+        "name": "gcc-toolset-11-gcc",
+        "nevra": "gcc-toolset-11-gcc-11.2.1-9.2.el8_9.x86_64",
+        "artifact": {
+          "url": "https://dl.rockylinux.org/vault/rocky/8.9/AppStream/x86_64/os/Packages/g/gcc-toolset-11-gcc-11.2.1-9.2.el8_9.x86_64.rpm",
+          "size": 34567988,
+          "sha256": "727f23672b785714fd8431aa3f93dc31ff455d180159a31c5376f84fac93c5d8"
+        }
+      },
+      "gxx": {
+        "name": "gcc-toolset-11-gcc-c++",
+        "nevra": "gcc-toolset-11-gcc-c++-11.2.1-9.2.el8_9.x86_64",
+        "artifact": {
+          "url": "https://dl.rockylinux.org/vault/rocky/8.9/AppStream/x86_64/os/Packages/g/gcc-toolset-11-gcc-c++-11.2.1-9.2.el8_9.x86_64.rpm",
+          "size": 13436484,
+          "sha256": "898e768ea4cf88bebc3f4dcb8a8752d366feaffffa4ef65b87f18f1b491bfc8c"
+        }
+      },
+      "libstdcxx_devel": {
+        "name": "gcc-toolset-11-libstdc++-devel",
+        "nevra": "gcc-toolset-11-libstdc++-devel-11.2.1-9.2.el8_9.x86_64",
+        "artifact": {
+          "url": "https://dl.rockylinux.org/vault/rocky/8.9/AppStream/x86_64/os/Packages/g/gcc-toolset-11-libstdc++-devel-11.2.1-9.2.el8_9.x86_64.rpm",
+          "size": 3408996,
+          "sha256": "66557990c959b337119df93f419549d326c33a87a062f2e31ede0ab8f3eefc33"
+        }
+      },
+      "glibc_devel": {
+        "name": "glibc-devel",
+        "nevra": "glibc-devel-2.28-236.el8_9.7.x86_64",
+        "artifact": {
+          "url": "https://dl.rockylinux.org/vault/rocky/8.9/BaseOS/x86_64/os/Packages/g/glibc-devel-2.28-236.el8_9.7.x86_64.rpm",
+          "size": 86132,
+          "sha256": "618841119352670fb706b2c4692146939be5137ae434b7f86615c5c0fab46404"
+        }
+      },
+      "glibc_headers": {
+        "name": "glibc-headers",
+        "nevra": "glibc-headers-2.28-236.el8_9.7.x86_64",
+        "artifact": {
+          "url": "https://dl.rockylinux.org/vault/rocky/8.9/BaseOS/x86_64/os/Packages/g/glibc-headers-2.28-236.el8_9.7.x86_64.rpm",
+          "size": 500704,
+          "sha256": "16865c73c2e6b8a05a48dfb402801f4b71147345ae30de6fab6828eb9bdf5fcc"
+        }
+      },
+      "kernel_headers": {
+        "name": "kernel-headers",
+        "nevra": "kernel-headers-4.18.0-513.24.1.el8_9.x86_64",
+        "artifact": {
+          "url": "https://dl.rockylinux.org/vault/rocky/8.9/BaseOS/x86_64/os/Packages/k/kernel-headers-4.18.0-513.24.1.el8_9.x86_64.rpm",
+          "size": 11971600,
+          "sha256": "9e6b11688073157daa2b14868002d890f4adc3d6afe11e95cf3ee22d128c611a"
+        }
+      },
+      "libmpc": {
+        "name": "libmpc",
+        "nevra": "libmpc-1.1.0-9.1.el8.x86_64",
+        "artifact": {
+          "url": "https://dl.rockylinux.org/vault/rocky/8.9/AppStream/x86_64/os/Packages/l/libmpc-1.1.0-9.1.el8.x86_64.rpm",
+          "size": 61316,
+          "sha256": "4fbf751702394211896af9f253ad2f38c80f603e007a7c9ed2b9c8e5d97f2f95"
+        }
+      }
+    },
+    "gxx_path": "/opt/rh/gcc-toolset-11/root/usr/bin/g++",
+    "gxx_version": "11.2.1",
+    "gxx_target": "x86_64-redhat-linux",
+    "readelf_path": "/opt/rh/gcc-toolset-11/root/usr/bin/readelf",
+    "readelf_version": "GNU readelf version 2.36.1-4.el8_9",
+    "cxx11_abi": 0,
+    "architecture_flags": [
+      "-march=x86-64",
+      "-mtune=generic"
+    ]
+  },
+  "linux_runtime": {
+    "source_rpm": {
+      "url": "https://dl.rockylinux.org/vault/rocky/8.9/BaseOS/source/tree/Packages/g/gcc-8.5.0-20.el8.src.rpm",
+      "size": 65674747,
+      "sha256": "b135158c8b66a7dac26f50abae8e99056979e5dd03032d2a604aacd565ab89eb"
+    },
+    "packages": {
+      "libstdcxx": {
+        "artifact": {
+          "url": "https://dl.rockylinux.org/vault/rocky/8.9/BaseOS/x86_64/os/Packages/l/libstdc++-8.5.0-20.el8.x86_64.rpm",
+          "size": 464660,
+          "sha256": "be00cc7329da124d7e069d7bf8a5190b311814b64cdc54eb6386382022f2a0ad"
+        },
+        "member": "usr/lib64/libstdc++.so.6.0.25",
+        "output": "lib/libstdc++.so.6",
+        "size": 1661448,
+        "sha256": "f9886cdb73f0679292d74089be7a3178851dfb2c5293a6c75817a76977bde251"
+      },
+      "libgcc": {
+        "artifact": {
+          "url": "https://dl.rockylinux.org/vault/rocky/8.9/BaseOS/x86_64/os/Packages/l/libgcc-8.5.0-20.el8.x86_64.rpm",
+          "size": 82256,
+          "sha256": "9b9869f2664e4ef3eafa679d03e84552a574e4ca3d5ab067f9acf784fb28c38a"
+        },
+        "member": "lib64/libgcc_s-8-20210514.so.1",
+        "output": "lib/libgcc_s.so.1",
+        "size": 99664,
+        "sha256": "5122cadf695b3df53b903aeaca959c5616d9c245983ac90cd38b81764b8aa943"
+      }
+    },
+    "licenses": {
+      "licenses/gcc-runtime-COPYING.txt": {
+        "package": "libgcc",
+        "member": "usr/share/licenses/libgcc/COPYING",
+        "size": 18002,
+        "sha256": "231f7edcc7352d7734a96eef0b8030f77982678c516876fcb81e25b32d68564c"
+      },
+      "licenses/gcc-runtime-COPYING.LIB.txt": {
+        "package": "libgcc",
+        "member": "usr/share/licenses/libgcc/COPYING.LIB",
+        "size": 26440,
+        "sha256": "32434afcc8666ba060e111d715bfdb6c2d5dd8a35fa4d3ab8ad67d8f850d2f2b"
+      },
+      "licenses/gcc-runtime-COPYING.RUNTIME.txt": {
+        "package": "libgcc",
+        "member": "usr/share/licenses/libgcc/COPYING.RUNTIME",
+        "size": 3324,
+        "sha256": "9d6b43ce4d8de0c878bf16b54d8e7a10d9bd42b75178153e3af6a815bdc90f74"
+      },
+      "licenses/gcc-runtime-COPYING3.txt": {
+        "package": "libgcc",
+        "member": "usr/share/licenses/libgcc/COPYING3",
+        "size": 35147,
+        "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+      },
+      "licenses/gcc-runtime-COPYING3.LIB.txt": {
+        "package": "libgcc",
+        "member": "usr/share/licenses/libgcc/COPYING3.LIB",
+        "size": 7639,
+        "sha256": "a853c2ffec17057872340eee242ae4d96cbf2b520ae27d903e1b2fef1a5f9d1c"
+      }
+    }
+  }
+}
