@@ -10,19 +10,27 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
-from audio2face.arkit import ARKIT_52_CHANNELS
+
+MODEL_CHANNELS = tuple(f"modelChannel{index}" for index in range(52))
+
+
+def _model_schema(*, parameter_default: float = 1.0) -> dict[str, object]:
+    return {
+        "identities": ["Model Identity"],
+        "channels": list(MODEL_CHANNELS),
+        "parameters": {"/input_strength": parameter_default},
+        "emotion_channels": [{"name": "Joy", "default": 0.0}],
+    }
 
 
 class _Settings:
     def __init__(self) -> None:
-        self._install_progress_writes = 0
         self.status = "IDLE"
         self.status_message = "before"
         self.progress = 0.5
         self.preview_state = "PLAYING"
         self.preview_time = 1.0
         self.preview_duration = 2.0
-        self.runtime_install_progress = 0.0
         self.current_job_id = ""
         self.result_path = ""
         self.result_audio_path = ""
@@ -34,16 +42,6 @@ class _Settings:
         self.stream_time = 0.0
         self.stream_reset_on_stop = True
 
-    def __setattr__(self, name: str, value: object) -> None:
-        if name == "runtime_install_progress" and "_install_progress_writes" in self.__dict__:
-            object.__setattr__(
-                self,
-                "_install_progress_writes",
-                self._install_progress_writes + 1,
-            )
-        object.__setattr__(self, name, value)
-
-
 class _ReadOnlySettings:
     def __setattr__(self, name: str, value: object) -> None:
         raise AssertionError(f"linked scene RNA was written: {name}={value!r}")
@@ -54,6 +52,9 @@ class _Scene:
         self.name = name
         self.is_editable = editable
         self.audio2face = settings
+
+    def as_pointer(self) -> int:
+        return id(self)
 
 
 class _Scenes(list[_Scene]):
@@ -79,9 +80,6 @@ class _LiveController:
     def stop(self, **kwargs: object) -> None:
         self.stop_calls.append(dict(kwargs))
         self.is_active = False
-
-    def close(self) -> None:
-        pass
 
     def receive(self, *args: object) -> None:
         self.receive_calls.append(args)
@@ -127,12 +125,12 @@ def runtime_module(monkeypatch: pytest.MonkeyPatch) -> tuple[ModuleType, ModuleT
 
     preferences = ModuleType("audio2face.preferences")
     preferences.get_preferences = lambda *_args, **_kwargs: SimpleNamespace(  # type: ignore[attr-defined]
-        runtime_license_accepted=True,
+        nvidia_terms_accepted=True,
     )
     monkeypatch.setitem(sys.modules, preferences.__name__, preferences)
 
     properties = ModuleType("audio2face.properties")
-    properties.apply_model_defaults = lambda *_args, **_kwargs: None  # type: ignore[attr-defined]
+    properties.apply_model_schema = lambda *_args, **_kwargs: MODEL_CHANNELS  # type: ignore[attr-defined]
     properties.tuning_parameters = lambda *_args, **_kwargs: {}  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, properties.__name__, properties)
 
@@ -189,10 +187,10 @@ def test_install_progress_keeps_only_latest_snapshot(
     runtime_module: tuple[ModuleType, ModuleType],
 ) -> None:
     runtime, bpy = runtime_module
-    local, settings = _local_scene(bpy, "Local")
-    settings._install_progress_writes = 0
+    bpy.data.scenes = _Scenes(  # type: ignore[attr-defined]
+        [_Scene("Linked", editable=False, settings=_ReadOnlySettings())]
+    )
     controller = runtime.RuntimeController()
-    controller.install_scene = local.name
 
     for index in range(10_000):
         controller._queue_install_progress(
@@ -201,8 +199,63 @@ def test_install_progress_keeps_only_latest_snapshot(
     controller._poll_install_events()
 
     assert controller.install_message == "file 9999"
-    assert settings.runtime_install_progress == pytest.approx(0.9999)
-    assert settings._install_progress_writes == 1
+    assert controller.install_progress == pytest.approx(0.9999)
+
+
+def test_install_eligibility_reports_the_release_artifact_blocker(
+    runtime_module: tuple[ModuleType, ModuleType],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, _bpy = runtime_module
+    controller = runtime.RuntimeController()
+    monkeypatch.setattr(
+        controller,
+        "install_availability",
+        lambda: (False, "no managed runtime is published for this platform"),
+    )
+
+    assert controller.install_eligibility() == (
+        False,
+        "no managed runtime is published for this platform",
+    )
+
+
+def test_install_eligibility_requires_online_access_and_license_acceptance(
+    runtime_module: tuple[ModuleType, ModuleType],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, bpy = runtime_module
+    controller = runtime.RuntimeController()
+    monkeypatch.setattr(
+        controller,
+        "install_availability",
+        lambda: (True, "managed runtime is available"),
+    )
+
+    bpy.app.online_access = False  # type: ignore[attr-defined]
+    allowed, reason = controller.install_eligibility()
+    assert allowed is False
+    assert "Online Access is disabled" in reason
+
+    bpy.app.online_access = True  # type: ignore[attr-defined]
+    monkeypatch.setattr(
+        runtime,
+        "get_preferences",
+        lambda: SimpleNamespace(nvidia_terms_accepted=False),
+    )
+    allowed, reason = controller.install_eligibility()
+    assert allowed is False
+    assert "accept the NVIDIA terms" in reason
+
+    monkeypatch.setattr(
+        runtime,
+        "get_preferences",
+        lambda: SimpleNamespace(nvidia_terms_accepted=True),
+    )
+    assert controller.install_eligibility() == (
+        True,
+        "managed runtime is available",
+    )
 
 
 def test_exact_hello_contract_automatically_loads_managed_model(
@@ -210,12 +263,15 @@ def test_exact_hello_contract_automatically_loads_managed_model(
 ) -> None:
     runtime, bpy = runtime_module
     scene, settings = _local_scene(bpy)
+    settings.identity_index = 99
     controller = runtime.RuntimeController()
     controller.pending["hello"] = runtime.PendingRequest("hello", scene.name)
     loaded: list[object] = []
     controller.runtime_spec = lambda: "managed-spec"
     controller._submit_model_load = (
-        lambda target, spec, *, then_generate: loaded.append((target, spec, then_generate))
+        lambda target, spec, *, identity_index, then_generate: loaded.append(
+            (target, spec, identity_index, then_generate)
+        )
     )
 
     controller._handle_response(
@@ -230,7 +286,8 @@ def test_exact_hello_contract_automatically_loads_managed_model(
 
     assert controller.negotiated is True
     assert controller.handshake_deadline is None
-    assert loaded == [(scene, "managed-spec", False)]
+    assert loaded == [(scene, "managed-spec", 0, False)]
+    assert settings.identity_index == 0
     assert settings.status != "ERROR"
 
 
@@ -274,8 +331,7 @@ def test_exact_model_response_marks_model_ready(
         {
             "id": "load",
             "result": {
-                "parameter_defaults": {},
-                "emotion_names": [],
+                "model_schema": _model_schema(),
                 "sample_rate": 16_000,
             },
         }
@@ -284,11 +340,8 @@ def test_exact_model_response_marks_model_ready(
     assert settings.status == "MODEL_READY"
     assert controller.loaded_signature == signature
     assert controller.model_sample_rate == 16_000
-    assert controller.model_parameter_defaults == {}
-    assert controller.model_emotion_names == ()
-    assert controller.scene_model_signatures == {
-        controller._scene_key(scene): signature
-    }
+    assert controller.model_schema == _model_schema()
+    assert controller.schema_scenes == {scene.as_pointer()}
 
 
 def test_loaded_model_schema_is_cached_and_applied_once_per_scene(
@@ -302,18 +355,16 @@ def test_loaded_model_schema_is_cached_and_applied_once_per_scene(
     bpy.data.scenes.append(second_scene)  # type: ignore[attr-defined]
     controller = runtime.RuntimeController()
     signature = ("audio2face/model.json", "audio2emotion/model.json", 0)
-    defaults = {"nested": {"value": 1}}
-    emotion_names = ["Joy"]
-    applications: list[tuple[object, int, tuple[str, ...]]] = []
+    model_schema = _model_schema(parameter_default=1.0)
+    applications: list[tuple[object, float]] = []
 
-    def apply(settings: object, payload: object, names: object) -> None:
+    def apply(settings: object, payload: object) -> tuple[str, ...]:
         assert isinstance(payload, dict)
-        assert isinstance(names, list)
-        applications.append(
-            (settings, payload["nested"]["value"], tuple(names))
-        )
+        parameters = payload["parameters"]
+        applications.append((settings, parameters["/input_strength"]))
+        return MODEL_CHANNELS
 
-    monkeypatch.setattr(runtime, "apply_model_defaults", apply)
+    monkeypatch.setattr(runtime, "apply_model_schema", apply)
     controller.pending["load"] = runtime.PendingRequest(
         "load_model",
         first_scene.name,
@@ -323,27 +374,23 @@ def test_loaded_model_schema_is_cached_and_applied_once_per_scene(
         {
             "id": "load",
             "result": {
-                "parameter_defaults": defaults,
-                "emotion_names": emotion_names,
+                "model_schema": model_schema,
                 "sample_rate": 16_000,
             },
         }
     )
 
-    defaults["nested"]["value"] = 99
-    emotion_names.append("Mutation")
     controller._ensure_scene_model_schema(second_scene)
     controller._ensure_scene_model_schema(second_scene)
 
     assert applications == [
-        (first_settings, 1, ("Joy",)),
-        (second_settings, 1, ("Joy",)),
+        (first_settings, 1.0),
+        (second_settings, 1.0),
     ]
-    assert controller.model_parameter_defaults == {"nested": {"value": 1}}
-    assert controller.model_emotion_names == ("Joy",)
-    assert controller.scene_model_signatures == {
-        controller._scene_key(first_scene): signature,
-        controller._scene_key(second_scene): signature,
+    assert controller.model_schema is model_schema
+    assert controller.schema_scenes == {
+        first_scene.as_pointer(),
+        second_scene.as_pointer(),
     }
 
 
@@ -373,6 +420,7 @@ def test_model_load_submits_both_managed_models(
     controller._submit_model_load(
         scene,
         spec,
+        identity_index=0,
         then_generate=False,
     )
 
@@ -409,8 +457,7 @@ def test_model_response_rejects_an_unknown_field(
         {
             "id": "load",
             "result": {
-                "parameter_defaults": {},
-                "emotion_names": [],
+                "model_schema": _model_schema(),
                 "sample_rate": 16_000,
                 "unexpected": True,
             },
@@ -504,7 +551,7 @@ def test_late_non_shutdown_response_does_not_replace_stopping_state(
         {
             "id": "load",
             "result": {
-                "parameter_defaults": {},
+                "model_schema": _model_schema(),
                 "sample_rate": 16_000,
             },
         }
@@ -546,7 +593,9 @@ def test_generation_binds_result_to_exact_submitted_audio(
         str(spec.audio2emotion_model),
         0,
     )
-    controller._cache_model_schema(scene, signature, {}, [])
+    controller.loaded_signature = signature
+    controller.model_schema = _model_schema()
+    controller.schema_scenes.add(scene.as_pointer())
     controller.result_directory = lambda: tmp_path
     requests: list[tuple[str, dict[str, object]]] = []
 
@@ -658,8 +707,10 @@ def test_stream_audio_ingress_is_safe_from_a_source_thread(
 
     def push() -> None:
         try:
-            # Omitting stream_id exercises the public convenience path too.
-            controller.push_stream_audio(struct.pack("<f", 0.25))
+            controller.push_stream_audio(
+                struct.pack("<f", 0.25),
+                stream_id="stream-1",
+            )
         except BaseException as exc:  # pragma: no cover - asserted on main thread
             failures.append(exc)
 
@@ -818,7 +869,7 @@ def test_exact_stream_frame_routes_negative_timestamp_and_arkit52(
     _scene, settings = _local_scene(bpy)
     settings.stream_id = "stream-1"
     controller = runtime.RuntimeController()
-    weights = [0.25] * len(ARKIT_52_CHANNELS)
+    weights = [0.25] * len(MODEL_CHANNELS)
 
     controller._handle_event(
         {
@@ -852,7 +903,7 @@ def test_malformed_stream_frame_terminates_the_active_stream(
             "job_id": "stream-1",
             "data": {
                 "timestamp_sample": 0,
-                "weights": [0.0] * len(ARKIT_52_CHANNELS),
+                "weights": [0.0] * len(MODEL_CHANNELS),
                 "unexpected": True,
             },
         }
@@ -1139,7 +1190,7 @@ def test_runtime_survives_blend_file_replacement_with_fresh_controller(
     runtime._load_pre_handler(None)
 
     assert runtime._CONTROLLER is None
-    assert cleanup_order == ["close-1", "preview", "live"]
+    assert cleanup_order == ["close-1", "preview"]
 
     runtime._load_post_handler(None)
 
@@ -1152,10 +1203,8 @@ def test_runtime_survives_blend_file_replacement_with_fresh_controller(
     assert cleanup_order == [
         "close-1",
         "preview",
-        "live",
         "close-2",
         "preview",
-        "live",
     ]
     assert runtime._CONTROLLER is None
     assert bpy.app.handlers.load_pre == []

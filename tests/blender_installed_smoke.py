@@ -30,17 +30,32 @@ def main() -> None:
     assert bpy.context.scene.audio2face.status == "IDLE"
 
     preference_names = set(preferences.A2FAddonPreferences.bl_rna.properties.keys())
-    assert preference_names == {"rna_type"} | set(
-        preferences.A2FAddonPreferences.__annotations__
+    assert set(preferences.A2FAddonPreferences.__annotations__) == {
+        "nvidia_terms_accepted"
+    }
+    missing_preference_names = (
+        set(preferences.A2FAddonPreferences.__annotations__) - preference_names
     )
-    assert set(properties.A2FSceneSettings.bl_rna.properties.keys()) == {
-        "rna_type"
-    } | set(properties.A2FSceneSettings.__annotations__)
+    assert not missing_preference_names, (
+        "preferences missing registered RNA properties: "
+        f"{sorted(missing_preference_names)}"
+    )
+    scene_property_names = set(properties.A2FSceneSettings.bl_rna.properties.keys())
+    missing_scene_property_names = (
+        set(properties.A2FSceneSettings.__annotations__) - scene_property_names
+    )
+    assert not missing_scene_property_names, (
+        "scene settings missing registered RNA properties: "
+        f"{sorted(missing_scene_property_names)}"
+    )
 
     data_root = runtime.get_controller().data_root(create=True)
     isolated_extensions = os.environ.get("BLENDER_USER_EXTENSIONS")
     if isolated_extensions:
         data_root.relative_to(Path(isolated_extensions).resolve())
+    repo_directory, package_id = preferences._uninstall_target(bpy.context)
+    assert package_id == "audio2face"
+    assert Path(repo_directory).is_dir()
     ready, reason = runtime.get_controller().runtime_availability()
     assert not ready
     assert "published" in reason or "runtime" in reason

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import stat
 import struct
 from dataclasses import FrozenInstanceError
@@ -304,25 +303,6 @@ def test_manifest_rejects_unknown_and_missing_fields(tmp_path: Path) -> None:
     with pytest.raises(BundleError, match="missing fields: licenses") as error:
         resolve_runtime_bundle(tmp_path, system="linux", machine="x86_64", environ={})
     assert "unknown fields: unexpected" in str(error.value)
-
-
-def test_manifest_rejects_the_removed_single_model_field(tmp_path: Path) -> None:
-    root, manifest = _make_bundle(tmp_path)
-    del manifest["audio2face_model"]
-    del manifest["audio2emotion_model"]
-    manifest["default_model"] = "models/audio2face/model.json"
-    _rewrite_manifest(root, manifest)
-
-    with pytest.raises(BundleError) as error:
-        resolve_runtime_bundle(
-            tmp_path,
-            system="linux",
-            machine="x86_64",
-            environ={},
-        )
-    assert "audio2face_model" in str(error.value)
-    assert "audio2emotion_model" in str(error.value)
-    assert "unknown fields: default_model" in str(error.value)
 
 
 def test_manifest_rejects_schema_and_platform_mismatch(tmp_path: Path) -> None:

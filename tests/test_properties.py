@@ -1,21 +1,27 @@
 from __future__ import annotations
 
+import copy
 import importlib.util
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import pytest
 
 
-class _EmotionCollection(list[SimpleNamespace]):
+CHANNELS = tuple(f"modelChannel{index}" for index in range(52))
+
+
+class _Collection(list[SimpleNamespace]):
+    def __init__(self, factory: Callable[[], SimpleNamespace]) -> None:
+        super().__init__()
+        self.factory = factory
+
     def add(self) -> SimpleNamespace:
-        item = SimpleNamespace(name="", value=0.0)
+        item = self.factory()
         self.append(item)
         return item
-
-    def clear(self) -> None:
-        super().clear()
 
 
 @pytest.fixture
@@ -37,171 +43,133 @@ def properties_module(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     monkeypatch.setitem(sys.modules, "bpy", bpy)
     monkeypatch.setitem(sys.modules, "bpy.props", props)
 
-    module_name = "audio2face._properties_test"
+    name = "audio2face._properties_test"
     source = Path(__file__).resolve().parents[1] / "audio2face" / "properties.py"
-    spec = importlib.util.spec_from_file_location(module_name, source)
+    spec = importlib.util.spec_from_file_location(name, source)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
-    monkeypatch.setitem(sys.modules, module_name, module)
+    monkeypatch.setitem(sys.modules, name, module)
     spec.loader.exec_module(module)
     return module
 
 
 def _settings() -> SimpleNamespace:
     return SimpleNamespace(
-        input_strength=1.0,
-        lower_face_smoothing=0.0,
-        upper_face_smoothing=0.0,
-        lower_face_strength=1.0,
-        upper_face_strength=1.0,
-        face_mask_level=0.5,
-        face_mask_softness=0.1,
-        skin_strength=1.0,
-        blink_strength=1.0,
-        blink_offset=0.0,
-        eyelid_open_offset=0.0,
-        lip_open_offset=0.0,
+        identity_index=0,
+        model_identities=_Collection(lambda: SimpleNamespace(name="")),
         auto_audio2emotion=False,
-        manual_emotions=_EmotionCollection(),
-        emotion_strength=0.6,
-        emotion_contrast=1.0,
-        emotion_smoothing=0.7,
-        emotion_transition_time=0.5,
-        max_emotions=6,
+        manual_emotions=_Collection(lambda: SimpleNamespace(name="", value=0.0)),
+        model_parameters=_Collection(
+            lambda: SimpleNamespace(path="", kind="", float_value=0.0, int_value=0)
+        ),
     )
 
 
-def _defaults(manual_values: dict[str, float]) -> dict[str, object]:
+def _schema() -> dict[str, object]:
     return {
-        "input_strength": 0.9,
-        "skin": {
-            "lower_face_smoothing": 0.1,
-            "upper_face_smoothing": 0.2,
-            "lower_face_strength": 0.8,
-            "upper_face_strength": 0.7,
-            "face_mask_level": 0.6,
-            "face_mask_softness": 0.3,
-            "skin_strength": 0.95,
-            "blink_strength": 0.85,
-            "blink_offset": -0.1,
-            "eyelid_open_offset": 0.05,
-            "lip_open_offset": 0.15,
+        "identities": ["Aki", "Mark"],
+        "channels": list(CHANNELS),
+        "parameters": {
+            "/input_strength": 0.9,
+            "/audio2emotion/max_emotions": 4,
         },
-        "emotion": {
-            "manual_values": manual_values,
-            "auto": {
-                "strength": 0.55,
-                "contrast": 1.25,
-                "smoothing": 0.65,
-                "transition_time": 0.4,
-                "max_emotions": 4,
-            },
-        },
+        "emotion_channels": [
+            {"name": "Neutral", "default": 0.5},
+            {"name": "Joy", "default": 0.2},
+        ],
     }
 
 
-def test_model_emotions_preserve_configured_values_by_name(
-    properties_module: ModuleType,
-) -> None:
+def _parameter_values(settings: SimpleNamespace) -> list[tuple[object, ...]]:
+    return [
+        (item.path, item.kind, item.int_value if item.kind == "integer" else item.float_value)
+        for item in settings.model_parameters
+    ]
+
+
+def test_schema_materializes_model_controls(properties_module: ModuleType) -> None:
     settings = _settings()
-    settings.manual_emotions.extend(
-        [
-            SimpleNamespace(name="Joy", value=0.91),
-            SimpleNamespace(name="RemovedByNewModel", value=0.4),
-        ]
-    )
+    settings.identity_index = 9
 
-    properties_module.apply_model_defaults(
-        settings,
-        _defaults({"Neutral": 0.5, "Joy": 0.2, "Sadness": 0.1}),
-        ["Neutral", "Joy", "Sadness"],
-    )
-
+    assert properties_module.apply_model_schema(settings, _schema()) == CHANNELS
+    assert [item.name for item in settings.model_identities] == ["Aki", "Mark"]
+    assert settings.identity_index == 0
+    assert _parameter_values(settings) == [
+        ("/input_strength", "float", 0.9),
+        ("/audio2emotion/max_emotions", "integer", 4),
+    ]
     assert [(item.name, item.value) for item in settings.manual_emotions] == [
         ("Neutral", 0.5),
-        ("Joy", 0.91),
-        ("Sadness", 0.1),
+        ("Joy", 0.2),
     ]
-    assert settings.emotion_strength == pytest.approx(0.55)
-    assert settings.emotion_contrast == pytest.approx(1.25)
-    assert settings.emotion_smoothing == pytest.approx(0.65)
-    assert settings.emotion_transition_time == pytest.approx(0.4)
-    assert settings.max_emotions == 4
 
 
-def test_tuning_parameters_always_emit_complete_emotion_document(
+def test_reload_preserves_matching_values_and_serializes_exact_schema(
     properties_module: ModuleType,
 ) -> None:
     settings = _settings()
+    properties_module.apply_model_schema(settings, _schema())
+    settings.model_parameters[0].float_value = 1.7
+    settings.model_parameters[1].int_value = 2
+    settings.manual_emotions[1].value = 0.82
+
+    schema = _schema()
+    schema["parameters"] = {
+        "/audio2emotion/max_emotions": 3.5,
+        "/input_strength": 0.5,
+        "/skin/skin_strength": 1.1,
+    }
+    schema["emotion_channels"] = [
+        {"name": "Joy", "default": 0.1},
+        {"name": "Sadness", "default": 0.3},
+    ]
+    properties_module.apply_model_schema(settings, schema)
     settings.auto_audio2emotion = True
-    settings.manual_emotions.extend(
-        [
-            SimpleNamespace(name="Neutral", value=0.4),
-            SimpleNamespace(name="Joy", value=0.75),
-        ]
-    )
 
-    payload = properties_module.tuning_parameters(settings)
-
-    assert payload["emotion"] == {
+    assert _parameter_values(settings) == [
+        ("/audio2emotion/max_emotions", "float", 3.5),
+        ("/input_strength", "float", 1.7),
+        ("/skin/skin_strength", "float", 1.1),
+    ]
+    assert properties_module.tuning_parameters(settings) == {
         "auto_audio2emotion": True,
-        "manual_values": {"Neutral": 0.4, "Joy": 0.75},
-        "auto": {
-            "strength": 0.6,
-            "contrast": 1.0,
-            "smoothing": 0.7,
-            "transition_time": 0.5,
-            "max_emotions": 6,
+        "manual_emotions": {"Joy": 0.82, "Sadness": 0.3},
+        "parameters": {
+            "/audio2emotion/max_emotions": 3.5,
+            "/input_strength": 1.7,
+            "/skin/skin_strength": 1.1,
         },
     }
 
 
-def test_reloading_the_same_emotion_schema_preserves_user_controls(
+@pytest.mark.parametrize(
+    "mutate",
+    (
+        lambda schema: schema.update(extra=True),
+        lambda schema: schema.update(channels=[]),
+        lambda schema: schema.update(parameters={"/invalid": True}),
+        lambda schema: schema["emotion_channels"].append(
+            {"name": "Joy", "default": 0.1}
+        ),
+        lambda schema: schema.update(identities=[]),
+    ),
+)
+def test_invalid_schema_does_not_mutate_controls(
     properties_module: ModuleType,
+    mutate: Callable[[dict[str, object]], object],
 ) -> None:
     settings = _settings()
-    settings.input_strength = 1.7
-    settings.lower_face_strength = 1.6
-    settings.emotion_strength = 0.23
-    settings.emotion_transition_time = 0.8
-    settings.max_emotions = 2
-    settings.manual_emotions.extend(
-        [
-            SimpleNamespace(name="Neutral", value=0.31),
-            SimpleNamespace(name="Joy", value=0.82),
-        ]
+    properties_module.apply_model_schema(settings, _schema())
+    before = copy.deepcopy(
+        (_parameter_values(settings), [(item.name, item.value) for item in settings.manual_emotions])
     )
+    schema = _schema()
+    mutate(schema)
 
-    properties_module.apply_model_defaults(
-        settings,
-        _defaults({"Neutral": 0.5, "Joy": 0.2}),
-        ["Neutral", "Joy"],
-    )
+    with pytest.raises(ValueError):
+        properties_module.apply_model_schema(settings, schema)
 
-    assert settings.input_strength == pytest.approx(1.7)
-    assert settings.lower_face_strength == pytest.approx(1.6)
-    assert settings.emotion_strength == pytest.approx(0.23)
-    assert settings.emotion_transition_time == pytest.approx(0.8)
-    assert settings.max_emotions == 2
-    assert [(item.name, item.value) for item in settings.manual_emotions] == [
-        ("Neutral", 0.31),
-        ("Joy", 0.82),
-    ]
-
-
-def test_model_emotion_names_must_exactly_match_defaults(
-    properties_module: ModuleType,
-) -> None:
-    settings = _settings()
-    settings.manual_emotions.append(SimpleNamespace(name="Joy", value=0.8))
-
-    with pytest.raises(ValueError, match="do not match"):
-        properties_module.apply_model_defaults(
-            settings,
-            _defaults({"Neutral": 0.5}),
-            ["Neutral", "Joy"],
-        )
-
-    assert [(item.name, item.value) for item in settings.manual_emotions] == [
-        ("Joy", 0.8)
-    ]
+    assert (
+        _parameter_values(settings),
+        [(item.name, item.value) for item in settings.manual_emotions],
+    ) == before

@@ -7,7 +7,6 @@ from pathlib import Path
 
 import pytest
 
-from audio2face.arkit import ARKIT_52_CHANNELS
 from audio2face.result_io import (
     RESULT_SCHEMA,
     ResultValidationError,
@@ -17,11 +16,15 @@ from audio2face.result_io import (
 )
 
 
+MODEL_CHANNELS = ["sdkJawOpen", *(f"sdkOutput{index:02d}" for index in range(51))]
+
+
 @pytest.fixture
 def canonical_result_document() -> dict[str, object]:
     return {
         "schema": RESULT_SCHEMA,
         "job_id": "job-canonical",
+        "channels": MODEL_CHANNELS.copy(),
         "sample_rate": 16_000,
         "timestamps_samples": [-800, 0, 267],
         "weights": [
@@ -32,7 +35,7 @@ def canonical_result_document() -> dict[str, object]:
     }
 
 
-def test_canonical_arkit_result_is_signed_exact_and_fixed_order(
+def test_model_described_result_is_signed_exact_and_preserves_channel_order(
     canonical_result_document: dict[str, object],
 ) -> None:
     result = validate_result_document(canonical_result_document)
@@ -40,6 +43,7 @@ def test_canonical_arkit_result_is_signed_exact_and_fixed_order(
     assert result.timestamps == [-800, 0, 267]
     assert result.sample_rate == 16_000
     assert result.job_id == "job-canonical"
+    assert result.channels == MODEL_CHANNELS
     assert result.weights[1] == [0.5] * 52
 
 
@@ -63,6 +67,20 @@ def test_canonical_arkit_result_is_signed_exact_and_fixed_order(
         (
             lambda value: value.update(weights=[[0.0] * 51] * 3),
             "exactly 52 values",
+        ),
+        (
+            lambda value: value.update(channels=MODEL_CHANNELS[:-1]),
+            "exactly 52 names",
+        ),
+        (
+            lambda value: value.update(
+                channels=[MODEL_CHANNELS[0], MODEL_CHANNELS[0], *MODEL_CHANNELS[2:]]
+            ),
+            "duplicate name",
+        ),
+        (
+            lambda value: value.update(channels=["", *MODEL_CHANNELS[1:]]),
+            r"channels\[0\].*non-empty string",
         ),
         (lambda value: value.update(job_id=""), "job_id"),
         (lambda value: value.update(job_id="x" * 129), "job_id"),
@@ -117,11 +135,15 @@ def test_confined_load_round_trip(
 
     assert loaded.job_id == "job-canonical"
     assert loaded.timestamps == [-800, 0, 267]
+    assert loaded.channels == MODEL_CHANNELS
 
 
 def test_load_rejects_duplicate_fields_invalid_json_and_invalid_numbers(tmp_path: Path) -> None:
     duplicate = tmp_path / "duplicate.json"
-    duplicate.write_text('{"schema":"a2f-animation/1","schema":"a2f-animation/1"}', encoding="utf-8")
+    duplicate.write_text(
+        '{"schema":"a2f-animation/2","schema":"a2f-animation/2"}',
+        encoding="utf-8",
+    )
     with pytest.raises(ResultValidationError, match="duplicate field 'schema'"):
         load_animation_result(duplicate, allowed_directory=tmp_path)
 

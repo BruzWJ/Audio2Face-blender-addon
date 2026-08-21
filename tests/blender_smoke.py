@@ -1,4 +1,4 @@
-"""Blender 5.2 headless smoke test for ARKit shape-key value streaming.
+"""Blender 5.2 headless smoke test for model-channel Shape Key streaming.
 
 Run from the project root with::
 
@@ -22,10 +22,8 @@ if str(PROJECT_ROOT) not in sys.path:
 import bpy  # noqa: E402  (available only inside Blender)
 
 import audio2face  # noqa: E402
-from audio2face.arkit import ARKIT_52_CHANNELS  # noqa: E402
 from audio2face.preview import (  # noqa: E402
-    PreviewError,
-    apply_arkit_frame,
+    apply_shape_key_frame,
     build_subscriptions,
 )
 from audio2face.live_stream import LiveStreamController  # noqa: E402
@@ -33,8 +31,13 @@ from audio2face import runtime  # noqa: E402
 from audio2face.preferences import A2FAddonPreferences  # noqa: E402
 from audio2face.properties import (  # noqa: E402
     A2FSceneSettings,
-    apply_model_defaults,
+    apply_model_schema,
     tuning_parameters,
+)
+
+
+MODEL_CHANNELS = ("jawOpen",) + tuple(
+    f"modelChannel{index}" for index in range(51)
 )
 
 
@@ -48,7 +51,7 @@ def _make_shape_key_target(
     scene: bpy.types.Scene,
     *,
     object_name: str = "A2FSmokeTarget",
-    shape_name: str = "JawOpen",
+    shape_name: str = "jawOpen",
 ) -> bpy.types.Object:
     mesh = bpy.data.meshes.new(f"{object_name}Mesh")
     mesh.from_pydata(
@@ -81,6 +84,9 @@ def main() -> None:
         assert runtime._load_pre_handler in bpy.app.handlers.load_pre
         assert runtime._load_post_handler in bpy.app.handlers.load_post
         preference_names = set(A2FAddonPreferences.bl_rna.properties.keys())
+        assert set(A2FAddonPreferences.__annotations__) == {
+            "nvidia_terms_accepted"
+        }
         missing_preference_names = (
             set(A2FAddonPreferences.__annotations__) - preference_names
         )
@@ -101,68 +107,59 @@ def main() -> None:
         target = _make_shape_key_target(scene)
 
         settings = scene.audio2face
-        model_defaults = {
-            "input_strength": 1.0,
-            "skin": {
-                "lower_face_smoothing": 0.0,
-                "upper_face_smoothing": 0.0,
-                "lower_face_strength": 1.0,
-                "upper_face_strength": 1.0,
-                "face_mask_level": 0.5,
-                "face_mask_softness": 0.1,
-                "skin_strength": 1.0,
-                "blink_strength": 1.0,
-                "blink_offset": 0.0,
-                "eyelid_open_offset": 0.0,
-                "lip_open_offset": 0.0,
+        model_schema = {
+            "identities": ["Aki", "Mark"],
+            "channels": list(MODEL_CHANNELS),
+            "parameters": {
+                "/input_strength": 1.0,
+                "/audio2emotion/emotion_strength": 0.6,
+                "/audio2emotion/max_emotions": 6,
             },
-            "emotion": {
-                "manual_values": {"Neutral": 1.0, "Joy": 0.0},
-                "auto": {
-                    "strength": 0.6,
-                    "contrast": 1.0,
-                    "smoothing": 0.7,
-                    "transition_time": 0.5,
-                    "max_emotions": 6,
-                },
-            },
+            "emotion_channels": [
+                {"name": "Neutral", "default": 1.0},
+                {"name": "Joy", "default": 0.0},
+            ],
         }
-        apply_model_defaults(settings, model_defaults, ["Neutral", "Joy"])
+        apply_model_schema(settings, model_schema)
+        assert [item.name for item in settings.model_identities] == ["Aki", "Mark"]
         assert [(item.name, item.value) for item in settings.manual_emotions] == [
             ("Neutral", 1.0),
             ("Joy", 0.0),
         ]
         settings.manual_emotions[1].value = 0.75
-        apply_model_defaults(settings, model_defaults, ["Neutral", "Joy"])
+        settings.model_parameters[1].float_value = 0.8
+        apply_model_schema(settings, model_schema)
         _assert_close(settings.manual_emotions[1].value, 0.75, label="preserved Joy")
+        _assert_close(
+            settings.model_parameters[1].float_value,
+            0.8,
+            label="preserved emotion strength",
+        )
         settings.auto_audio2emotion = True
-        emotion_payload = tuning_parameters(settings)["emotion"]
-        assert set(emotion_payload) == {
+        tuning_payload = tuning_parameters(settings)
+        assert set(tuning_payload) == {
             "auto_audio2emotion",
-            "manual_values",
-            "auto",
+            "manual_emotions",
+            "parameters",
         }
-        assert emotion_payload["auto_audio2emotion"] is True
-        manual_payload = emotion_payload["manual_values"]
+        assert tuning_payload["auto_audio2emotion"] is True
+        manual_payload = tuning_payload["manual_emotions"]
         assert set(manual_payload) == {"Neutral", "Joy"}
         _assert_close(manual_payload["Neutral"], 1.0, label="manual Neutral")
         _assert_close(manual_payload["Joy"], 0.75, label="manual Joy")
-        auto_payload = emotion_payload["auto"]
-        assert set(auto_payload) == {
-            "strength",
-            "contrast",
-            "smoothing",
-            "transition_time",
-            "max_emotions",
+        parameter_payload = tuning_payload["parameters"]
+        assert set(parameter_payload) == {
+            "/input_strength",
+            "/audio2emotion/emotion_strength",
+            "/audio2emotion/max_emotions",
         }
-        for name, expected in (
-            ("strength", 0.6),
-            ("contrast", 1.0),
-            ("smoothing", 0.7),
-            ("transition_time", 0.5),
-        ):
-            _assert_close(auto_payload[name], expected, label=f"auto {name}")
-        assert auto_payload["max_emotions"] == 6
+        _assert_close(parameter_payload["/input_strength"], 1.0, label="input strength")
+        _assert_close(
+            parameter_payload["/audio2emotion/emotion_strength"],
+            0.8,
+            label="emotion strength",
+        )
+        assert parameter_payload["/audio2emotion/max_emotions"] == 6
 
         extra_target = _make_shape_key_target(
             scene,
@@ -170,55 +167,57 @@ def main() -> None:
         )
         linked_target = bpy.data.objects.new("A2FSmokeLinkedTarget", target.data)
         scene.collection.objects.link(linked_target)
+        plain_mesh = bpy.data.meshes.new("A2FSmokePlainMesh")
+        plain_mesh.from_pydata(
+            [(-1.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 0.0, 1.0)],
+            [],
+            [(0, 1, 2)],
+        )
+        plain_target = bpy.data.objects.new("A2FSmokePlainTarget", plain_mesh)
+        scene.collection.objects.link(plain_target)
         bpy.ops.object.select_all(action="DESELECT")
         target.select_set(True)
         extra_target.select_set(True)
         linked_target.select_set(True)
+        plain_target.select_set(True)
         bpy.context.view_layer.objects.active = target
         assert bpy.ops.a2f.add_selected_targets() == {"FINISHED"}
         selected_targets = {item.object for item in settings.target_meshes}
-        assert selected_targets == {target, extra_target, linked_target}
+        assert selected_targets == {target, extra_target, linked_target, plain_target}
         primary_vertices = [tuple(vertex.co) for vertex in target.data.vertices]
         extra_vertices = [tuple(vertex.co) for vertex in extra_target.data.vertices]
 
         subscriptions = build_subscriptions(settings)
-        # target and linked_target share one Shape Key datablock, so the stream
-        # subscribes it only once.
-        assert len(subscriptions) == 2
-        preview_frame = [0.0] * len(ARKIT_52_CHANNELS)
-        preview_frame[ARKIT_52_CHANNELS.index("JawOpen")] = 0.625
-        apply_arkit_frame(subscriptions, preview_frame)
+        # Every mesh remains subscribed without Shape Key inspection; shared
+        # Key datablocks are deduplicated only when a frame is delivered.
+        assert len(subscriptions) == 4
+        preview_frame = [0.0] * len(MODEL_CHANNELS)
+        preview_frame[MODEL_CHANNELS.index("jawOpen")] = 0.625
+        apply_shape_key_frame(subscriptions, MODEL_CHANNELS, preview_frame)
         _assert_close(
-            target.data.shape_keys.key_blocks["JawOpen"].value,
+            target.data.shape_keys.key_blocks["jawOpen"].value,
             0.625,
-            label="primary preview JawOpen",
+            label="primary preview jawOpen",
         )
         _assert_close(
-            extra_target.data.shape_keys.key_blocks["JawOpen"].value,
+            extra_target.data.shape_keys.key_blocks["jawOpen"].value,
             0.625,
-            label="extra preview JawOpen",
+            label="extra preview jawOpen",
         )
         _assert_close(
-            linked_target.data.shape_keys.key_blocks["JawOpen"].value,
+            linked_target.data.shape_keys.key_blocks["jawOpen"].value,
             0.625,
-            label="linked preview JawOpen",
+            label="linked preview jawOpen",
         )
-        invalid_frame = preview_frame.copy()
-        invalid_frame[ARKIT_52_CHANNELS.index("JawOpen")] = 1.01
-        try:
-            apply_arkit_frame(subscriptions, invalid_frame)
-        except PreviewError:
-            pass
-        else:
-            raise AssertionError("preview accepted an ARKit weight outside [0, 1]")
-        apply_arkit_frame(
+        apply_shape_key_frame(
             subscriptions,
-            [0.0] * len(ARKIT_52_CHANNELS),
+            MODEL_CHANNELS,
+            [0.0] * len(MODEL_CHANNELS),
         )
         _assert_close(
-            target.data.shape_keys.key_blocks["JawOpen"].value,
+            target.data.shape_keys.key_blocks["jawOpen"].value,
             0.0,
-            label="primary reset JawOpen",
+            label="primary reset jawOpen",
         )
         assert [tuple(vertex.co) for vertex in target.data.vertices] == primary_vertices
         assert [tuple(vertex.co) for vertex in extra_target.data.vertices] == extra_vertices
@@ -227,21 +226,26 @@ def main() -> None:
 
         live = LiveStreamController()
         try:
-            live.prepare(scene, "blender-smoke-stream", 16_000)
-            streamed_frame = [0.0] * len(ARKIT_52_CHANNELS)
-            streamed_frame[ARKIT_52_CHANNELS.index("JawOpen")] = 0.375
+            live.prepare(
+                scene,
+                "blender-smoke-stream",
+                16_000,
+                MODEL_CHANNELS,
+            )
+            streamed_frame = [0.0] * len(MODEL_CHANNELS)
+            streamed_frame[MODEL_CHANNELS.index("jawOpen")] = 0.375
             # The current SDK can emit receptive-field frames before sample zero.
             # They must be accepted and applied directly without animation data.
             live.receive("blender-smoke-stream", -160, streamed_frame)
             _assert_close(
-                target.data.shape_keys.key_blocks["JawOpen"].value,
+                target.data.shape_keys.key_blocks["jawOpen"].value,
                 0.375,
-                label="primary live-stream JawOpen",
+                label="primary live-stream jawOpen",
             )
             _assert_close(
-                extra_target.data.shape_keys.key_blocks["JawOpen"].value,
+                extra_target.data.shape_keys.key_blocks["jawOpen"].value,
                 0.375,
-                label="extra live-stream JawOpen",
+                label="extra live-stream jawOpen",
             )
             _assert_close(settings.stream_time, 0.0, label="negative stream time clamp")
             assert [tuple(vertex.co) for vertex in target.data.vertices] == primary_vertices
@@ -249,9 +253,9 @@ def main() -> None:
             assert target.data.shape_keys.animation_data is None
             assert extra_target.data.shape_keys.animation_data is None
         finally:
-            live.close()
+            live.stop(reset=True)
         _assert_close(
-            target.data.shape_keys.key_blocks["JawOpen"].value,
+            target.data.shape_keys.key_blocks["jawOpen"].value,
             0.0,
             label="primary live-stream reset",
         )

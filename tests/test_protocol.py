@@ -37,12 +37,12 @@ def test_request_round_trip_is_compact_utf8_and_one_record() -> None:
     "line",
     [
         "{}\n",
-        '{"protocol":"audio2face/2","type":"response","id":"1","result":{}}',
+        '{"protocol":"audio2face/3","type":"response","id":"1","result":{}}',
         '{"protocol":"audio2face/999","type":"response","id":"1","result":{}}\n',
-        '{"protocol":"audio2face/2","type":"response","id":"1","result":{}}\n{}\n',
-        '{"protocol":"audio2face/2","type":"response","id":"1","result":{}}\n\n',
+        '{"protocol":"audio2face/3","type":"response","id":"1","result":{}}\n{}\n',
+        '{"protocol":"audio2face/3","type":"response","id":"1","result":{}}\n\n',
         b"\xff\n",
-        '{"protocol":"audio2face/2","type":"response","id":"1","id":"2","result":{}}\n',
+        '{"protocol":"audio2face/3","type":"response","id":"1","id":"2","result":{}}\n',
     ],
 )
 def test_decode_rejects_malformed_noncanonical_records(line: str | bytes) -> None:
@@ -197,7 +197,7 @@ def test_protocol_normalizes_non_utf8_text_errors() -> None:
         encode_message(message)
 
     line = (
-        '{"protocol":"audio2face/2","type":"response","id":"1",'
+        '{"protocol":"audio2face/3","type":"response","id":"1",'
         '"result":{"value":"\ud800"}}\n'
     )
     with pytest.raises(ProtocolError, match="UTF-8"):
