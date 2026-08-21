@@ -8,7 +8,6 @@ venv/
 
 # Native worker build output
 build/
-dist/
 worker/build/
 out/
 *.o
