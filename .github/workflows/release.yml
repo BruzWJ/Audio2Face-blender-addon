@@ -1,0 +1,359 @@
+name: Release platform extensions
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+concurrency:
+  group: audio2face-release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: Validate source and prepare draft
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.identity.outputs.version }}
+      windows_asset: ${{ steps.identity.outputs.windows_asset }}
+      linux_asset: ${{ steps.identity.outputs.linux_asset }}
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Select release Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.11.9"
+
+      - name: Validate tag and package identity
+        id: identity
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          import re
+          import tomllib
+          from pathlib import Path
+
+          manifest = tomllib.loads(
+              Path("audio2face/blender_manifest.toml").read_text(encoding="utf-8")
+          )
+          extension_id = manifest.get("id")
+          version = manifest.get("version")
+          if extension_id != "audio2face":
+              raise SystemExit(f"unexpected extension id: {extension_id!r}")
+          if not isinstance(version, str) or re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version) is None:
+              raise SystemExit(f"invalid extension version: {version!r}")
+          if os.environ.get("GITHUB_REF_TYPE") != "tag":
+              raise SystemExit("release workflow requires a Git tag")
+          expected_tag = f"v{version}"
+          actual_tag = os.environ.get("GITHUB_REF_NAME")
+          if actual_tag != expected_tag:
+              raise SystemExit(
+                  f"release tag must equal manifest version {expected_tag!r}; got {actual_tag!r}"
+              )
+          outputs = {
+              "version": version,
+              "windows_asset": f"{extension_id}-{version}-windows-x64.zip",
+              "linux_asset": f"{extension_id}-{version}-linux-x64.zip",
+          }
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as stream:
+              for name, value in outputs.items():
+                  stream.write(f"{name}={value}\n")
+          PY
+
+      - name: Run source tests
+        shell: bash
+        run: |
+          python -m pip install --disable-pip-version-check "pytest==7.2.1"
+          python -m pytest -q
+
+      - name: Create or verify draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.identity.outputs.version }}
+        run: |
+          if state="$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null)"; then
+            if [[ "$state" != "true" ]]; then
+              echo "Release $GITHUB_REF_NAME already exists and is not a draft." >&2
+              exit 1
+            fi
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --draft \
+              --generate-notes \
+              --title "Audio2Face $VERSION" \
+              --verify-tag
+          fi
+
+  build_windows:
+    name: Build Windows x64 extension
+    needs: prepare
+    runs-on: audio2face-windows-x64
+    timeout-minutes: 360
+    permissions:
+      contents: write
+    env:
+      ASSET_NAME: ${{ needs.prepare.outputs.windows_asset }}
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          clean: true
+
+      - name: Select release Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.11.9"
+
+      - name: Verify Windows release host
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $required = 64GB
+          $roots = @($env:GITHUB_WORKSPACE, $env:RUNNER_TEMP) |
+            ForEach-Object { [System.IO.Path]::GetPathRoot([System.IO.Path]::GetFullPath($_)) } |
+            Sort-Object -Unique
+          foreach ($root in $roots) {
+            $drive = [System.IO.DriveInfo]::new($root)
+            if ($drive.AvailableFreeSpace -lt $required) {
+              throw "$root has $($drive.AvailableFreeSpace) free bytes; Windows release build requires at least $required"
+            }
+          }
+          Get-Command git.exe -ErrorAction Stop | Out-Null
+          Get-Command gh.exe -ErrorAction Stop | Out-Null
+
+      - name: Download verified Blender 5.2.0
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $name = "blender-5.2.0-windows-x64"
+          $archive = Join-Path $env:RUNNER_TEMP "$name-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT.zip"
+          $destination = Join-Path $env:RUNNER_TEMP "$name-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          "BLENDER_ARCHIVE=$archive" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "BLENDER_DIRECTORY=$destination" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Invoke-WebRequest -Uri "https://download.blender.org/release/Blender5.2/$name.zip" -OutFile $archive
+          $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          $expected = "2d184b626c001692c362291911293b6a297179d618d95e9e9192c3a80318adc4"
+          if ($actual -cne $expected) {
+            throw "Blender archive SHA-256 mismatch: expected $expected, got $actual"
+          }
+          Expand-Archive -LiteralPath $archive -DestinationPath $destination
+          $blender = Join-Path $destination "$name\blender.exe"
+          if (-not (Test-Path -LiteralPath $blender -PathType Leaf)) {
+            throw "Blender executable is missing after extraction: $blender"
+          }
+          "BLENDER_EXECUTABLE=$blender" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Run Blender source smoke test
+        shell: pwsh
+        run: |
+          & $env:BLENDER_EXECUTABLE --factory-startup --background --python tests/blender_smoke.py
+          if ($LASTEXITCODE -ne 0) { throw "Blender smoke test failed with exit code $LASTEXITCODE" }
+
+      - name: Build pinned Windows runtime
+        shell: pwsh
+        run: |
+          python tools/build_runtime.py --platform windows-x64
+          if ($LASTEXITCODE -ne 0) { throw "Windows runtime build failed with exit code $LASTEXITCODE" }
+
+      - name: Build Windows extension
+        shell: pwsh
+        run: |
+          python tools/build_extension.py --blender $env:BLENDER_EXECUTABLE --platform windows-x64
+          if ($LASTEXITCODE -ne 0) { throw "Windows extension build failed with exit code $LASTEXITCODE" }
+
+      - name: Upload Windows asset to draft release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $asset = Join-Path $env:GITHUB_WORKSPACE "dist\$env:ASSET_NAME"
+          if (-not (Test-Path -LiteralPath $asset -PathType Leaf)) {
+            throw "Expected release asset is missing: $asset"
+          }
+          $size = (Get-Item -LiteralPath $asset).Length
+          if ($size -lt 1 -or $size -ge 2147483648) {
+            throw "GitHub release asset must be non-empty and smaller than 2 GiB; got $size bytes"
+          }
+          gh release upload $env:GITHUB_REF_NAME $asset --repo $env:GITHUB_REPOSITORY --clobber
+          if ($LASTEXITCODE -ne 0) { throw "GitHub release upload failed with exit code $LASTEXITCODE" }
+
+      - name: Remove native build workspace
+        if: always()
+        shell: pwsh
+        run: |
+          $workspace = [System.IO.Path]::GetFullPath($env:GITHUB_WORKSPACE)
+          if (-not (Test-Path -LiteralPath (Join-Path $workspace ".git"))) {
+            throw "Refusing cleanup outside a checked-out Actions workspace: $workspace"
+          }
+          Remove-Item -LiteralPath (Join-Path $workspace "build") -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -LiteralPath (Join-Path $workspace "dist\$env:ASSET_NAME") -Force -ErrorAction SilentlyContinue
+          if ($env:BLENDER_DIRECTORY) {
+            Remove-Item -LiteralPath $env:BLENDER_DIRECTORY -Recurse -Force -ErrorAction SilentlyContinue
+          }
+          if ($env:BLENDER_ARCHIVE) {
+            Remove-Item -LiteralPath $env:BLENDER_ARCHIVE -Force -ErrorAction SilentlyContinue
+          }
+
+  build_linux:
+    name: Build Linux x64 extension
+    needs: prepare
+    runs-on: audio2face-linux-x64
+    timeout-minutes: 360
+    permissions:
+      contents: write
+    env:
+      ASSET_NAME: ${{ needs.prepare.outputs.linux_asset }}
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          clean: true
+
+      - name: Select release Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.11.9"
+
+      - name: Verify Linux release host
+        shell: bash
+        run: |
+          set -euo pipefail
+          required=$((96 * 1024 * 1024 * 1024))
+          while IFS= read -r path; do
+            available="$(df --output=avail --block-size=1 "$path" | tail -n 1 | tr -d ' ')"
+            if [[ ! "$available" =~ ^[0-9]+$ ]] || (( available < required )); then
+              echo "$path has ${available:-unknown} free bytes; Linux release build requires at least $required" >&2
+              exit 1
+            fi
+          done < <(printf '%s\n' "$GITHUB_WORKSPACE" "$RUNNER_TEMP" | sort -u)
+          command -v git
+          command -v docker
+          command -v gh
+          docker version
+
+      - name: Download verified Blender 5.2.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="blender-5.2.0-linux-x64"
+          archive="$RUNNER_TEMP/$name-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.tar.xz"
+          destination="$RUNNER_TEMP/$name-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          printf 'BLENDER_ARCHIVE=%s\n' "$archive" >> "$GITHUB_ENV"
+          printf 'BLENDER_DIRECTORY=%s\n' "$destination" >> "$GITHUB_ENV"
+          curl --fail --location --retry 5 --output "$archive" \
+            "https://download.blender.org/release/Blender5.2/$name.tar.xz"
+          printf '%s  %s\n' \
+            "96f6c181a30f4950607839dc84d42a354b250d8a0231b098b59b7bc69c351c48" \
+            "$archive" | sha256sum --check --strict
+          mkdir "$destination"
+          tar --extract --xz --file "$archive" --directory "$destination"
+          blender="$destination/$name/blender"
+          test -x "$blender"
+          printf 'BLENDER_EXECUTABLE=%s\n' "$blender" >> "$GITHUB_ENV"
+
+      - name: Run Blender source smoke test
+        shell: bash
+        run: "$BLENDER_EXECUTABLE --factory-startup --background --python tests/blender_smoke.py"
+
+      - name: Build pinned Linux runtime
+        shell: bash
+        run: python tools/build_runtime.py --platform linux-x64
+
+      - name: Build Linux extension
+        shell: bash
+        run: python tools/build_extension.py --blender "$BLENDER_EXECUTABLE" --platform linux-x64
+
+      - name: Upload Linux asset to draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          asset="$GITHUB_WORKSPACE/dist/$ASSET_NAME"
+          test -f "$asset"
+          size="$(stat --format=%s "$asset")"
+          if (( size < 1 || size >= 2147483648 )); then
+            echo "GitHub release asset must be non-empty and smaller than 2 GiB; got $size bytes" >&2
+            exit 1
+          fi
+          gh release upload "$GITHUB_REF_NAME" "$asset" --repo "$GITHUB_REPOSITORY" --clobber
+
+      - name: Remove native build workspace
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          workspace="${GITHUB_WORKSPACE:?}"
+          if [[ "$workspace" == "/" || ! -d "$workspace/.git" ]]; then
+            echo "Refusing cleanup outside a checked-out Actions workspace: $workspace" >&2
+            exit 1
+          fi
+          rm -rf -- "$workspace/build"
+          rm -f -- "$workspace/dist/$ASSET_NAME"
+          if [[ -n "${BLENDER_DIRECTORY:-}" ]]; then rm -rf -- "$BLENDER_DIRECTORY"; fi
+          if [[ -n "${BLENDER_ARCHIVE:-}" ]]; then rm -f -- "$BLENDER_ARCHIVE"; fi
+
+  publish:
+    name: Verify and publish release
+    needs:
+      - prepare
+      - build_windows
+      - build_linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      WINDOWS_ASSET: ${{ needs.prepare.outputs.windows_asset }}
+      LINUX_ASSET: ${{ needs.prepare.outputs.linux_asset }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Verify exact draft assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" > "$RUNNER_TEMP/release.json"
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          release = json.loads(Path(os.environ["RUNNER_TEMP"], "release.json").read_text())
+          if release.get("tag_name") != os.environ["GITHUB_REF_NAME"]:
+              raise SystemExit("draft release tag does not match the workflow tag")
+          if release.get("draft") is not True:
+              raise SystemExit("release is no longer a draft")
+          assets = release.get("assets")
+          if not isinstance(assets, list):
+              raise SystemExit("release assets are not an array")
+          expected = {os.environ["WINDOWS_ASSET"], os.environ["LINUX_ASSET"]}
+          actual = {asset.get("name") for asset in assets if isinstance(asset, dict)}
+          if actual != expected or len(assets) != len(expected):
+              raise SystemExit(
+                  f"draft release must contain exactly {sorted(expected)}; got {sorted(actual)}"
+              )
+          for asset in assets:
+              size = asset.get("size")
+              if asset.get("state") != "uploaded":
+                  raise SystemExit(f"release asset is not uploaded: {asset.get('name')!r}")
+              if isinstance(size, bool) or not isinstance(size, int) or not 0 < size < 2**31:
+                  raise SystemExit(
+                      f"release asset has invalid size: {asset.get('name')!r}: {size!r}"
+                  )
+          PY
+
+      - name: Publish verified release
+        shell: bash
+        run: gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false

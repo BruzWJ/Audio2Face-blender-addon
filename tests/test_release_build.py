@@ -43,6 +43,23 @@ def test_runtime_lock_has_exact_release_inputs() -> None:
     assert lock["tensorrt_source"]["commit"] == (
         "94e2b9ef6d2cce74c76cdad499cca36cc4949197"
     )
+    assert lock["tensorrt_source"]["submodules"] == {
+        "parsers/onnx": "9a9f7883dd7b8cb0a718395bac2075fab6f97da8",
+        "parsers/onnx/third_party/onnx": (
+            "e709452ef2bbc1d113faf678c24e6d3467696e83"
+        ),
+        "parsers/onnx/third_party/onnx/third_party/pybind11": (
+            "a2e59f0e7065404b44dfe92a28aca47ba1378dc4"
+        ),
+        "third_party/cub": "c3cceac115c072fb63df1836ff46d8c60d9eb304",
+        "third_party/protobuf": "aea4a275e28329f648e046469c095eef74254bb2",
+        "third_party/protobuf/third_party/benchmark": (
+            "5b7683f49e1e9223cf9927b24f6fd3d6bd82e3f8"
+        ),
+        "third_party/protobuf/third_party/googletest": (
+            "5ec7f0c4a113e2f18ac2c6cc7df51ad6afc24081"
+        ),
+    }
     assert set(lock["cuda"]["components"]) == set(runtime_tool.CUDA_COMPONENTS)
     assert "cuda_profiler_api" in lock["cuda"]["components"]
     assert lock["msvc_runtime"]["product_version"] == "14.44.35211.0"
@@ -254,6 +271,72 @@ def test_host_platform_matching_is_exact(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr(runtime_tool.platform_module, "machine", lambda: "amd64")
     with pytest.raises(runtime_tool.BuildError, match="unsupported release host"):
         runtime_tool.detect_host_platform()
+
+
+def test_command_runner_preserves_leading_capture_protocol_whitespace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commit = "a" * 40
+
+    def run(command: list[str], **_kwargs: object) -> object:
+        return runtime_tool.subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=f" {commit} third_party/example (heads/main)\r\n",
+        )
+
+    monkeypatch.setattr(runtime_tool.subprocess, "run", run)
+
+    output = runtime_tool.CommandRunner(tmp_path).run(
+        ["git", "submodule", "status"],
+        env={},
+        capture=True,
+    )
+
+    assert output == f" {commit} third_party/example (heads/main)"
+
+
+@pytest.mark.parametrize("prefix", ["-", "+", "U"])
+def test_checkout_exact_rejects_nonclean_submodule_status(
+    tmp_path: Path,
+    prefix: str,
+) -> None:
+    source_commit = "a" * 40
+    submodule_commit = "b" * 40
+
+    class Runner:
+        def run(
+            self,
+            command: list[Path | str],
+            *,
+            env: dict[str, str],
+            cwd: Path | None = None,
+            capture: bool = False,
+        ) -> str:
+            del env, cwd, capture
+            if command[-2:] == ["rev-parse", "HEAD"]:
+                return source_commit
+            if command[-3:] == ["submodule", "status", "--recursive"]:
+                return (
+                    f"{prefix}{submodule_commit} third_party/example "
+                    "(heads/main)"
+                )
+            return ""
+
+    with pytest.raises(
+        runtime_tool.BuildError,
+        match="unexpected Git submodule status",
+    ):
+        runtime_tool.checkout_exact(
+            Runner(),
+            Path("git"),
+            "https://example.invalid/source.git",
+            source_commit,
+            tmp_path / "source",
+            env={},
+            submodules={"third_party/example": submodule_commit},
+        )
 
 
 def test_extension_release_requires_native_platform(

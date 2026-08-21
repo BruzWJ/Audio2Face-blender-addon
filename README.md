@@ -242,6 +242,11 @@ A production release must also pass real NVIDIA GPU inference, dependency,
 installation, cancellation, and shutdown tests for both platform extension
 ZIPs.
 
+Tagged Windows and Linux packages are built and published by the native
+[GitHub release workflow](docs/releasing.md). The release jobs use dedicated
+large-disk runner labels, verified portable Blender 5.2.0 archives, and the
+same two production build scripts shown above.
+
 ## Licensing
 
 The extension and worker source are GPL-3.0-or-later. NVIDIA runtime components

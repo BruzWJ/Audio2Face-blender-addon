@@ -1425,7 +1425,7 @@ class CommandRunner:
             output = getattr(exc, "stdout", None)
             detail = f"\n{output}" if output else ""
             raise BuildError(f"command failed: {shlex.join(args)}{detail}") from exc
-        return result.stdout.strip() if capture and result.stdout else ""
+        return result.stdout.rstrip("\r\n") if capture and result.stdout else ""
 
 
 class LinuxProducerRunner(CommandRunner):
@@ -1511,7 +1511,7 @@ class LinuxProducerRunner(CommandRunner):
             raise BuildError(
                 f"pinned Rocky producer command failed: {shlex.join(args)}{detail}"
             ) from exc
-        return result.stdout.strip() if capture and result.stdout else ""
+        return result.stdout.rstrip("\r\n") if capture and result.stdout else ""
 
 
 def _parse_linux_image_identity(

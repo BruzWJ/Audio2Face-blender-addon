@@ -13,8 +13,11 @@
     "submodules": {
       "parsers/onnx": "9a9f7883dd7b8cb0a718395bac2075fab6f97da8",
       "parsers/onnx/third_party/onnx": "e709452ef2bbc1d113faf678c24e6d3467696e83",
-      "third_party/cub": "397357e9aca61f244b0aed2e77efca25f8a95d74",
-      "third_party/protobuf": "e29507ff0db6943a226c5c798b79fc4abca847d1"
+      "parsers/onnx/third_party/onnx/third_party/pybind11": "a2e59f0e7065404b44dfe92a28aca47ba1378dc4",
+      "third_party/cub": "c3cceac115c072fb63df1836ff46d8c60d9eb304",
+      "third_party/protobuf": "aea4a275e28329f648e046469c095eef74254bb2",
+      "third_party/protobuf/third_party/benchmark": "5b7683f49e1e9223cf9927b24f6fd3d6bd82e3f8",
+      "third_party/protobuf/third_party/googletest": "5ec7f0c4a113e2f18ac2c6cc7df51ad6afc24081"
     }
   },
   "cmake": {

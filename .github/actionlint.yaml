@@ -1,0 +1,4 @@
+self-hosted-runner:
+  labels:
+    - audio2face-windows-x64
+    - audio2face-linux-x64
