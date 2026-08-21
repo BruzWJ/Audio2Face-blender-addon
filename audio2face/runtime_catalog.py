@@ -17,7 +17,7 @@ from typing import Any, Mapping
 from urllib.parse import urlparse
 
 
-CATALOG_SCHEMA = "a2f-blender-runtime-catalog/1"
+CATALOG_SCHEMA = "audio2face-runtime-catalog/1"
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 MAX_ARCHIVE_BYTES = 20 * 1024 * 1024 * 1024
 MAX_UNPACKED_BYTES = 30 * 1024 * 1024 * 1024

@@ -8,7 +8,7 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
-from a2f_blender.arkit import ARKIT_52_CHANNELS
+from audio2face.arkit import ARKIT_52_CHANNELS
 
 
 @dataclass
@@ -20,7 +20,7 @@ class _Settings:
 @dataclass
 class _Scene:
     name: str
-    a2f_blender: _Settings
+    audio2face: _Settings
     is_editable: bool = True
 
 
@@ -41,7 +41,7 @@ def live_module(
     monkeypatch.setitem(sys.modules, "bpy", bpy)
 
     applied: list[list[float]] = []
-    preview = ModuleType("a2f_blender.preview")
+    preview = ModuleType("audio2face.preview")
     preview.PreviewError = RuntimeError  # type: ignore[attr-defined]
     preview.TargetSubscription = object  # type: ignore[attr-defined]
     preview.build_subscriptions = lambda _settings: (object(),)  # type: ignore[attr-defined]
@@ -50,8 +50,8 @@ def live_module(
     )
     monkeypatch.setitem(sys.modules, preview.__name__, preview)
 
-    module_name = "a2f_blender._live_stream_test"
-    source = Path(__file__).resolve().parents[1] / "a2f_blender" / "live_stream.py"
+    module_name = "audio2face._live_stream_test"
+    source = Path(__file__).resolve().parents[1] / "audio2face" / "live_stream.py"
     spec = importlib.util.spec_from_file_location(module_name, source)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -72,7 +72,7 @@ def test_source_free_stream_applies_negative_timestamp_frame_immediately(
     controller.receive("stream-1", -320, weights)
 
     assert applied == [weights]
-    assert scene.a2f_blender.stream_time == 0.0
+    assert scene.audio2face.stream_time == 0.0
     assert controller.active is True
     assert controller.stream_id == "stream-1"
 
@@ -99,7 +99,7 @@ def test_source_free_stream_interpolates_bursted_frames_on_a_monotonic_clock(
     assert controller.tick() is True
 
     assert applied[-1][jaw] == pytest.approx(0.5)
-    assert scene.a2f_blender.stream_time == pytest.approx(0.05)
+    assert scene.audio2face.stream_time == pytest.approx(0.05)
 
 
 def test_live_stream_requires_strictly_increasing_signed_64_bit_timestamps(
@@ -165,5 +165,5 @@ def test_terminal_event_cleans_external_stream_and_resets_values(
     assert applied == [weights, [0.0] * len(ARKIT_52_CHANNELS)]
     assert controller.active is False
     assert controller.stream_id is None
-    assert scene.a2f_blender.stream_time == 0.0
+    assert scene.audio2face.stream_time == 0.0
     assert stopped == ["stream-1"]

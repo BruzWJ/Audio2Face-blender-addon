@@ -2,7 +2,7 @@
 
 ## Fixed scope
 
-Audio2Face Blender has two input modes on one production inference path:
+Audio2Face has two input modes on one production inference path:
 
 ```text
 selected WAV -------- complete-file generation -------- a2f-animation/1
@@ -11,7 +11,7 @@ selected WAV -------- complete-file generation -------- a2f-animation/1
 live mono f32le PCM ----------------+-- stream_start/chunk/end
                                         |
 Blender 5.2 extension
-    |  private a2f-blender/2 JSONL over stdin/stdout (no listener)
+    |  private audio2face/2 JSONL over stdin/stdout (no listener)
 managed native child process and one shared CUDA stream
     |
 shared audio accumulator --------+--------------------------+
@@ -53,7 +53,7 @@ The extension owns:
 Each enabled target is a mesh in the target collection. Selection is only the
 onboarding action used by **Add Selected Meshes**. A Shape Key is connected only
 when its name exactly matches a PascalCase name in
-[`a2f_blender/arkit.py`](../a2f_blender/arkit.py). Matching is case-sensitive,
+[`audio2face/arkit.py`](../audio2face/arkit.py). Matching is case-sensitive,
 and each mesh may implement any subset of the 52 names. There is no name map,
 per-channel multiplier, offset, or destination selector.
 
@@ -83,7 +83,7 @@ The worker owns:
 - atomic selected-mode result publication; and
 - live ARKit frame publication.
 
-stdin and stdout carry only UTF-8 JSON Lines using `a2f-blender/2`.
+stdin and stdout carry only UTF-8 JSON Lines using `audio2face/2`.
 Diagnostics use stderr. Selected mode writes a complete result to the absolute
 path submitted by Blender and then emits an empty `result` event. Stream mode
 sends one bounded audio chunk per request and returns one 52-value frame per
@@ -166,7 +166,7 @@ ARKit frames arrive, Blender starts the selected WAV and thereafter keeps a
 bounded PCM lead. Frames are sampled against
 audio-device position, rather than applied at pipe-arrival time or scene FPS.
 
-The public `a2f_blender.streaming` module exposes the same source-agnostic
+The public `audio2face.streaming` module exposes the same source-agnostic
 begin/chunk/end contract to integrations already running in Blender. Those
 integrations submit model-rate mono f32le and own capture, resampling, and
 audible monitoring. After `start_pcm_stream(scene)`, they poll

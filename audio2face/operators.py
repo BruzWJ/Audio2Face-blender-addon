@@ -26,7 +26,7 @@ def _run_runtime(
     try:
         operation(get_controller(), context.scene)
     except (OSError, SidecarError, ValueError) as exc:
-        settings = context.scene.a2f_blender
+        settings = context.scene.audio2face
         settings.status = "ERROR"
         settings.status_message = str(exc)
         operator.report({"ERROR"}, str(exc))
@@ -122,7 +122,7 @@ class A2F_OT_cancel(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context: bpy.types.Context) -> bool:
-        return context.scene.a2f_blender.status in {"GENERATING", "CANCELLING"}
+        return context.scene.audio2face.status in {"GENERATING", "CANCELLING"}
 
     def execute(self, context: bpy.types.Context) -> set[str]:
         return _run_runtime(self, context, lambda controller, scene: controller.cancel(scene))
@@ -150,7 +150,7 @@ class A2F_OT_stop_stream(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context: bpy.types.Context) -> bool:
-        return bool(context.scene.a2f_blender.stream_id)
+        return bool(context.scene.audio2face.stream_id)
 
     def execute(self, context: bpy.types.Context) -> set[str]:
         return _run_runtime(
@@ -167,7 +167,7 @@ class A2F_OT_add_selected_targets(bpy.types.Operator):
     bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context: bpy.types.Context) -> set[str]:
-        settings = context.scene.a2f_blender
+        settings = context.scene.audio2face
         selected = [
             obj
             for obj in context.selected_objects
@@ -207,10 +207,10 @@ class A2F_OT_remove_target(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context: bpy.types.Context) -> bool:
-        return bool(context.scene.a2f_blender.target_meshes)
+        return bool(context.scene.audio2face.target_meshes)
 
     def execute(self, context: bpy.types.Context) -> set[str]:
-        settings = context.scene.a2f_blender
+        settings = context.scene.audio2face
         index = min(settings.target_mesh_index, len(settings.target_meshes) - 1)
         settings.target_meshes.remove(index)
         settings.target_mesh_index = max(0, min(index, len(settings.target_meshes) - 1))
@@ -224,7 +224,7 @@ class A2F_OT_preview_play(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context: bpy.types.Context) -> bool:
-        settings = context.scene.a2f_blender
+        settings = context.scene.audio2face
         return (
             bool(settings.result_path)
             and bool(settings.current_job_id)
@@ -235,7 +235,7 @@ class A2F_OT_preview_play(bpy.types.Operator):
         )
 
     def execute(self, context: bpy.types.Context) -> set[str]:
-        settings = context.scene.a2f_blender
+        settings = context.scene.audio2face
         controller = get_preview_controller()
         try:
             if settings.preview_state == "PAUSED" and controller.active:
@@ -262,7 +262,7 @@ class A2F_OT_preview_pause(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context: bpy.types.Context) -> bool:
-        return context.scene.a2f_blender.preview_state == "PLAYING"
+        return context.scene.audio2face.preview_state == "PLAYING"
 
     def execute(self, context: bpy.types.Context) -> set[str]:
         try:
@@ -280,7 +280,7 @@ class A2F_OT_preview_stop(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context: bpy.types.Context) -> bool:
-        settings = context.scene.a2f_blender
+        settings = context.scene.audio2face
         return settings.preview_state != "IDLE"
 
     def execute(self, context: bpy.types.Context) -> set[str]:

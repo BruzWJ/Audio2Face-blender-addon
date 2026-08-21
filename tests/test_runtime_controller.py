@@ -10,7 +10,7 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
-from a2f_blender.arkit import ARKIT_52_CHANNELS
+from audio2face.arkit import ARKIT_52_CHANNELS
 
 
 class _Settings:
@@ -53,7 +53,7 @@ class _Scene:
     def __init__(self, name: str, *, editable: bool, settings: object) -> None:
         self.name = name
         self.is_editable = editable
-        self.a2f_blender = settings
+        self.audio2face = settings
 
 
 class _Scenes(list[_Scene]):
@@ -125,31 +125,31 @@ def runtime_module(monkeypatch: pytest.MonkeyPatch) -> tuple[ModuleType, ModuleT
     )
     monkeypatch.setitem(sys.modules, "bpy", bpy)
 
-    preferences = ModuleType("a2f_blender.preferences")
+    preferences = ModuleType("audio2face.preferences")
     preferences.get_preferences = lambda *_args, **_kwargs: SimpleNamespace(  # type: ignore[attr-defined]
         runtime_license_accepted=True,
     )
     monkeypatch.setitem(sys.modules, preferences.__name__, preferences)
 
-    properties = ModuleType("a2f_blender.properties")
+    properties = ModuleType("audio2face.properties")
     properties.apply_model_defaults = lambda *_args, **_kwargs: None  # type: ignore[attr-defined]
     properties.tuning_parameters = lambda *_args, **_kwargs: {}  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, properties.__name__, properties)
 
-    preview = ModuleType("a2f_blender.preview")
+    preview = ModuleType("audio2face.preview")
     preview.get_preview_controller = lambda: SimpleNamespace(tick=lambda: False)  # type: ignore[attr-defined]
     preview.unregister_preview = lambda: None  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, preview.__name__, preview)
 
     live_controller = _LiveController()
-    live_stream = ModuleType("a2f_blender.live_stream")
+    live_stream = ModuleType("audio2face.live_stream")
     live_stream.LiveStreamError = ValueError  # type: ignore[attr-defined]
     live_stream.get_live_stream_controller = lambda: live_controller  # type: ignore[attr-defined]
     live_stream.unregister_live_stream = lambda: None  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, live_stream.__name__, live_stream)
 
-    module_name = "a2f_blender._runtime_controller_test"
-    source = Path(__file__).resolve().parents[1] / "a2f_blender" / "runtime.py"
+    module_name = "audio2face._runtime_controller_test"
+    source = Path(__file__).resolve().parents[1] / "audio2face" / "runtime.py"
     spec = importlib.util.spec_from_file_location(module_name, source)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)

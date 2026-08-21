@@ -18,7 +18,7 @@ from types import MappingProxyType
 from typing import Any, Mapping
 
 
-RUNTIME_SCHEMA = "a2f-blender-runtime/2"
+RUNTIME_SCHEMA = "audio2face-runtime/2"
 _MANIFEST_FIELDS = frozenset(
     {
         "schema",

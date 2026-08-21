@@ -238,7 +238,7 @@ def _download_archive(
         headers={
             "Accept": "application/zip, application/octet-stream",
             "Accept-Encoding": "identity",
-            "User-Agent": "Audio2Face-Blender/0.1",
+            "User-Agent": "Audio2Face/0.1",
         },
         method="GET",
     )

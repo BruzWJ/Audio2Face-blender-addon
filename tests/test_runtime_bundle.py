@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from a2f_blender.runtime_bundle import (
+from audio2face.runtime_bundle import (
     BundleError,
     RUNTIME_SCHEMA,
     current_platform_id,
@@ -53,7 +53,7 @@ def _make_bundle(
     root = data_root / "runtime" / platform_id
     root.mkdir(parents=True)
     windows = platform_id == "windows-x64"
-    worker_name = "a2f_blender_worker.exe" if windows else "a2f_blender_worker"
+    worker_name = "audio2face_worker.exe" if windows else "audio2face_worker"
     trtexec_name = "trtexec.exe" if windows else "trtexec"
     worker = root / "bin" / worker_name
     trtexec = root / "bin" / trtexec_name
@@ -139,7 +139,7 @@ def test_resolve_linux_bundle_returns_immutable_child_launch_spec(tmp_path: Path
 
     assert spec.platform == "linux-x64"
     assert spec.root == root.resolve()
-    assert spec.executable == (root / "bin" / "a2f_blender_worker").resolve()
+    assert spec.executable == (root / "bin" / "audio2face_worker").resolve()
     assert spec.trtexec == (root / "bin" / "trtexec").resolve()
     assert spec.audio2face_model == (
         root / "models" / "audio2face" / "model.json"
@@ -275,10 +275,10 @@ def test_resolver_requires_audio2emotion_engine_after_audio2face(tmp_path: Path)
 @pytest.mark.parametrize(
     ("field", "unsafe"),
     [
-        ("worker", "../bin/a2f_blender_worker"),
-        ("worker", "/bin/a2f_blender_worker"),
-        ("worker", r"bin\a2f_blender_worker"),
-        ("worker", "bin/../a2f_blender_worker"),
+        ("worker", "../bin/audio2face_worker"),
+        ("worker", "/bin/audio2face_worker"),
+        ("worker", r"bin\audio2face_worker"),
+        ("worker", "bin/../audio2face_worker"),
         ("trtexec", "lib/trtexec"),
         ("audio2face_model", "bin/model.json"),
         ("audio2face_model", "models/other/model.json"),
@@ -327,7 +327,7 @@ def test_manifest_rejects_the_removed_single_model_field(tmp_path: Path) -> None
 
 def test_manifest_rejects_schema_and_platform_mismatch(tmp_path: Path) -> None:
     root, manifest = _make_bundle(tmp_path)
-    manifest["schema"] = "a2f-blender-runtime/99"
+    manifest["schema"] = "audio2face-runtime/99"
     _rewrite_manifest(root, manifest)
     with pytest.raises(BundleError, match="unsupported bundle schema"):
         resolve_runtime_bundle(tmp_path, system="linux", machine="x86_64", environ={})
@@ -342,7 +342,7 @@ def test_manifest_rejects_schema_and_platform_mismatch(tmp_path: Path) -> None:
 def test_manifest_rejects_duplicate_json_fields(tmp_path: Path) -> None:
     root, _manifest = _make_bundle(tmp_path)
     (root / "bundle.json").write_text(
-        '{"schema":"a2f-blender-runtime/2","schema":"again"}', encoding="utf-8"
+        '{"schema":"audio2face-runtime/2","schema":"again"}', encoding="utf-8"
     )
     with pytest.raises(BundleError, match="duplicate field 'schema'"):
         resolve_runtime_bundle(tmp_path, system="linux", machine="x86_64", environ={})
@@ -350,7 +350,7 @@ def test_manifest_rejects_duplicate_json_fields(tmp_path: Path) -> None:
 
 def test_linux_executables_require_x_bit_and_elf64_x64(tmp_path: Path) -> None:
     root, _manifest = _make_bundle(tmp_path)
-    worker = root / "bin" / "a2f_blender_worker"
+    worker = root / "bin" / "audio2face_worker"
     worker.chmod(worker.stat().st_mode & ~(stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH))
     with pytest.raises(BundleError, match="worker is not executable"):
         resolve_runtime_bundle(tmp_path, system="linux", machine="x86_64", environ={})

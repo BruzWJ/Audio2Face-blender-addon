@@ -139,7 +139,7 @@ class PreviewController:
         audio_path: str | Path,
     ) -> None:
         self.stop(reset=True)
-        settings = scene.a2f_blender
+        settings = scene.audio2face
         subscriptions = build_subscriptions(settings)
         if not subscriptions:
             raise PreviewError(
@@ -186,7 +186,7 @@ class PreviewController:
             raise PreviewError("ARKit preview is not playing")
         if not self._handle.pause():
             raise PreviewError("audio device could not pause preview")
-        scene.a2f_blender.preview_state = "PAUSED"
+        scene.audio2face.preview_state = "PAUSED"
 
     def resume(self) -> None:
         scene = bpy.data.scenes.get(self._scene_name) if self._scene_name else None
@@ -194,11 +194,11 @@ class PreviewController:
             raise PreviewError("ARKit preview is not paused")
         if not self._handle.resume():
             raise PreviewError("audio device could not resume preview")
-        scene.a2f_blender.preview_state = "PLAYING"
+        scene.audio2face.preview_state = "PLAYING"
 
     def stop(self, *, reset: bool | None = None) -> None:
         scene = bpy.data.scenes.get(self._scene_name) if self._scene_name else None
-        settings = scene.a2f_blender if scene is not None else None
+        settings = scene.audio2face if scene is not None else None
         should_reset = (
             bool(settings.preview_reset_on_stop)
             if reset is None
@@ -235,7 +235,7 @@ class PreviewController:
         if scene is None or self._handle is None:
             self.stop(reset=False)
             return False
-        settings = scene.a2f_blender
+        settings = scene.audio2face
         try:
             status = self._handle.status
             if status == self._aud.STATUS_STOPPED:

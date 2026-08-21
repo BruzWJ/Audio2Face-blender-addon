@@ -8,7 +8,7 @@ import uuid
 from typing import Any
 
 
-PROTOCOL_VERSION = "a2f-blender/2"
+PROTOCOL_VERSION = "audio2face/2"
 MAX_CONTROL_LINE_BYTES = 1_048_576
 _CONTROL_TYPES = frozenset({"request", "response", "error", "event"})
 _REQUEST_METHODS = frozenset(

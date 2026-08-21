@@ -40,7 +40,7 @@ class A2F_PT_main(bpy.types.Panel):
 
     def draw(self, context: bpy.types.Context) -> None:
         layout = self.layout
-        settings = context.scene.a2f_blender
+        settings = context.scene.audio2face
         if not context.scene.is_editable:
             warning = layout.box()
             warning.alert = True

@@ -1,4 +1,4 @@
-# Audio2Face Blender worker
+# Audio2Face worker
 
 This directory builds the native child process used by the Blender 5.2
 extension. It runs NVIDIA Audio2Face-3D v3 diffusion and the device blendshape
@@ -45,7 +45,7 @@ cmake -S worker -B build/worker-release \
   -DA2F_BUNDLE_AUDIO2EMOTION_MODEL_LICENSE=/absolute/path/to/audio2emotion-model-license \
   -DCMAKE_BUILD_TYPE=Release
 cmake --build build/worker-release \
-  --target a2f_blender_runtime_archive --config Release
+  --target audio2face_runtime_archive --config Release
 ```
 
 `A2F_BUNDLE_TRTEXEC` must be NVIDIA TensorRT `trtexec` built from the pinned
@@ -63,7 +63,7 @@ The generated ZIP has one canonical payload:
 ```text
 runtime/<platform>/
   bundle.json
-  bin/a2f_blender_worker[.exe]
+  bin/audio2face_worker[.exe]
   bin/trtexec[.exe]
   lib/...
   models/audio2face/model.json
@@ -82,7 +82,7 @@ runtime/<platform>/
 the platform's exact `sha256`, `size`, and `unpacked_size` fragment. Release
 automation adds the immutable HTTPS URL and inserts the artifact under the
 matching platform key in
-[`a2f_blender/runtime_catalog.json`](../a2f_blender/runtime_catalog.json).
+[`audio2face/runtime_catalog.json`](../audio2face/runtime_catalog.json).
 
 The downloadable archive remains GPU-neutral. During add-on installation,
 Blender uses the bundled `trtexec` and each model's `trt_info.json` to build the

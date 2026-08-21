@@ -1,7 +1,7 @@
 """Threaded, nonblocking JSONL client for the local Audio2Face worker.
 
 Reader/writer threads only touch standard-library queues. Blender state is
-consumed later by :mod:`a2f_blender.runtime` from a ``bpy.app.timers`` callback.
+consumed later by :mod:`audio2face.runtime` from a ``bpy.app.timers`` callback.
 """
 
 from __future__ import annotations

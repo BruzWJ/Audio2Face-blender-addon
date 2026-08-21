@@ -1,4 +1,4 @@
-# Worker protocol `a2f-blender/2`
+# Worker protocol `audio2face/2`
 
 ## Transport
 
@@ -15,7 +15,7 @@ rejected.
 Every request has exactly these fields:
 
 ```json
-{"protocol":"a2f-blender/2","type":"request","id":"1","method":"hello","params":{}}
+{"protocol":"audio2face/2","type":"request","id":"1","method":"hello","params":{}}
 ```
 
 `id` is a non-empty string of at most 128 characters. A successful response
@@ -23,7 +23,7 @@ repeats it and contains an object result. A request error contains exact
 `code`, `message`, and `details` fields; `id` is present only when recoverable:
 
 ```json
-{"protocol":"a2f-blender/2","type":"error","id":"1","error":{"code":"invalid_params","message":"invalid request","details":{}}}
+{"protocol":"audio2face/2","type":"error","id":"1","error":{"code":"invalid_params","message":"invalid request","details":{}}}
 ```
 
 Every asynchronous event has exact `event`, `job_id`, and object `data` fields
@@ -31,7 +31,7 @@ alongside the common fields. `job_id` correlates either a selected generation
 job or a live stream:
 
 ```json
-{"protocol":"a2f-blender/2","type":"event","event":"stream_ended","job_id":"stream-1","data":{}}
+{"protocol":"audio2face/2","type":"event","event":"stream_ended","job_id":"stream-1","data":{}}
 ```
 
 The only request methods are `hello`, `load_model`, `generate`, `stream_start`,
@@ -235,7 +235,7 @@ incremental executor used by Stream mode, collects all frames, atomically
 publishes the five-field result, then emits:
 
 ```json
-{"protocol":"a2f-blender/2","type":"event","event":"result","job_id":"job-1","data":{}}
+{"protocol":"audio2face/2","type":"event","event":"result","job_id":"job-1","data":{}}
 ```
 
 Blender derives the managed `results/<job_id>.a2f.json` path it submitted and
@@ -336,7 +336,7 @@ closes input, drains all padded tail frames, waits for scheduled GPU work, and
 emits the terminal event only after all `stream_frame` events:
 
 ```json
-{"protocol":"a2f-blender/2","type":"event","event":"stream_ended","job_id":"stream-1","data":{}}
+{"protocol":"audio2face/2","type":"event","event":"stream_ended","job_id":"stream-1","data":{}}
 ```
 
 The model remains loaded and ready. No result file is written.
@@ -364,7 +364,7 @@ enforces bounded graceful, terminate, and kill deadlines.
 
 The selected-mode document has exactly `schema`, `job_id`, `sample_rate`,
 `timestamps_samples`, and `weights`. The schema fixes the channel order to the
-52 names in [`a2f_blender/arkit.py`](../a2f_blender/arkit.py); names are not
+52 names in [`audio2face/arkit.py`](../audio2face/arkit.py); names are not
 repeated in the file. Validation requires:
 
 - a non-empty `job_id` of at most 128 characters;

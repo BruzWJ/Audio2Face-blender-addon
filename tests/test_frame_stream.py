@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from a2f_blender.frame_stream import sample_linear
+from audio2face.frame_stream import sample_linear
 
 
 def test_sample_linear_holds_edges_and_interpolates() -> None:

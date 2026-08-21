@@ -14,7 +14,7 @@ def main() -> None:
     addon_names = [
         addon.module
         for addon in bpy.context.preferences.addons
-        if addon.module.endswith(".a2f_blender")
+        if addon.module.endswith(".audio2face")
     ]
     assert len(addon_names) == 1, f"expected one enabled Audio2Face extension, got {addon_names}"
     package = importlib.import_module(addon_names[0])
@@ -22,12 +22,12 @@ def main() -> None:
     preferences = importlib.import_module(f"{addon_names[0]}.preferences")
     properties = importlib.import_module(f"{addon_names[0]}.properties")
 
-    assert hasattr(bpy.types.Scene, "a2f_blender")
+    assert hasattr(bpy.types.Scene, "audio2face")
     assert bpy.app.timers.is_registered(runtime._timer_callback)
     assert runtime._load_pre_handler in bpy.app.handlers.load_pre
     assert runtime._load_post_handler in bpy.app.handlers.load_post
     runtime.get_controller().poll()
-    assert bpy.context.scene.a2f_blender.status == "IDLE"
+    assert bpy.context.scene.audio2face.status == "IDLE"
 
     preference_names = set(preferences.A2FAddonPreferences.bl_rna.properties.keys())
     assert preference_names == {"rna_type"} | set(
@@ -45,7 +45,7 @@ def main() -> None:
     assert not ready
     assert "published" in reason or "runtime" in reason
     assert package.__package__.startswith("bl_ext.")
-    print(f"Installed A2F Blender smoke test passed ({data_root})")
+    print(f"Installed Audio2Face smoke test passed ({data_root})")
 
 
 if __name__ == "__main__":

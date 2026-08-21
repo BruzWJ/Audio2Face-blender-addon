@@ -6,8 +6,8 @@ import textwrap
 import time
 from pathlib import Path
 
-from a2f_blender.protocol import PROTOCOL_VERSION
-from a2f_blender.sidecar import (
+from audio2face.protocol import PROTOCOL_VERSION
+from audio2face.sidecar import (
     ClientDiagnostic,
     ControlMessage,
     Lifecycle,
@@ -62,7 +62,7 @@ def _make_invalid_utf8_worker(tmp_path: Path) -> Path:
             #!/usr/bin/env python3
             import sys
 
-            sys.stdout.buffer.write(b'{"protocol":"a2f-blender/2","type":"response","id":"x","result":{"value":"\\xff"}}\\n')
+            sys.stdout.buffer.write(b'{"protocol":"audio2face/2","type":"response","id":"x","result":{"value":"\\xff"}}\\n')
             sys.stdout.buffer.flush()
             for _line in sys.stdin:
                 pass

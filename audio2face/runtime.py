@@ -147,7 +147,7 @@ class RuntimeController:
     ) -> None:
         if not scene.is_editable:
             return
-        settings = scene.a2f_blender
+        settings = scene.audio2face
         settings.status = status
         settings.status_message = message
 
@@ -222,7 +222,7 @@ class RuntimeController:
         if pending_operation:
             return True
         return any(
-            scene.a2f_blender.status
+            scene.audio2face.status
             in {
                 "LOADING_MODEL",
                 "GENERATING",
@@ -270,7 +270,7 @@ class RuntimeController:
         self.install_scene = scene.name
         message = "Preparing managed-runtime download"
         for candidate in self._editable_scenes():
-            candidate_settings = candidate.a2f_blender
+            candidate_settings = candidate.audio2face
             candidate_settings.runtime_install_progress = 0.0
         self.install_message = message
         self._set_status(scene, "INSTALLING_RUNTIME", message)
@@ -317,7 +317,7 @@ class RuntimeController:
             self.install_cancel.set()
         owner_scene = self._scene(self.install_scene) or scene
         message = "Canceling managed-runtime installation"
-        owner_scene.a2f_blender.status_message = message
+        owner_scene.audio2face.status_message = message
         self.install_message = message
 
     def start(self, scene: bpy.types.Scene) -> None:
@@ -435,7 +435,7 @@ class RuntimeController:
             return
         try:
             apply_model_defaults(
-                scene.a2f_blender,
+                scene.audio2face,
                 copy.deepcopy(defaults),
                 list(emotion_names),
             )
@@ -451,7 +451,7 @@ class RuntimeController:
         then_generate: bool,
         then_stream_wav: bool = False,
     ) -> None:
-        settings = scene.a2f_blender
+        settings = scene.audio2face
         signature = self._model_signature(settings, spec)
         self._clear_model_state()
         self._request(
@@ -476,7 +476,7 @@ class RuntimeController:
         self._require_editable_scene(scene)
         self._require_operation_idle()
         self._require_worker_ready()
-        settings = scene.a2f_blender
+        settings = scene.audio2face
         spec = self.runtime_spec()
         if self.loaded_signature != self._model_signature(settings, spec):
             self._submit_model_load(scene, spec, then_generate=True)
@@ -542,7 +542,7 @@ class RuntimeController:
                 {
                     "stream_id": stream_id,
                     "sample_rate": sample_rate,
-                    "settings": tuning_parameters(scene.a2f_blender),
+                    "settings": tuning_parameters(scene.audio2face),
                 },
                 stream_id=stream_id,
             )
@@ -550,7 +550,7 @@ class RuntimeController:
             get_live_stream_controller().stop(reset=False)
             raise
 
-        settings = scene.a2f_blender
+        settings = scene.audio2face
         settings.stream_id = stream_id
         settings.stream_sample_rate = sample_rate
         settings.stream_prebuffer_samples = 0
@@ -569,7 +569,7 @@ class RuntimeController:
         self._require_editable_scene(scene)
         self._require_operation_idle()
         self._require_worker_ready()
-        settings = scene.a2f_blender
+        settings = scene.audio2face
         audio_path = self._absolute_blender_path(settings.audio_path)
         if not audio_path.is_file():
             raise SidecarError(f"audio file does not exist: {audio_path}")
@@ -590,7 +590,7 @@ class RuntimeController:
         self._require_editable_scene(scene)
         self._require_operation_idle()
         self._require_worker_ready()
-        settings = scene.a2f_blender
+        settings = scene.audio2face
         spec = self.runtime_spec()
         if self.loaded_signature != self._model_signature(settings, spec):
             raise SidecarError(
@@ -603,7 +603,7 @@ class RuntimeController:
             (
                 scene
                 for scene in bpy.data.scenes
-                if scene.is_editable and scene.a2f_blender.stream_id == stream_id
+                if scene.is_editable and scene.audio2face.stream_id == stream_id
             ),
             None,
         )
@@ -814,7 +814,7 @@ class RuntimeController:
         """Close PCM input and let the worker drain the model's padded tail."""
 
         self._require_editable_scene(scene)
-        stream_id = scene.a2f_blender.stream_id
+        stream_id = scene.audio2face.stream_id
         if not stream_id:
             raise SidecarError("there is no active PCM stream")
         if self.stream_source_cancel is not None:
@@ -833,7 +833,7 @@ class RuntimeController:
         """Cancel one stream without stopping or unloading the GPU worker."""
 
         self._require_editable_scene(scene)
-        stream_id = scene.a2f_blender.stream_id
+        stream_id = scene.audio2face.stream_id
         if not stream_id:
             raise SidecarError("there is no active PCM stream")
         if stream_id not in self.stream_scene_names:
@@ -875,13 +875,13 @@ class RuntimeController:
         *,
         stream_id: str | None = None,
     ) -> None:
-        resolved_id = stream_id or scene.a2f_blender.stream_id
+        resolved_id = stream_id or scene.audio2face.stream_id
         if resolved_id:
             self._release_worker_stream_state(resolved_id)
-        if stream_id is None or scene.a2f_blender.stream_id == stream_id:
-            scene.a2f_blender.stream_id = ""
-            scene.a2f_blender.stream_sample_rate = 0
-            scene.a2f_blender.stream_prebuffer_samples = 0
+        if stream_id is None or scene.audio2face.stream_id == stream_id:
+            scene.audio2face.stream_id = ""
+            scene.audio2face.stream_sample_rate = 0
+            scene.audio2face.stream_prebuffer_samples = 0
 
     def pcm_stream_requirements(
         self,
@@ -890,7 +890,7 @@ class RuntimeController:
         """Return model-rate/prebuffer metadata once an external PCM stream is ready."""
 
         self._require_editable_scene(scene)
-        settings = scene.a2f_blender
+        settings = scene.audio2face
         if not settings.stream_id:
             raise SidecarError("there is no active PCM stream")
         if settings.status == "STREAM_STARTING":
@@ -913,11 +913,11 @@ class RuntimeController:
         if scene is None or not scene.is_editable:
             self._release_worker_stream_state(stream_id)
             return
-        if scene.a2f_blender.stream_id != stream_id:
+        if scene.audio2face.stream_id != stream_id:
             self._release_worker_stream_state(stream_id)
             return
         self._clear_stream_state(scene, stream_id=stream_id)
-        if scene.a2f_blender.status not in {"ERROR", "IDLE", "STOPPING"}:
+        if scene.audio2face.status not in {"ERROR", "IDLE", "STOPPING"}:
             self._set_status(scene, "MODEL_READY", "PCM stream ended; model remains ready")
 
     def _fail_stream(
@@ -930,7 +930,7 @@ class RuntimeController:
     ) -> None:
         if self.stream_source_cancel is not None:
             self.stream_source_cancel.set()
-        if cancel_worker and scene.a2f_blender.stream_id == stream_id:
+        if cancel_worker and scene.audio2face.stream_id == stream_id:
             try:
                 self._request(
                     scene,
@@ -946,7 +946,7 @@ class RuntimeController:
 
     def cancel(self, scene: bpy.types.Scene) -> None:
         self._require_editable_scene(scene)
-        settings = scene.a2f_blender
+        settings = scene.audio2face
         if not settings.current_job_id:
             raise SidecarError("there is no active generation job")
         self._request(
@@ -990,7 +990,7 @@ class RuntimeController:
         scene = self._scene(pending.scene_name)
         if scene is None or not scene.is_editable:
             return
-        settings = scene.a2f_blender
+        settings = scene.audio2face
         result = envelope["result"]
 
         # Once shutdown starts, late model/job responses must not revive the UI.
@@ -1162,7 +1162,7 @@ class RuntimeController:
         error = envelope["error"]
         message = f"{error['code']}: {error['message']}"
         if pending is not None and pending.stream_id is not None:
-            if scene.a2f_blender.stream_id != pending.stream_id:
+            if scene.audio2face.stream_id != pending.stream_id:
                 return
             self._fail_stream(
                 scene,
@@ -1172,21 +1172,21 @@ class RuntimeController:
             )
             return
         if pending is not None and pending.method == "cancel" and (
-            scene.a2f_blender.status in {"COMPLETED", "ERROR"}
+            scene.audio2face.status in {"COMPLETED", "ERROR"}
             or (
-                not scene.a2f_blender.current_job_id
-                and not scene.a2f_blender.stream_id
+                not scene.audio2face.current_job_id
+                and not scene.audio2face.stream_id
             )
         ):
             return
         if (
             pending is not None
             and pending.method == "cancel"
-            and scene.a2f_blender.status
+            and scene.audio2face.status
             in {"LOADING_MODEL", "GENERATING", "CANCELLING", "STOPPING"}
         ):
             # Preserve the active operation while surfacing a cancel diagnostic.
-            scene.a2f_blender.status_message = message
+            scene.audio2face.status_message = message
             return
         self._set_status(scene, "ERROR", message)
 
@@ -1200,15 +1200,15 @@ class RuntimeController:
                 for candidate in bpy.data.scenes
                 if candidate.is_editable
                 and (
-                    candidate.a2f_blender.current_job_id == job_id
-                    or candidate.a2f_blender.stream_id == job_id
+                    candidate.audio2face.current_job_id == job_id
+                    or candidate.audio2face.stream_id == job_id
                 )
             ),
             None,
         )
         if scene is None:
             return  # Ignore stale events from an earlier file or stream.
-        settings = scene.a2f_blender
+        settings = scene.audio2face
         is_stream = settings.stream_id == job_id
         is_generation = settings.current_job_id == job_id
         if event in {"stream_frame", "stream_ended"} and not is_stream:
@@ -1383,17 +1383,17 @@ class RuntimeController:
     def _apply_install_progress(self, payload: InstallProgress) -> None:
         self.install_message = payload.message
         for candidate in self._editable_scenes():
-            candidate_settings = candidate.a2f_blender
+            candidate_settings = candidate.audio2face
             candidate_settings.runtime_install_progress = payload.progress
         scene = self._scene(self.install_scene)
         if scene is not None and scene.is_editable:
-            scene.a2f_blender.status = "INSTALLING_RUNTIME"
-            scene.a2f_blender.status_message = payload.message
+            scene.audio2face.status = "INSTALLING_RUNTIME"
+            scene.audio2face.status_message = payload.message
 
     def _finish_install(self, kind: str, payload: str | None) -> None:
         scene = self._scene(self.install_scene)
         settings = (
-            scene.a2f_blender
+            scene.audio2face
             if scene is not None and scene.is_editable
             else None
         )
@@ -1445,7 +1445,7 @@ class RuntimeController:
     def poll(self) -> None:
         if self.reset_scene_state_on_poll:
             for scene in self._editable_scenes():
-                settings = scene.a2f_blender
+                settings = scene.audio2face
                 settings.status = "IDLE"
                 settings.status_message = "Worker is stopped"
                 settings.progress = 0.0
@@ -1468,7 +1468,7 @@ class RuntimeController:
                 self.last_worker_diagnostic = event.message[-1000:]
                 scene = self._scene(self.startup_scene)
                 if scene is not None and scene.is_editable:
-                    scene.a2f_blender.status_message = event.message
+                    scene.audio2face.status_message = event.message
             elif isinstance(event, ProcessExited):
                 expected_exit = self.expected_worker_exit
                 self.negotiated = False
@@ -1479,7 +1479,7 @@ class RuntimeController:
                     self.stream_source_cancel.set()
                 get_live_stream_controller().stop()
                 for scene in self._editable_scenes():
-                    settings = scene.a2f_blender
+                    settings = scene.audio2face
                     settings.stream_id = ""
                     settings.stream_sample_rate = 0
                     settings.stream_prebuffer_samples = 0
@@ -1572,7 +1572,7 @@ def _timer_callback() -> float | None:
         preview_active = False
         stream_active = False
         scene = bpy.context.scene
-        if scene is not None and hasattr(scene, "a2f_blender"):
+        if scene is not None and hasattr(scene, "audio2face"):
             RuntimeController._set_status(scene, "ERROR", str(exc))
     return (
         PREVIEW_INTERVAL_SECONDS
@@ -1604,7 +1604,7 @@ def _load_pre_handler(_unused: object) -> None:
     try:
         _dispose_runtime_state()
     except Exception as exc:
-        print(f"Audio2Face Blender load cleanup failed: {exc}")
+        print(f"Audio2Face load cleanup failed: {exc}")
 
 
 @bpy.app.handlers.persistent
@@ -1614,7 +1614,7 @@ def _load_post_handler(_unused: object) -> None:
     try:
         register_runtime()
     except Exception as exc:
-        print(f"Audio2Face Blender load initialization failed: {exc}")
+        print(f"Audio2Face load initialization failed: {exc}")
 
 
 def register_runtime() -> None:

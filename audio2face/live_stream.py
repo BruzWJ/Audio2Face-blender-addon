@@ -77,7 +77,7 @@ class LiveStreamController:
         self.stop(reset=True)
         if isinstance(sample_rate, bool) or not isinstance(sample_rate, int) or sample_rate <= 0:
             raise LiveStreamError("stream sample rate must be a positive integer")
-        subscriptions = build_subscriptions(scene.a2f_blender)
+        subscriptions = build_subscriptions(scene.audio2face)
         if not subscriptions:
             raise LiveStreamError(
                 "no enabled target mesh has an exact-name ARKit-52 shape key"
@@ -115,7 +115,7 @@ class LiveStreamController:
             except Exception:
                 pass
             raise LiveStreamError("stream scene no longer exists")
-        handle.volume = float(scene.a2f_blender.preview_volume)
+        handle.volume = float(scene.audio2face.preview_volume)
         self._device = device
         self._sound = sound
         self._handle = handle
@@ -170,7 +170,7 @@ class LiveStreamController:
         scene = bpy.data.scenes.get(self._scene_name) if self._scene_name else None
         if scene is None or not scene.is_editable:
             raise LiveStreamError("stream scene is no longer editable")
-        settings = scene.a2f_blender
+        settings = scene.audio2face
         settings.stream_time = max(0.0, timestamp_sample / self._sample_rate)
 
         if self._audio_path is None:
@@ -238,10 +238,10 @@ class LiveStreamController:
                 )
             except (PreviewError, RuntimeError, ValueError) as exc:
                 self.stop(reset=False)
-                scene.a2f_blender.status = "ERROR"
-                scene.a2f_blender.status_message = str(exc)
+                scene.audio2face.status = "ERROR"
+                scene.audio2face.status_message = str(exc)
                 return False
-            scene.a2f_blender.stream_time = max(0.0, sample_position / self._sample_rate)
+            scene.audio2face.stream_time = max(0.0, sample_position / self._sample_rate)
             self._drop_old_frames(sample_position)
             if self._terminal and sample_position >= self._timestamps[-1]:
                 self.stop()
@@ -253,7 +253,7 @@ class LiveStreamController:
         if scene is None:
             self.stop(reset=False)
             return False
-        settings = scene.a2f_blender
+        settings = scene.audio2face
         try:
             status = self._handle.status
             if status == self._aud.STATUS_STOPPED:
@@ -278,7 +278,7 @@ class LiveStreamController:
 
     def stop(self, *, reset: bool | None = None) -> None:
         scene = bpy.data.scenes.get(self._scene_name) if self._scene_name else None
-        settings = scene.a2f_blender if scene is not None and scene.is_editable else None
+        settings = scene.audio2face if scene is not None and scene.is_editable else None
         should_reset = (
             bool(settings.stream_reset_on_stop)
             if reset is None and settings

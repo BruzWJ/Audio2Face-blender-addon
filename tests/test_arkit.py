@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from a2f_blender.arkit import ARKIT_52_CHANNELS
+from audio2face.arkit import ARKIT_52_CHANNELS
 
 
 EXPECTED_ARKIT_52 = (

@@ -16,10 +16,10 @@ from pathlib import Path
 
 import pytest
 
-from a2f_blender.runtime_bundle import BundleLaunchSpec, RUNTIME_SCHEMA
-from a2f_blender.runtime_catalog import RuntimeArtifact
-from a2f_blender import runtime_install
-from a2f_blender.runtime_install import (
+from audio2face.runtime_bundle import BundleLaunchSpec, RUNTIME_SCHEMA
+from audio2face.runtime_catalog import RuntimeArtifact
+from audio2face import runtime_install
+from audio2face.runtime_install import (
     RUNTIME_RECEIPT_FILENAME,
     RuntimeInstallError,
     validate_install_receipt,
@@ -186,7 +186,7 @@ def test_safe_zip_extraction_preserves_file_contents_and_executable_mode(
             ("runtime/", b"", stat.S_IFDIR | 0o755),
             ("runtime/linux-x64/", b"", stat.S_IFDIR | 0o755),
             (
-                "runtime/linux-x64/bin/a2f_blender_worker",
+                "runtime/linux-x64/bin/audio2face_worker",
                 data,
                 stat.S_IFREG | 0o755,
             ),
@@ -194,7 +194,7 @@ def test_safe_zip_extraction_preserves_file_contents_and_executable_mode(
     )
 
     destination = _extract_payload(tmp_path, payload, unpacked_size=len(data))
-    worker = destination / "runtime/linux-x64/bin/a2f_blender_worker"
+    worker = destination / "runtime/linux-x64/bin/audio2face_worker"
     assert worker.read_bytes() == data
     if os.name != "nt":
         assert stat.S_IMODE(worker.stat().st_mode) == 0o755
@@ -286,7 +286,7 @@ def _launch_spec(tmp_path: Path, trt_info: object) -> BundleLaunchSpec:
     return BundleLaunchSpec(
         platform="linux-x64",
         root=tmp_path,
-        executable=tmp_path / "bin/a2f_blender_worker",
+        executable=tmp_path / "bin/audio2face_worker",
         trtexec=tmp_path / "bin/trtexec",
         env={"PATH": "/usr/bin"},
         audio2face_model=tmp_path / "models/audio2face/model.json",
@@ -459,7 +459,7 @@ def _valid_linux_runtime_zip() -> tuple[bytes, int]:
     manifest = {
         "schema": RUNTIME_SCHEMA,
         "platform": "linux-x64",
-        "worker": "bin/a2f_blender_worker",
+        "worker": "bin/audio2face_worker",
         "trtexec": "bin/trtexec",
         "audio2face_model": "models/audio2face/model.json",
         "audio2emotion_model": "models/audio2emotion/model.json",
@@ -484,7 +484,7 @@ def _valid_linux_runtime_zip() -> tuple[bytes, int]:
             stat.S_IFREG | 0o644,
         ),
         (
-            "runtime/linux-x64/bin/a2f_blender_worker",
+            "runtime/linux-x64/bin/audio2face_worker",
             _elf_x64(),
             stat.S_IFREG | 0o755,
         ),
@@ -570,7 +570,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from a2f_blender.runtime_install import _InterprocessInstallLock
+from audio2face.runtime_install import _InterprocessInstallLock
 
 lock_path = Path(sys.argv[1])
 ready_path = Path(sys.argv[2])

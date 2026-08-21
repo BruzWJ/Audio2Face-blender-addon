@@ -37,8 +37,8 @@ def properties_module(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     monkeypatch.setitem(sys.modules, "bpy", bpy)
     monkeypatch.setitem(sys.modules, "bpy.props", props)
 
-    module_name = "a2f_blender._properties_test"
-    source = Path(__file__).resolve().parents[1] / "a2f_blender" / "properties.py"
+    module_name = "audio2face._properties_test"
+    source = Path(__file__).resolve().parents[1] / "audio2face" / "properties.py"
     spec = importlib.util.spec_from_file_location(module_name, source)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)

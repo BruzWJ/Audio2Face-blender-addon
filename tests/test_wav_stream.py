@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from a2f_blender import wav_stream
-from a2f_blender.wav_stream import (
+from audio2face import wav_stream
+from audio2face.wav_stream import (
     MAX_CHANNELS,
     MAX_CHUNK_FRAMES,
     WavStreamError,

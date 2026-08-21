@@ -3,9 +3,9 @@ requires = ["setuptools>=65"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "a2f-blender-dev"
+name = "audio2face-dev"
 version = "0.1.0"
-description = "Development and tests for the Audio2Face Blender extension"
+description = "Development and tests for the Audio2Face extension"
 requires-python = ">=3.10"
 license = { text = "GPL-3.0-or-later" }
 

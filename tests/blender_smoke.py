@@ -21,17 +21,17 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import bpy  # noqa: E402  (available only inside Blender)
 
-import a2f_blender  # noqa: E402
-from a2f_blender.arkit import ARKIT_52_CHANNELS  # noqa: E402
-from a2f_blender.preview import (  # noqa: E402
+import audio2face  # noqa: E402
+from audio2face.arkit import ARKIT_52_CHANNELS  # noqa: E402
+from audio2face.preview import (  # noqa: E402
     PreviewError,
     apply_arkit_frame,
     build_subscriptions,
 )
-from a2f_blender.live_stream import LiveStreamController  # noqa: E402
-from a2f_blender import runtime  # noqa: E402
-from a2f_blender.preferences import A2FAddonPreferences  # noqa: E402
-from a2f_blender.properties import (  # noqa: E402
+from audio2face.live_stream import LiveStreamController  # noqa: E402
+from audio2face import runtime  # noqa: E402
+from audio2face.preferences import A2FAddonPreferences  # noqa: E402
+from audio2face.properties import (  # noqa: E402
     A2FSceneSettings,
     apply_model_defaults,
     tuning_parameters,
@@ -68,15 +68,15 @@ def main() -> None:
     assert bpy.app.version[:2] == (5, 2), (
         f"this smoke test targets Blender 5.2, got {bpy.app.version_string}"
     )
-    assert not hasattr(bpy.types.Scene, "a2f_blender"), (
+    assert not hasattr(bpy.types.Scene, "audio2face"), (
         "factory-startup scene unexpectedly has Audio2Face registered"
     )
 
     registered = False
     try:
-        a2f_blender.register()
+        audio2face.register()
         registered = True
-        assert hasattr(bpy.types.Scene, "a2f_blender")
+        assert hasattr(bpy.types.Scene, "audio2face")
         assert bpy.app.timers.is_registered(runtime._timer_callback)
         assert runtime._load_pre_handler in bpy.app.handlers.load_pre
         assert runtime._load_post_handler in bpy.app.handlers.load_post
@@ -88,7 +88,7 @@ def main() -> None:
         scene = bpy.context.scene
         target = _make_shape_key_target(scene)
 
-        settings = scene.a2f_blender
+        settings = scene.audio2face
         model_defaults = {
             "input_strength": 1.0,
             "skin": {
@@ -230,9 +230,9 @@ def main() -> None:
         )
     finally:
         if registered:
-            a2f_blender.unregister()
-        assert not hasattr(bpy.types.Scene, "a2f_blender"), (
-            "unregister left Scene.a2f_blender behind"
+            audio2face.unregister()
+        assert not hasattr(bpy.types.Scene, "audio2face"), (
+            "unregister left Scene.audio2face behind"
         )
         assert not bpy.app.timers.is_registered(runtime._timer_callback), (
             "unregister left the runtime timer registered"
@@ -240,7 +240,7 @@ def main() -> None:
         assert runtime._load_pre_handler not in bpy.app.handlers.load_pre
         assert runtime._load_post_handler not in bpy.app.handlers.load_post
 
-    print("A2F Blender 5.2 smoke test passed")
+    print("Audio2Face 5.2 smoke test passed")
 
 
 if __name__ == "__main__":

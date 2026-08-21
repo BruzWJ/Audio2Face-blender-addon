@@ -1,6 +1,6 @@
-# Audio2Face Blender
+# Audio2Face Blender Addon
 
-Audio2Face Blender is a Blender 5.2 extension that runs NVIDIA Audio2Face-3D
+Audio2Face-blender-addon is a Blender 5.2 extension that runs NVIDIA Audio2Face-3D
 v3.0 and its Audio2Emotion v3.0 driver locally on an NVIDIA GPU. Blender
 launches one add-on-managed native child process; users do not host a service
 or select an executable, SDK, model, CUDA installation, or working directory.
@@ -49,7 +49,7 @@ playback can continue after the worker has stopped.
 
 Each target is an enabled Blender mesh object. A Shape Key is connected only
 when its name exactly matches one of the 52 PascalCase names in
-[`a2f_blender/arkit.py`](a2f_blender/arkit.py). Matching is case-sensitive.
+[`audio2face/arkit.py`](audio2face/arkit.py). Matching is case-sensitive.
 There are no aliases, destination selectors, multipliers, or offsets.
 
 A target may implement any exact-name subset of the 52 channels. The worker
@@ -69,7 +69,7 @@ plays it against Blender's audio-device clock.
 built-in source incrementally decodes a selected WAV to mono f32le, resamples
 it to the model rate, and keeps a bounded lead over local playback. Integrations
 running inside Blender can instead use
-[`a2f_blender/streaming.py`](a2f_blender/streaming.py) to push source-agnostic
+[`audio2face/streaming.py`](audio2face/streaming.py) to push source-agnostic
 live PCM at the model rate. That integration owns capture and audible monitoring;
 the built-in streamed-WAV source performs Blender audio playback itself. No port,
 network listener, or separately hosted service is involved.
@@ -138,7 +138,7 @@ The catalog in this source checkout contains no platform artifacts. The source
 extension and worker architecture are implemented, but the install button
 cannot deliver a runtime until license-reviewed Linux and Windows archives are
 published at immutable HTTPS URLs and their measured sizes and SHA-256 digests
-are added to [`runtime_catalog.json`](a2f_blender/runtime_catalog.json).
+are added to [`runtime_catalog.json`](audio2face/runtime_catalog.json).
 Audio2Emotion v3.0 is gated by NVIDIA on Hugging Face, and this integration is
 experimental until its GPU, platform, model-access, and license requirements
 have passed release validation. That validation must also confirm that the
@@ -169,8 +169,8 @@ See [architecture](docs/architecture.md), [protocol](docs/protocol.md), and the
 Using Blender 5.2:
 
 ```sh
-blender --command extension validate a2f_blender
-blender --command extension build --source-dir a2f_blender --output-dir dist
+blender --command extension validate audio2face
+blender --command extension build --source-dir audio2face --output-dir dist
 blender --factory-startup --background --python tests/blender_smoke.py
 ```
 

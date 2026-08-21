@@ -1,10 +1,10 @@
 schema_version = "1.0.0"
 
-id = "a2f_blender"
+id = "audio2face"
 version = "0.1.0"
 name = "Audio2Face"
 tagline = "Drive target meshes with GPU-generated ARKit-52 values"
-maintainer = "A2F Blender Contributors"
+maintainer = "Audio2Face Contributors"
 type = "add-on"
 
 tags = ["Animation"]

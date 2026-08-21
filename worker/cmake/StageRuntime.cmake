@@ -58,8 +58,8 @@ endif()
 # Invalidate same-version artifacts before checking inputs. A failed release
 # staging run must not leave a stale, apparently publishable archive behind.
 file(REMOVE
-  "${_a2f_stage_root}/a2f-blender-runtime-${A2F_PACKAGE_VERSION}-${A2F_PLATFORM}.zip"
-  "${_a2f_stage_root}/a2f-blender-runtime-${A2F_PACKAGE_VERSION}-${A2F_PLATFORM}.catalog-fragment.json")
+  "${_a2f_stage_root}/audio2face-runtime-${A2F_PACKAGE_VERSION}-${A2F_PLATFORM}.zip"
+  "${_a2f_stage_root}/audio2face-runtime-${A2F_PACKAGE_VERSION}-${A2F_PLATFORM}.catalog-fragment.json")
 
 foreach(_a2f_file IN ITEMS
     "${A2F_WORKER_FILE}"
@@ -208,10 +208,10 @@ file(MAKE_DIRECTORY
 get_filename_component(_a2f_worker_name "${A2F_WORKER_FILE}" NAME)
 get_filename_component(_a2f_trtexec_name "${A2F_TRTEXEC_FILE}" NAME)
 if(A2F_PLATFORM STREQUAL "linux-x64")
-  set(_a2f_expected_worker_name "a2f_blender_worker")
+  set(_a2f_expected_worker_name "audio2face_worker")
   set(_a2f_expected_trtexec_name "trtexec")
 else()
-  set(_a2f_expected_worker_name "a2f_blender_worker.exe")
+  set(_a2f_expected_worker_name "audio2face_worker.exe")
   set(_a2f_expected_trtexec_name "trtexec.exe")
 endif()
 if(NOT _a2f_worker_name STREQUAL _a2f_expected_worker_name)
@@ -264,7 +264,7 @@ foreach(_a2f_model_name IN ITEMS audio2face audio2emotion)
 endforeach()
 
 configure_file("${A2F_PROJECT_LICENSE}"
-  "${_a2f_stage_directory}/licenses/a2f-blender-LICENSE.txt" COPYONLY)
+  "${_a2f_stage_directory}/licenses/audio2face-LICENSE.txt" COPYONLY)
 configure_file("${A2F_THIRD_PARTY_NOTICES}"
   "${_a2f_stage_directory}/licenses/THIRD_PARTY_NOTICES.md" COPYONLY)
 configure_file("${A2F_SDK_LICENSE}"
@@ -316,7 +316,7 @@ endif()
 # metadata belongs beside the archive, not inside this launch manifest.
 string(CONCAT _a2f_bundle_json
   "{\n"
-  "  \"schema\": \"a2f-blender-runtime/2\",\n"
+  "  \"schema\": \"audio2face-runtime/2\",\n"
   "  \"platform\": \"${A2F_PLATFORM}\",\n"
   "  \"worker\": \"bin/${_a2f_worker_name}\",\n"
   "  \"trtexec\": \"bin/${_a2f_trtexec_name}\",\n"
@@ -324,7 +324,7 @@ string(CONCAT _a2f_bundle_json
   "  \"audio2emotion_model\": \"models/audio2emotion/model.json\",\n"
   "  \"library_directories\": [\"lib\"],\n"
   "  \"licenses\": [\n"
-  "    \"licenses/a2f-blender-LICENSE.txt\",\n"
+  "    \"licenses/audio2face-LICENSE.txt\",\n"
   "    \"licenses/THIRD_PARTY_NOTICES.md\",\n"
   "    \"licenses/audio2face-sdk-LICENSE.txt\",\n"
   "    \"licenses/cuda-LICENSE.txt\",\n"
@@ -339,7 +339,7 @@ string(CONCAT _a2f_bundle_json
 file(WRITE "${_a2f_stage_directory}/bundle.json" "${_a2f_bundle_json}")
 
 set(_a2f_required_license_names
-  a2f-blender-LICENSE.txt
+  audio2face-LICENSE.txt
   THIRD_PARTY_NOTICES.md
   audio2face-sdk-LICENSE.txt
   cuda-LICENSE.txt

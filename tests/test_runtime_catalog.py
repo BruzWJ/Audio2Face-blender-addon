@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from a2f_blender.runtime_catalog import (
+from audio2face.runtime_catalog import (
     CATALOG_SCHEMA,
     MAX_ARCHIVE_BYTES,
     MAX_UNPACKED_BYTES,
@@ -109,8 +109,8 @@ def test_catalog_document_must_be_an_object() -> None:
 def test_load_runtime_catalog_rejects_duplicate_fields(tmp_path: Path) -> None:
     path = tmp_path / "catalog.json"
     path.write_text(
-        '{"schema":"a2f-blender-runtime-catalog/1",'
-        '"schema":"a2f-blender-runtime-catalog/1",'
+        '{"schema":"audio2face-runtime-catalog/1",'
+        '"schema":"audio2face-runtime-catalog/1",'
         '"release":"0.1.0","artifacts":{}}',
         encoding="utf-8",
     )

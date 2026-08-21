@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from a2f_blender.arkit import ARKIT_52_CHANNELS
-from a2f_blender.result_io import (
+from audio2face.arkit import ARKIT_52_CHANNELS
+from audio2face.result_io import (
     RESULT_SCHEMA,
     ResultValidationError,
     load_animation_result,

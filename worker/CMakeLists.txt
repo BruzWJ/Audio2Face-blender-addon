@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(a2f_blender_worker VERSION 0.1.0 LANGUAGES CXX)
+project(audio2face_worker VERSION 0.1.0 LANGUAGES CXX)
 
 option(A2F_WORKER_STAGE_RUNTIME
   "Enable strict production runtime staging and archive targets" OFF)
@@ -65,7 +65,7 @@ set(A2F_BUNDLE_AUDIO2EMOTION_MODEL_DIR "" CACHE PATH
 set(A2F_BUNDLE_AUDIO2EMOTION_MODEL_LICENSE "" CACHE FILEPATH
   "NVIDIA Audio2Emotion model license file to include in the runtime archive")
 
-add_executable(a2f_blender_worker
+add_executable(audio2face_worker
   src/a2f_backend.cpp
   src/main.cpp
   src/protocol.cpp
@@ -73,20 +73,20 @@ add_executable(a2f_blender_worker
   src/wav.cpp
 )
 
-target_compile_features(a2f_blender_worker PRIVATE cxx_std_17)
-target_compile_definitions(a2f_blender_worker PRIVATE
+target_compile_features(audio2face_worker PRIVATE cxx_std_17)
+target_compile_definitions(audio2face_worker PRIVATE
   A2F_WORKER_VERSION="${PROJECT_VERSION}"
 )
-target_link_libraries(a2f_blender_worker PRIVATE
+target_link_libraries(audio2face_worker PRIVATE
   audio2x-sdk::audio2x
   nlohmann_json::nlohmann_json)
 
 if(MSVC)
-  target_compile_options(a2f_blender_worker PRIVATE /W4 /permissive- /EHsc)
+  target_compile_options(audio2face_worker PRIVATE /W4 /permissive- /EHsc)
 else()
-  target_compile_options(a2f_blender_worker PRIVATE -Wall -Wextra -Wpedantic)
+  target_compile_options(audio2face_worker PRIVATE -Wall -Wextra -Wpedantic)
   find_package(Threads REQUIRED)
-  target_link_libraries(a2f_blender_worker PRIVATE Threads::Threads)
+  target_link_libraries(audio2face_worker PRIVATE Threads::Threads)
 endif()
 
 if(A2F_WORKER_STAGE_RUNTIME)
@@ -247,7 +247,7 @@ if(A2F_WORKER_STAGE_RUNTIME)
     # The copied worker must locate the sibling lib directory without any
     # build-host absolute RPATH. The add-on also supplies a child-only
     # LD_LIBRARY_PATH so dependencies loaded by audio2x/TensorRT resolve there.
-    set_target_properties(a2f_blender_worker PROPERTIES
+    set_target_properties(audio2face_worker PROPERTIES
       BUILD_WITH_INSTALL_RPATH TRUE
       INSTALL_RPATH "$ORIGIN/../lib")
   endif()
@@ -299,7 +299,7 @@ set(A2F_AUDIO2EMOTION_MODEL_LICENSE [==[@A2F_AUDIO2EMOTION_MODEL_LICENSE@]==])
   set(A2F_STAGE_ROOT "${_a2f_runtime_root}")
   set(A2F_PLATFORM "${A2F_RUNTIME_PLATFORM}")
   set(A2F_PACKAGE_VERSION "${PROJECT_VERSION}")
-  set(A2F_WORKER_FILE "$<TARGET_FILE:a2f_blender_worker>")
+  set(A2F_WORKER_FILE "$<TARGET_FILE:audio2face_worker>")
   set(A2F_RUNTIME_FILES "${_a2f_runtime_files}")
   set(A2F_TRTEXEC_FILE "${A2F_BUNDLE_TRTEXEC}")
   set(A2F_TRTEXEC_SOURCE_LICENSE "${A2F_BUNDLE_TRTEXEC_SOURCE_LICENSE}")
@@ -318,21 +318,21 @@ set(A2F_AUDIO2EMOTION_MODEL_LICENSE [==[@A2F_AUDIO2EMOTION_MODEL_LICENSE@]==])
   file(GENERATE
     OUTPUT "${_a2f_stage_config}"
     CONTENT "${_a2f_stage_config_content}"
-    TARGET a2f_blender_worker)
+    TARGET audio2face_worker)
 
-  add_custom_target(a2f_blender_runtime_stage
+  add_custom_target(audio2face_runtime_stage
     COMMAND "${CMAKE_COMMAND}"
       "-DA2F_STAGE_CONFIG=${_a2f_stage_config}"
       -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/StageRuntime.cmake"
-    DEPENDS a2f_blender_worker
+    DEPENDS audio2face_worker
     COMMENT "Staging strict ${A2F_RUNTIME_PLATFORM} Audio2Face runtime"
     VERBATIM)
 
   set(_a2f_runtime_archive
-    "${_a2f_runtime_root}/a2f-blender-runtime-${PROJECT_VERSION}-${A2F_RUNTIME_PLATFORM}.zip")
+    "${_a2f_runtime_root}/audio2face-runtime-${PROJECT_VERSION}-${A2F_RUNTIME_PLATFORM}.zip")
   set(_a2f_runtime_catalog_fragment
-    "${_a2f_runtime_root}/a2f-blender-runtime-${PROJECT_VERSION}-${A2F_RUNTIME_PLATFORM}.catalog-fragment.json")
-  add_custom_target(a2f_blender_runtime_archive
+    "${_a2f_runtime_root}/audio2face-runtime-${PROJECT_VERSION}-${A2F_RUNTIME_PLATFORM}.catalog-fragment.json")
+  add_custom_target(audio2face_runtime_archive
     COMMAND "${CMAKE_COMMAND}" -E rm -f
       "${_a2f_runtime_archive}" "${_a2f_runtime_catalog_fragment}"
     COMMAND "${CMAKE_COMMAND}" -E tar cf "${_a2f_runtime_archive}"
@@ -346,10 +346,10 @@ set(A2F_AUDIO2EMOTION_MODEL_LICENSE [==[@A2F_AUDIO2EMOTION_MODEL_LICENSE@]==])
     WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
     COMMENT "Creating downloadable Audio2Face runtime archive ${_a2f_runtime_archive}"
     VERBATIM)
-  add_dependencies(a2f_blender_runtime_archive a2f_blender_runtime_stage)
+  add_dependencies(audio2face_runtime_archive audio2face_runtime_stage)
 
   message(STATUS
     "Audio2Face runtime packaging enabled: build target "
-    "a2f_blender_runtime_archive -> ${_a2f_runtime_archive} and "
+    "audio2face_runtime_archive -> ${_a2f_runtime_archive} and "
     "${_a2f_runtime_catalog_fragment}")
 endif()
