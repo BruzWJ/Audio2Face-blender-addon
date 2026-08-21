@@ -4,7 +4,7 @@ id = "audio2face"
 version = "0.1.0"
 name = "Audio2Face"
 tagline = "Drive target meshes with GPU-generated ARKit-52 values"
-maintainer = "Audio2Face Contributors"
+maintainer = "x.com/BruzWJ"
 type = "add-on"
 
 tags = ["Animation"]

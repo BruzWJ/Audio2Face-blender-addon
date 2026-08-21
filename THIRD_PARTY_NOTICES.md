@@ -38,6 +38,7 @@ Relevant upstream terms include:
 - [Audio2Face-3D SDK repository and license](https://github.com/NVIDIA/Audio2Face-3D-SDK)
 - [Audio2Face-3D v3.0 model repository](https://huggingface.co/nvidia/Audio2Face-3D-v3.0)
 - [Audio2Emotion v3.0 model repository](https://huggingface.co/nvidia/Audio2Emotion-v3.0)
+- [Audio2Emotion v3.0 model license](https://huggingface.co/nvidia/Audio2Emotion-v3.0/blob/main/LICENSE)
 - [NVIDIA Open Model License](https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/)
 - [NVIDIA Software License Agreement](https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-software-license-agreement/)
 - [TensorRT source and license](https://github.com/NVIDIA/TensorRT)
