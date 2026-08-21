@@ -9,6 +9,8 @@ venv/
 # Native worker build output
 build/
 worker/build/
+dist/*
+!dist/README.md
 out/
 *.o
 *.obj
