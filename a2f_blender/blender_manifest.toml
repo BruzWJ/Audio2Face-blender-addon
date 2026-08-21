@@ -1,0 +1,26 @@
+schema_version = "1.0.0"
+
+id = "a2f_blender"
+version = "0.1.0"
+name = "Audio2Face"
+tagline = "Drive target meshes with GPU-generated ARKit-52 values"
+maintainer = "A2F Blender Contributors"
+type = "add-on"
+
+tags = ["Animation"]
+blender_version_min = "5.2.0"
+blender_version_max = "5.3.0"
+platforms = ["windows-x64", "linux-x64"]
+license = ["SPDX:GPL-3.0-or-later"]
+
+[permissions]
+files = "Install the managed runtime and read selected WAV files"
+network = "Download the managed GPU runtime, Audio2Face model, and Audio2Emotion model"
+
+[build]
+paths_exclude_pattern = [
+  "__pycache__/",
+  "*.py[cod]",
+  "/.git/",
+  "/*.zip",
+]
