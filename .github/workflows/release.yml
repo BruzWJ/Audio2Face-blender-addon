@@ -689,7 +689,7 @@ jobs:
             "--norestart",
             "--nocache",
             "--installPath", $installPath,
-            "--add", "Microsoft.VisualStudio.Component.VC.CoreBuildTools",
+            "--add", "Microsoft.VisualStudio.Workload.VCTools",
             "--add", "Microsoft.VisualStudio.Component.VC.14.43.17.13.x86.x64",
             "--add", "Microsoft.VisualStudio.Component.Windows11SDK.22621"
           )

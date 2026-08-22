@@ -13,6 +13,7 @@ import json
 import ntpath
 import os
 import platform as host_platform
+import stat
 import struct
 import sys
 from dataclasses import dataclass
@@ -259,10 +260,19 @@ def _validate_native_binary(path: Path, platform_id: str, label: str) -> None:
 
 
 def _validate_executable(path: Path, platform_id: str, label: str) -> None:
+    _validate_native_binary(path, platform_id, label)
     if platform_id == "linux-x64":
+        try:
+            mode = stat.S_IMODE(path.stat().st_mode)
+            executable_mode = mode | stat.S_IXUSR
+            if mode != executable_mode:
+                path.chmod(executable_mode)
+        except OSError as exc:
+            raise BundleError(
+                f"could not restore the installed bundle {label} execute bit: {path}"
+            ) from exc
         if not os.access(path, os.X_OK):
             raise BundleError(f"bundle {label} is not executable: {path}")
-    _validate_native_binary(path, platform_id, label)
 
 
 def _require_windows_directory(value: str, description: str) -> Path:

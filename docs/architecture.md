@@ -119,8 +119,10 @@ release therefore consists of two self-contained Blender extension ZIPs:
   and required notices.
 
 Each extension contains its one native runtime directly at
-`audio2face/runtime/`. The runtime is immutable package content, not a
-separately installed component. It contains no model files or serialized
+`audio2face/runtime/`. The runtime is package-local content, not a separately
+installed component. On Linux, Blender's ZIP installer drops executable mode
+bits, so the resolver validates the two exact ELF files and restores only
+their owner execute bit before launch. It contains no model files or serialized
 TensorRT engines. Windows PE files and Linux ELF files are not
 interchangeable, so there is no single cross-platform extension ZIP. The
 CUDA-only backend requires NVIDIA hardware and has no macOS or ARM package.
@@ -136,7 +138,7 @@ directory.
 A clean native release job uses [`tools/build_runtime.py`](../tools/build_runtime.py)
 and [`worker/runtime-lock.json`](../worker/runtime-lock.json) to acquire the
 exact Audio2Face SDK revision, CUDA 12.9 components, TensorRT 10.13 inputs,
-CMake, and Windows CRT inputs. It builds the worker and stages the `trtexec`
+CMake, and Windows CRT inputs. It builds the worker and packages the `trtexec`
 shipped in those exact TensorRT binary inputs without consulting a workstation or
 runner CUDA or TensorRT installation. CUDA compiler files, headers,
 import/static libraries, and driver stubs are build inputs only. The NVIDIA
@@ -150,14 +152,18 @@ the exact locked Rocky BaseOS `libstdc++.so.6` and `libgcc_s.so.1` files rather
 than resolving either file from the user's host. The pipeline does not claim
 bit-for-bit reproducible native binaries.
 
-The native build writes exactly `build/runtime/<platform>`. Then
+The native CMake build writes `audio2face_worker` and `audio2x` directly into
+the temporary runtime package. Python adds the exact contract-defined runtime
+files after the native build command returns to host Python; there is no custom
+CMake staging target. The native builder publishes exactly
+`build/runtime/<platform>`. Then
 [`tools/build_extension.py`](../tools/build_extension.py) accepts that one
-handoff plus an absolute Blender 5.2 executable, copies the runtime contents
-into a temporary `audio2face/runtime/`, pins the staged manifest to the one
+handoff plus an absolute Blender 5.2 executable, creates the complete temporary
+extension source directory required by Blender, pins its manifest to one
 platform, invokes Blender's extension validator and builder, and verifies the
 ZIP layout and bytes. The only outputs are
-`dist/audio2face-0.1.0-windows-x64.zip` and
-`dist/audio2face-0.1.0-linux-x64.zip`. Native compilation never occurs inside
+`dist/audio2face-<version>-windows-x64.zip` and
+`dist/audio2face-<version>-linux-x64.zip`. Native compilation never occurs inside
 Blender's extension command.
 
 `trtexec` comes from the matching locked TensorRT binary input. Windows uses
@@ -185,7 +191,7 @@ installation. It performs no online request.
    top-level `network.onnx` and `trt_info.json`, and every other descriptor
    path resolved as a canonical relative, non-empty regular file confined to
    that root; Git LFS pointers are rejected;
-2. validates the immutable bundled runtime;
+2. validates the fixed bundled runtime payload;
 3. runs the bundled `trtexec` on CUDA device 0 for each selected model,
    building each completed engine as a temporary sibling candidate;
 4. honors cancellation while each native build is running; and

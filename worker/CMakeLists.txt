@@ -50,18 +50,8 @@ if(NOT EXISTS "${_a2f_nlohmann_include}/nlohmann/json.hpp" OR
     "Audio2Face-3D-SDK 1.0.0 did not resolve nlohmann/json.hpp")
 endif()
 
-# The Python runtime contract supplies the sole package-path map. CMake builds
-# the two generated targets and copies the declared external source list.
-set(A2F_STAGE_WORKER_PATH "" CACHE STRING
-  "Contract path for the generated Audio2Face worker")
-set(A2F_STAGE_AUDIO2X_PATH "" CACHE STRING
-  "Contract path for the generated Audio2Face SDK library")
-set(A2F_STAGE_TRTEXEC_PATH "" CACHE STRING
-  "Contract path for the bundled TensorRT trtexec executable")
-set(A2F_STAGE_EXTERNAL_SOURCES "" CACHE STRING
-  "Ordered source files supplied by the Python runtime contract")
-set(A2F_STAGE_EXTERNAL_PATHS "" CACHE STRING
-  "Ordered package paths supplied by the Python runtime contract")
+set(A2F_RUNTIME_OUTPUT_DIR "" CACHE PATH
+  "Final platform runtime directory populated by the release builder")
 
 add_executable(audio2face_worker
   src/a2f_backend.cpp
@@ -104,65 +94,30 @@ else()
     "got ${CMAKE_SYSTEM_NAME}/${CMAKE_SYSTEM_PROCESSOR}")
 endif()
 
-foreach(_a2f_contract_value IN ITEMS
-    A2F_STAGE_WORKER_PATH
-    A2F_STAGE_AUDIO2X_PATH
-    A2F_STAGE_TRTEXEC_PATH
-    A2F_STAGE_EXTERNAL_SOURCES
-    A2F_STAGE_EXTERNAL_PATHS)
-  if("${${_a2f_contract_value}}" STREQUAL "")
-    message(FATAL_ERROR
-      "The Python runtime contract did not supply ${_a2f_contract_value}")
-  endif()
-endforeach()
-list(LENGTH A2F_STAGE_EXTERNAL_SOURCES _a2f_source_count)
-list(LENGTH A2F_STAGE_EXTERNAL_PATHS _a2f_path_count)
-if(NOT _a2f_source_count EQUAL _a2f_path_count)
+if(A2F_RUNTIME_OUTPUT_DIR STREQUAL "" OR
+   NOT IS_ABSOLUTE "${A2F_RUNTIME_OUTPUT_DIR}")
   message(FATAL_ERROR
-    "The runtime contract source/path counts differ: "
-    "${_a2f_source_count} sources, ${_a2f_path_count} paths")
+    "A2F_RUNTIME_OUTPUT_DIR must be an absolute release output directory")
+endif()
+get_filename_component(A2F_RUNTIME_OUTPUT_DIR
+  "${A2F_RUNTIME_OUTPUT_DIR}" ABSOLUTE)
+
+set_target_properties(audio2face_worker PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${A2F_RUNTIME_OUTPUT_DIR}/bin")
+set_target_properties(audio2x PROPERTIES
+  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/import")
+if(MSVC)
+  set_target_properties(audio2face_worker audio2x PROPERTIES
+    COMPILE_PDB_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/symbols"
+    PDB_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/symbols")
+endif()
+if(WIN32)
+  set_target_properties(audio2x PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${A2F_RUNTIME_OUTPUT_DIR}/bin")
+else()
+  set_target_properties(audio2x PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY "${A2F_RUNTIME_OUTPUT_DIR}/lib")
 endif()
 
-set(_a2f_runtime_root "${CMAKE_BINARY_DIR}/runtime")
-set(_a2f_stage_config_directory "${CMAKE_CURRENT_BINARY_DIR}/runtime-stage-config")
-file(MAKE_DIRECTORY "${_a2f_stage_config_directory}")
-set(_a2f_stage_config
-  "${_a2f_stage_config_directory}/StageRuntime-$<CONFIG>.cmake")
-set(_a2f_stage_config_content [====[
-set(A2F_STAGE_ROOT [==[@A2F_STAGE_ROOT@]==])
-set(A2F_PLATFORM [==[@A2F_PLATFORM@]==])
-set(A2F_WORKER_FILE [==[@A2F_WORKER_FILE@]==])
-set(A2F_AUDIO2X_FILE [==[@A2F_AUDIO2X_FILE@]==])
-set(A2F_WORKER_PATH [==[@A2F_WORKER_PATH@]==])
-set(A2F_AUDIO2X_PATH [==[@A2F_AUDIO2X_PATH@]==])
-set(A2F_TRTEXEC_PATH [==[@A2F_TRTEXEC_PATH@]==])
-set(A2F_EXTERNAL_SOURCES [==[@A2F_EXTERNAL_SOURCES@]==])
-set(A2F_EXTERNAL_PATHS [==[@A2F_EXTERNAL_PATHS@]==])
-]====])
-set(A2F_STAGE_ROOT "${_a2f_runtime_root}")
-set(A2F_PLATFORM "${A2F_RUNTIME_PLATFORM}")
-set(A2F_WORKER_FILE "$<TARGET_FILE:audio2face_worker>")
-set(A2F_AUDIO2X_FILE "$<TARGET_FILE:audio2x>")
-set(A2F_WORKER_PATH "${A2F_STAGE_WORKER_PATH}")
-set(A2F_AUDIO2X_PATH "${A2F_STAGE_AUDIO2X_PATH}")
-set(A2F_TRTEXEC_PATH "${A2F_STAGE_TRTEXEC_PATH}")
-set(A2F_EXTERNAL_SOURCES "${A2F_STAGE_EXTERNAL_SOURCES}")
-set(A2F_EXTERNAL_PATHS "${A2F_STAGE_EXTERNAL_PATHS}")
-string(CONFIGURE "${_a2f_stage_config_content}" _a2f_stage_config_content @ONLY)
-file(GENERATE
-  OUTPUT "${_a2f_stage_config}"
-  CONTENT "${_a2f_stage_config_content}"
-  TARGET audio2face_worker)
-
-add_custom_target(audio2face_runtime_stage
-  COMMAND "${CMAKE_COMMAND}"
-    "-DA2F_STAGE_CONFIG=${_a2f_stage_config}"
-    -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/StageRuntime.cmake"
-  DEPENDS audio2face_worker
-  COMMENT "Staging contract-defined ${A2F_RUNTIME_PLATFORM} Audio2Face runtime"
-  VERBATIM)
-
 message(STATUS
-  "Audio2Face runtime staging enabled: build target "
-  "audio2face_runtime_stage -> "
-  "${_a2f_runtime_root}/${A2F_RUNTIME_PLATFORM}")
+  "Audio2Face ${A2F_RUNTIME_PLATFORM} native outputs: ${A2F_RUNTIME_OUTPUT_DIR}")

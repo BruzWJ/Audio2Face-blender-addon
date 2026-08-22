@@ -1983,7 +1983,7 @@ def materialize_linux_runtime(
             "Publication requires legal review of the locked GNU runtime terms.",
             "Publication requires continued distribution of the locked corresponding "
             "source RPM under its applicable terms.",
-            "Publication requires the complete staged ELF closure and driver-only "
+            "Publication requires the complete packaged ELF closure and driver-only "
             "clean-machine inference validation.",
         ],
     }
@@ -3228,26 +3228,7 @@ def write_provenance(
     return trtexec_provenance, msvc_provenance
 
 
-def _cmake_list(values: Sequence[os.PathLike[str] | str], label: str) -> str:
-    encoded: list[str] = []
-    for value in values:
-        item = os.fspath(value)
-        if (
-            not item
-            or ";" in item
-            or "\0" in item
-            or "\n" in item
-            or "\r" in item
-            or "]==]" in item
-        ):
-            raise BuildError(f"{label} contains a value unsafe for a CMake list: {item!r}")
-        encoded.append(item)
-    if not encoded:
-        raise BuildError(f"{label} cannot be empty")
-    return ";".join(encoded)
-
-
-def _stage_source_for_file(
+def _runtime_source_for_file(
     entry: RuntimePackagedFile,
     *,
     sdk_source: Path,
@@ -3291,7 +3272,7 @@ def _stage_source_for_file(
     )
 
 
-def runtime_stage_map(
+def runtime_package_map(
     contract: RuntimePlatformContract,
     *,
     bundle_manifest: Path,
@@ -3304,8 +3285,8 @@ def runtime_stage_map(
     platform_provenance: Path | None,
     trtexec: Path,
     trtexec_provenance: Path,
-) -> tuple[str, tuple[Path, ...], tuple[str, ...]]:
-    """Resolve the shared package contract to one CMake staging map."""
+) -> tuple[tuple[Path, str], ...]:
+    """Resolve every non-generated runtime file from the package contract."""
 
     audio2x_entries = contract.files_for_source("audio2x")
     if len(audio2x_entries) != 1:
@@ -3319,7 +3300,7 @@ def runtime_stage_map(
             continue
         external.append(
             (
-                _stage_source_for_file(
+                _runtime_source_for_file(
                     entry,
                     sdk_source=sdk_source,
                     cuda_runtime=cuda_runtime,
@@ -3333,34 +3314,80 @@ def runtime_stage_map(
                 entry.path,
             )
         )
-    expected_paths = {
-        "bundle.json",
-        contract.worker,
-        contract.trtexec,
-        *(entry.path for entry in contract.libraries),
-        *(entry.path for entry in contract.licenses),
-    }
-    actual_paths = {
-        contract.worker,
-        audio2x_entries[0].path,
-        *(destination for _source, destination in external),
-    }
-    if actual_paths != expected_paths or len(actual_paths) != len(external) + 2:
-        raise BuildError("runtime staging map does not exactly cover the package contract")
+    seen_sources: set[Path] = set()
     for source, destination in external:
-        if not source.is_file() or source.stat().st_size < 1:
+        if source.is_symlink() or not source.is_file() or source.stat().st_size < 1:
             raise BuildError(
-                f"runtime staging source for {destination} is not a non-empty file: "
+                f"runtime package source for {destination} is not a non-empty "
+                "regular file: "
                 f"{source}"
             )
-    return (
-        audio2x_entries[0].path,
-        tuple(source for source, _destination in external),
-        tuple(destination for _source, destination in external),
-    )
+        resolved = source.resolve(strict=True)
+        if resolved in seen_sources:
+            raise BuildError(f"runtime package map repeats source {resolved}")
+        seen_sources.add(resolved)
+    return tuple(external)
 
 
-def configure_and_stage_worker(
+def assemble_runtime_package(
+    runtime: Path,
+    contract: RuntimePlatformContract,
+    external_files: Sequence[tuple[Path, str]],
+) -> None:
+    """Add declared runtime inputs to the native target output directory."""
+
+    audio2x_entries = contract.files_for_source("audio2x")
+    if len(audio2x_entries) != 1:
+        raise BuildError("runtime contract must declare exactly one audio2x path")
+    generated_paths = {contract.worker, audio2x_entries[0].path}
+    expected_external_paths = {
+        "bundle.json",
+        contract.trtexec,
+        *(entry.path for entry in contract.libraries if entry.source != "audio2x"),
+        *(entry.path for entry in contract.licenses),
+    }
+    actual_external_paths = [relative for _source, relative in external_files]
+    if (
+        set(actual_external_paths) != expected_external_paths
+        or len(actual_external_paths) != len(expected_external_paths)
+    ):
+        raise BuildError("external runtime files do not exactly match the package contract")
+    if not runtime.is_dir() or runtime.is_symlink():
+        raise BuildError(f"native build did not produce runtime directory: {runtime}")
+    actual_files: set[str] = set()
+    actual_directories: set[str] = set()
+    for entry in runtime.rglob("*"):
+        relative = entry.relative_to(runtime).as_posix()
+        if entry.is_symlink() or not (entry.is_file() or entry.is_dir()):
+            raise BuildError(f"native runtime output contains a special file: {entry}")
+        if entry.is_dir():
+            actual_directories.add(relative)
+            continue
+        if entry.stat().st_size < 1:
+            raise BuildError(f"native runtime output is empty: {entry}")
+        actual_files.add(relative)
+    expected_directories = {PurePosixPath(path).parts[0] for path in generated_paths}
+    if actual_files != generated_paths or actual_directories != expected_directories:
+        raise BuildError(
+            "native runtime outputs must be exactly "
+            f"{sorted(generated_paths)}; got files={sorted(actual_files)}, "
+            f"directories={sorted(actual_directories)}"
+        )
+
+    for source, relative in external_files:
+        destination = runtime.joinpath(*PurePosixPath(relative).parts)
+        if destination.exists() or destination.is_symlink():
+            raise BuildError(f"runtime package destination already exists: {destination}")
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            os.link(source.resolve(strict=True), destination)
+        except OSError as exc:
+            raise BuildError(
+                f"cannot add runtime package file {relative}: {exc}"
+            ) from exc
+
+
+def configure_and_package_worker(
     runner: CommandRunner,
     cmake: Path,
     ninja: Path,
@@ -3381,6 +3408,9 @@ def configure_and_stage_worker(
     environment: Mapping[str, str],
 ) -> Path:
     build = work_root / "build" / "worker"
+    runtime = work_root / "runtime" / platform_id
+    if runtime.exists() or runtime.is_symlink():
+        raise BuildError(f"runtime package output already exists: {runtime}")
     contract = runtime_contract(platform_id)
     bundle_manifest = work_root / "notices" / "bundle.json"
     bundle_manifest.write_text(
@@ -3390,19 +3420,19 @@ def configure_and_stage_worker(
     cuda_runtime = cuda_library_directory(cuda_root, platform_id)
     if platform_id == "windows-x64":
         if msvc_runtime is None or msvc_manifest is None or msvc_provenance is None:
-            raise BuildError("Windows worker staging requires pinned MSVC inputs")
+            raise BuildError("Windows runtime package requires pinned MSVC inputs")
         platform_runtime = msvc_runtime
         platform_notices = None
         platform_metadata = msvc_manifest
         platform_provenance = msvc_provenance
     else:
         if linux_runtime is None or linux_notices is None:
-            raise BuildError("Linux worker staging requires pinned GNU runtime inputs")
+            raise BuildError("Linux runtime package requires pinned GNU runtime inputs")
         platform_runtime = linux_runtime
         platform_notices = linux_notices
         platform_metadata = None
         platform_provenance = linux_notices / "gcc-runtime-PROVENANCE.txt"
-    audio2x_path, external_sources, external_paths = runtime_stage_map(
+    external_files = runtime_package_map(
         contract,
         bundle_manifest=bundle_manifest,
         sdk_source=sdk_source,
@@ -3435,19 +3465,14 @@ def configure_and_stage_worker(
         f"-DCUDAToolkit_ROOT:PATH={cuda_root}",
         f"-DTENSORRT_ROOT_DIR:PATH={tensorrt_root}",
         f"-DA2F_SDK_SOURCE_DIR:PATH={sdk_source}",
-        f"-DA2F_STAGE_WORKER_PATH:STRING={contract.worker}",
-        f"-DA2F_STAGE_AUDIO2X_PATH:STRING={audio2x_path}",
-        f"-DA2F_STAGE_TRTEXEC_PATH:STRING={contract.trtexec}",
-        "-DA2F_STAGE_EXTERNAL_SOURCES:STRING="
-        + _cmake_list(external_sources, "runtime staging sources"),
-        "-DA2F_STAGE_EXTERNAL_PATHS:STRING="
-        + _cmake_list(external_paths, "runtime package paths"),
+        f"-DA2F_RUNTIME_OUTPUT_DIR:PATH={runtime}",
     ]
     required_cache_keys = [
         "CMAKE_CUDA_COMPILER",
         "CUDAToolkit_ROOT",
         "TENSORRT_ROOT_DIR",
         "A2F_SDK_SOURCE_DIR",
+        "A2F_RUNTIME_OUTPUT_DIR",
     ]
     if platform_id == "linux-x64":
         cxx_flags, cuda_flags = linux_compile_flags(lock)
@@ -3469,29 +3494,27 @@ def configure_and_stage_worker(
             "--build",
             build,
             "--target",
-            "audio2face_runtime_stage",
+            "audio2face_worker",
             "--parallel",
             "2",
         ],
         env=environment,
     )
-    staged = build / "runtime" / platform_id
-    if not staged.is_dir() or staged.is_symlink():
-        raise BuildError(f"worker did not produce staged runtime: {staged}")
-    return staged
+    assemble_runtime_package(runtime, contract, external_files)
+    return runtime
 
 
-def validate_staged_runtime(staged: Path, platform_id: str) -> None:
+def validate_runtime_package(runtime: Path, platform_id: str) -> None:
     try:
         contract = runtime_contract(platform_id)
     except ValueError as exc:
         raise BuildError(str(exc)) from exc
-    if not staged.is_dir() or staged.is_symlink():
-        raise BuildError(f"staged runtime root is not a real directory: {staged}")
-    actual_root = {entry.name for entry in staged.iterdir()}
+    if not runtime.is_dir() or runtime.is_symlink():
+        raise BuildError(f"runtime package root is not a real directory: {runtime}")
+    actual_root = {entry.name for entry in runtime.iterdir()}
     if actual_root != contract.root_entries:
         raise BuildError(
-            f"staged runtime root must be {sorted(contract.root_entries)}; "
+            f"runtime package root must be {sorted(contract.root_entries)}; "
             f"got {sorted(actual_root)}"
         )
     expected_directories = {
@@ -3501,62 +3524,62 @@ def validate_staged_runtime(staged: Path, platform_id: str) -> None:
     if contract.library_entries:
         expected_directories["lib"] = contract.library_entries
     for directory, expected_entries in expected_directories.items():
-        path = staged / directory
+        path = runtime / directory
         if not path.is_dir() or path.is_symlink():
-            raise BuildError(f"staged runtime directory is invalid: {path}")
+            raise BuildError(f"runtime package directory is invalid: {path}")
         entries = {entry.name: entry for entry in path.iterdir()}
         if set(entries) != expected_entries:
             raise BuildError(
-                f"staged runtime/{directory} must contain "
+                f"runtime package/{directory} must contain "
                 f"{sorted(expected_entries)}; got {sorted(entries)}"
             )
         for name, entry in entries.items():
             if entry.is_symlink() or not entry.is_file() or entry.stat().st_size < 1:
                 raise BuildError(
-                    f"staged runtime/{directory}/{name} is not a non-empty "
+                    f"runtime package/{directory}/{name} is not a non-empty "
                     "regular file"
                 )
-    for entry in staged.rglob("*"):
+    for entry in runtime.rglob("*"):
         if entry.is_symlink():
-            raise BuildError(f"staged runtime contains a symlink: {entry}")
+            raise BuildError(f"runtime package contains a symlink: {entry}")
         if not (entry.is_dir() or entry.is_file()):
-            raise BuildError(f"staged runtime contains a special file: {entry}")
+            raise BuildError(f"runtime package contains a special file: {entry}")
     if platform_id == "linux-x64":
         for relative in (contract.worker, contract.trtexec):
-            executable = staged.joinpath(*PurePosixPath(relative).parts)
+            executable = runtime.joinpath(*PurePosixPath(relative).parts)
             if not os.access(executable, os.X_OK):
-                raise BuildError(f"staged Linux executable lacks execute mode: {relative}")
+                raise BuildError(f"packaged Linux executable lacks execute mode: {relative}")
     try:
         bundle = _object(
             json.loads(
-                (staged / "bundle.json").read_text(encoding="utf-8"),
+                (runtime / "bundle.json").read_text(encoding="utf-8"),
                 object_pairs_hook=duplicate_key_hook(BuildError, "JSON"),
                 parse_constant=invalid_constant_hook(BuildError, "JSON"),
             ),
-            "staged bundle.json",
+            "packaged bundle.json",
         )
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise BuildError(f"cannot parse staged bundle.json: {exc}") from exc
+        raise BuildError(f"cannot parse packaged bundle.json: {exc}") from exc
     if set(bundle) != RUNTIME_MANIFEST_FIELDS:
         raise BuildError(
-            "staged bundle.json fields must be "
+            "packaged bundle.json fields must be "
             f"{sorted(RUNTIME_MANIFEST_FIELDS)}; got {sorted(bundle)}"
         )
     if bundle != contract.manifest():
         raise BuildError(
-            f"staged bundle.json does not match the exact {platform_id} contract"
+            f"packaged bundle.json does not match the exact {platform_id} contract"
         )
 
 
 def _native_runtime_files(
-    staged: Path, contract: RuntimePlatformContract
+    runtime: Path, contract: RuntimePlatformContract
 ) -> tuple[Path, ...]:
     paths = (
         contract.worker,
         contract.trtexec,
         *(entry.path for entry in contract.libraries),
     )
-    return tuple(staged.joinpath(*PurePosixPath(path).parts) for path in paths)
+    return tuple(runtime.joinpath(*PurePosixPath(path).parts) for path in paths)
 
 
 def _dumpbin_dependencies(output: str, path: Path) -> frozenset[str]:
@@ -3586,7 +3609,7 @@ def _windows_system_dependency(name: str) -> bool:
 
 def audit_windows_dependencies(
     runner: CommandRunner,
-    staged: Path,
+    runtime: Path,
     compiler: Path,
     environment: Mapping[str, str],
 ) -> None:
@@ -3595,10 +3618,10 @@ def audit_windows_dependencies(
     if not dumpbin.is_file():
         raise BuildError(f"pinned Windows producer dumpbin is unavailable: {dumpbin}")
     packaged = frozenset(
-        path.name.casefold() for path in _native_runtime_files(staged, contract)
+        path.name.casefold() for path in _native_runtime_files(runtime, contract)
     )
     unresolved: dict[str, list[str]] = {}
-    for path in _native_runtime_files(staged, contract):
+    for path in _native_runtime_files(runtime, contract):
         output = runner.run(
             [dumpbin, "/NOLOGO", "/DEPENDENTS", path],
             env=environment,
@@ -3613,7 +3636,7 @@ def audit_windows_dependencies(
             and not _windows_system_dependency(name)
         )
         if missing:
-            unresolved[path.relative_to(staged).as_posix()] = missing
+            unresolved[path.relative_to(runtime).as_posix()] = missing
     if unresolved:
         raise BuildError(
             "Windows runtime has undeclared non-system dependencies: "
@@ -3626,7 +3649,7 @@ def _validate_elf64_x86_64(path: Path) -> None:
         with path.open("rb") as stream:
             header = stream.read(64)
     except OSError as exc:
-        raise BuildError(f"cannot inspect staged ELF file {path}: {exc}") from exc
+        raise BuildError(f"cannot inspect packaged ELF file {path}: {exc}") from exc
     if (
         len(header) != 64
         or header[:7] != b"\x7fELF\x02\x01\x01"
@@ -3635,7 +3658,7 @@ def _validate_elf64_x86_64(path: Path) -> None:
         or struct.unpack_from("<I", header, 20)[0] != 1
         or struct.unpack_from("<H", header, 52)[0] != 64
     ):
-        raise BuildError(f"staged native file is not Linux ELF64 x86-64: {path}")
+        raise BuildError(f"packaged native file is not Linux ELF64 x86-64: {path}")
 
 
 def _readelf_dynamic_entries(
@@ -3693,15 +3716,15 @@ def _audit_elf_dynamic_identity(
     expected_soname = relative.name if relative.parts[0] == "lib" else None
     if expected_soname is None:
         if sonames:
-            raise BuildError(f"staged executable declares DT_SONAME: {relative}")
+            raise BuildError(f"packaged executable declares DT_SONAME: {relative}")
     elif sonames != (expected_soname,):
         raise BuildError(
-            f"staged library filename and DT_SONAME differ: {relative}: {sonames}"
+            f"packaged library filename and DT_SONAME differ: {relative}: {sonames}"
         )
     if rpaths:
-        raise BuildError(f"staged ELF file declares forbidden DT_RPATH: {relative}")
+        raise BuildError(f"packaged ELF file declares forbidden DT_RPATH: {relative}")
     if runpaths:
-        raise BuildError(f"staged ELF file declares forbidden DT_RUNPATH: {relative}")
+        raise BuildError(f"packaged ELF file declares forbidden DT_RUNPATH: {relative}")
 
 
 def _glibc_version_tuple(value: str) -> tuple[int, int, int]:
@@ -3768,14 +3791,14 @@ def _symbol_version_tuple(value: str, namespace: str) -> tuple[int, int, int]:
 
 def audit_linux_dependencies(
     runner: CommandRunner,
-    staged: Path,
+    runtime: Path,
     lock: Mapping[str, Any],
     environment: Mapping[str, str],
 ) -> None:
     contract = runtime_contract("linux-x64")
     readelf = Path(lock["linux_toolchain"]["readelf_path"])
     packaged = frozenset(
-        path.name for path in _native_runtime_files(staged, contract)
+        path.name for path in _native_runtime_files(runtime, contract)
     )
     unresolved: dict[str, list[str]] = {}
     version_definitions = {name: set() for name in ("GLIBCXX", "CXXABI", "GCC")}
@@ -3784,22 +3807,22 @@ def audit_linux_dependencies(
         sorted(
             (
                 entry
-                for directory in (staged / "bin", staged / "lib")
+                for directory in (runtime / "bin", runtime / "lib")
                 for entry in directory.iterdir()
                 if entry.is_file()
             ),
-            key=lambda path: path.relative_to(staged).as_posix(),
+            key=lambda path: path.relative_to(runtime).as_posix(),
         )
     )
     if native_files != tuple(
         sorted(
-            _native_runtime_files(staged, contract),
-            key=lambda path: path.relative_to(staged).as_posix(),
+            _native_runtime_files(runtime, contract),
+            key=lambda path: path.relative_to(runtime).as_posix(),
         )
     ):
         raise BuildError("Linux ELF audit input differs from the runtime contract")
     for path in native_files:
-        relative = PurePosixPath(path.relative_to(staged).as_posix())
+        relative = PurePosixPath(path.relative_to(runtime).as_posix())
         _validate_elf64_x86_64(path)
         dynamic = runner.run(
             [readelf, "--wide", "--dynamic", path],
@@ -3859,7 +3882,7 @@ def audit_linux_dependencies(
         }
         if not numeric_definitions:
             raise BuildError(
-                f"staged GNU runtime defines no numeric {namespace} symbol versions"
+                f"packaged GNU runtime defines no numeric {namespace} symbol versions"
             )
         actual_maximum = max(
             numeric_definitions,
@@ -3867,7 +3890,7 @@ def audit_linux_dependencies(
         )
         if actual_maximum != expected_maximum:
             raise BuildError(
-                f"staged GNU runtime {namespace} definition ceiling must be "
+                f"packaged GNU runtime {namespace} definition ceiling must be "
                 f"{expected_maximum}; got {actual_maximum}"
             )
         unsupported = sorted(
@@ -3875,25 +3898,25 @@ def audit_linux_dependencies(
         )
         if unsupported:
             raise BuildError(
-                f"staged ELFs require unsupported {namespace} versions: {unsupported}"
+                f"packaged ELFs require unsupported {namespace} versions: {unsupported}"
             )
 
 
 def audit_native_dependencies(
     runner: CommandRunner,
-    staged: Path,
+    runtime: Path,
     platform_id: str,
     compiler: Path,
     lock: Mapping[str, Any],
     environment: Mapping[str, str],
 ) -> None:
     if platform_id == "windows-x64":
-        audit_windows_dependencies(runner, staged, compiler, environment)
+        audit_windows_dependencies(runner, runtime, compiler, environment)
     else:
-        audit_linux_dependencies(runner, staged, lock, environment)
+        audit_linux_dependencies(runner, runtime, lock, environment)
 
 
-def publish_stage(staged: Path, platform_id: str) -> Path:
+def publish_runtime(runtime: Path, platform_id: str) -> Path:
     output = REPOSITORY_ROOT / "build" / "runtime" / platform_id
     if output.exists() or output.is_symlink():
         raise BuildError(f"runtime handoff already exists; use a clean build tree: {output}")
@@ -3901,10 +3924,12 @@ def publish_stage(staged: Path, platform_id: str) -> Path:
     partial = output.with_name(output.name + ".partial")
     if partial.exists() or partial.is_symlink():
         raise BuildError(f"stale runtime handoff exists: {partial}")
-    validate_staged_runtime(staged, platform_id)
+    validate_runtime_package(runtime, platform_id)
     try:
-        staged.replace(partial)
-        validate_staged_runtime(partial, platform_id)
+        runtime.replace(partial)
+        validate_runtime_package(partial, platform_id)
+        if output.exists() or output.is_symlink():
+            raise BuildError(f"runtime handoff appeared during build: {output}")
         partial.replace(output)
     except BuildError:
         if partial.is_dir() and not partial.is_symlink():
@@ -4000,7 +4025,7 @@ def build_runtime(platform_id: str, work_root: Path) -> Path:
         trtexec_provenance, msvc_provenance = write_provenance(
             lock, platform_id, trtexec, work_root, msvc_manifest
         )
-        staged = configure_and_stage_worker(
+        runtime = configure_and_package_worker(
             runner,
             cmake,
             ninja,
@@ -4020,16 +4045,16 @@ def build_runtime(platform_id: str, work_root: Path) -> Path:
             work_root,
             build_environment,
         )
-        validate_staged_runtime(staged, platform_id)
+        validate_runtime_package(runtime, platform_id)
         audit_native_dependencies(
             runner,
-            staged,
+            runtime,
             platform_id,
             compiler,
             lock,
             build_environment,
         )
-    return staged
+    return runtime
 
 
 def create_argument_parser() -> argparse.ArgumentParser:
@@ -4052,12 +4077,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             prefix="audio2face-runtime-", dir=work_parent
         ) as temporary:
             work_root = Path(temporary).resolve()
-            staged = build_runtime(arguments.platform, work_root)
-            output = publish_stage(staged, arguments.platform)
+            runtime = build_runtime(arguments.platform, work_root)
+            output = publish_runtime(runtime, arguments.platform)
     except BuildError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    print(f"Staged {arguments.platform} runtime for extension embedding: {output}")
+    print(f"Built {arguments.platform} runtime for extension embedding: {output}")
     return 0
 
 

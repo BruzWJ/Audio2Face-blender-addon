@@ -2,7 +2,7 @@
 
 Audio2Face is a Blender 5.2 extension that runs NVIDIA Audio2Face-3D v3.0 and
 Audio2Emotion v3.0 locally on an NVIDIA GPU. Each operating-system-specific
-extension ZIP contains one immutable native runtime. Blender owns that local
+extension ZIP contains one fixed native runtime payload. Blender owns that local
 worker process; users do not host a service or choose an executable, SDK,
 CUDA installation, TensorRT installation, or working directory. They select
 only the exact root folders of the two complete NVIDIA model repositories they
@@ -217,13 +217,14 @@ python3 tools/build_extension.py --blender /absolute/path/to/blender --platform 
 ```
 
 The runtime build writes exactly `build/runtime/<platform>`. The extension
-builder validates that handoff, stages it at `audio2face/runtime/`, pins the
-manifest to one platform, runs Blender 5.2 extension validation and packaging,
-and verifies the resulting ZIP byte-for-byte. It writes:
+builder validates that handoff, creates the complete temporary package root
+required by Blender, pins the manifest to one platform, runs Blender 5.2
+extension validation and packaging, and verifies the resulting ZIP
+byte-for-byte. It writes:
 
 ```text
-dist/audio2face-0.1.0-windows-x64.zip
-dist/audio2face-0.1.0-linux-x64.zip
+dist/audio2face-<version>-windows-x64.zip
+dist/audio2face-<version>-linux-x64.zip
 ```
 
 Blender's extension builder packages files; it does not compile the native

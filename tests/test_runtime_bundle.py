@@ -359,20 +359,50 @@ def test_manifest_rejects_duplicate_json_fields(package_root: Path) -> None:
         resolve_runtime_bundle()
 
 
-def test_linux_executables_require_x_bit_and_elf64_x64(
+def test_linux_executables_restore_owner_x_bit_after_elf_validation(
     package_root: Path,
 ) -> None:
     root, _manifest = _make_bundle(package_root)
     worker = root / "bin" / "audio2face_worker"
-    worker.chmod(worker.stat().st_mode & ~(stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH))
-    with pytest.raises(BundleError, match="worker is not executable"):
-        resolve_runtime_bundle()
+    trtexec = root / "bin" / "trtexec"
+    executables = (worker, trtexec)
+    for executable in executables:
+        executable.chmod(
+            executable.stat().st_mode
+            & ~(stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        )
+    resolve_runtime_bundle()
+    assert all(
+        stat.S_IMODE(path.stat().st_mode) & stat.S_IXUSR
+        for path in executables
+    )
 
-    _write_elf_x64(worker)
+    _write_elf_x64(worker, executable=False)
     image = bytearray(worker.read_bytes())
     struct.pack_into("<H", image, 18, 183)
     worker.write_bytes(image)
     with pytest.raises(BundleError, match="ELF64 x86-64"):
+        resolve_runtime_bundle()
+    assert not (stat.S_IMODE(worker.stat().st_mode) & stat.S_IXUSR)
+
+
+def test_linux_execute_bit_repair_reports_read_only_install(
+    package_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, _manifest = _make_bundle(package_root)
+    worker = root / "bin" / "audio2face_worker"
+    worker.chmod(worker.stat().st_mode & ~(stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH))
+
+    original_chmod = Path.chmod
+
+    def reject_worker(path: Path, mode: int) -> None:
+        if path == worker:
+            raise PermissionError("read-only extension repository")
+        original_chmod(path, mode)
+
+    monkeypatch.setattr(Path, "chmod", reject_worker)
+    with pytest.raises(BundleError, match="restore.*worker execute bit"):
         resolve_runtime_bundle()
 
 

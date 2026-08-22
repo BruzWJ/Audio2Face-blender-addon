@@ -73,7 +73,7 @@ and [six-hour hosted-job limit](https://docs.github.com/en/actions/reference/lim
 The Windows job downloads Microsoft's official Visual Studio 2022 Build Tools
 bootstrapper and installs only the components required by the locked build:
 
-- `Microsoft.VisualStudio.Component.VC.CoreBuildTools`;
+- `Microsoft.VisualStudio.Workload.VCTools` (required components only);
 - `Microsoft.VisualStudio.Component.VC.14.43.17.13.x86.x64`; and
 - `Microsoft.VisualStudio.Component.Windows11SDK.22621`.
 

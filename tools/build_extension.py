@@ -153,7 +153,7 @@ def validate_runtime(runtime: Path, platform_id: str) -> dict[str, Any]:
             f"got {sorted(bundle)}"
         )
     if bundle != contract.manifest():
-        raise ExtensionBuildError("runtime manifest does not match the staged runtime shape")
+        raise ExtensionBuildError("runtime manifest does not match the packaged runtime shape")
     worker = runtime.joinpath(*PurePosixPath(contract.worker).parts)
     trtexec = runtime.joinpath(*PurePosixPath(contract.trtexec).parts)
     if platform_id == "linux-x64" and (
@@ -205,11 +205,11 @@ def rewrite_manifest_platform(manifest: Path, platform_id: str) -> tuple[str, st
     rewritten = pattern.sub(f'platforms = ["{platform_id}"]', text)
     manifest.write_text(rewritten, encoding="utf-8", newline="\n")
     if f'platforms = ["{platform_id}"]' not in manifest.read_text(encoding="utf-8"):
-        raise ExtensionBuildError("could not pin the staged Blender manifest platform")
+        raise ExtensionBuildError("could not pin the package manifest platform")
     return extension_id, version
 
 
-def _copy_addon_source(stage: Path) -> None:
+def _copy_addon_source(package_root: Path) -> None:
     if (ADDON_SOURCE / "runtime").exists() or (ADDON_SOURCE / "runtime").is_symlink():
         raise ExtensionBuildError(
             "source audio2face/runtime must not exist; embed only build/runtime/<platform>"
@@ -219,7 +219,7 @@ def _copy_addon_source(stage: Path) -> None:
             raise ExtensionBuildError(f"add-on source contains a symlink or special file: {entry}")
     shutil.copytree(
         ADDON_SOURCE,
-        stage,
+        package_root,
         ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
     )
 
@@ -318,23 +318,23 @@ def _zip_member_digest(
 
 def validate_extension_archive(
     archive_path: Path,
-    staged_addon: Path,
+    package_root: Path,
     platform_id: str,
 ) -> None:
     """Require Blender's verified package-files-at-ZIP-root layout byte-for-byte."""
 
     expected_files = {
-        path.relative_to(staged_addon).as_posix(): path
-        for path in staged_addon.rglob("*")
+        path.relative_to(package_root).as_posix(): path
+        for path in package_root.rglob("*")
         if path.is_file()
     }
     expected_directories = {
-        path.relative_to(staged_addon).as_posix()
-        for path in staged_addon.rglob("*")
+        path.relative_to(package_root).as_posix()
+        for path in package_root.rglob("*")
         if path.is_dir()
     }
     if not expected_files:
-        raise ExtensionBuildError("staged extension is empty")
+        raise ExtensionBuildError("extension package root is empty")
     try:
         with zipfile.ZipFile(archive_path) as archive:
             actual_files: dict[str, zipfile.ZipInfo] = {}
@@ -378,7 +378,7 @@ def validate_extension_archive(
                 missing = sorted(set(expected_files) - set(actual_files))
                 extra = sorted(set(actual_files) - set(expected_files))
                 raise ExtensionBuildError(
-                    f"extension ZIP layout differs from staged audio2face source; "
+                    f"extension ZIP layout differs from the package root; "
                     f"missing={missing}, extra={extra}"
                 )
             if "audio2face/blender_manifest.toml" in actual_files:
@@ -414,18 +414,23 @@ def build_extension(blender: Path, platform_id: str) -> Path:
     with tempfile.TemporaryDirectory(
         prefix="audio2face-extension-", dir=work_directory
     ) as temporary:
-        staged_addon = Path(temporary) / "audio2face"
-        _copy_addon_source(staged_addon)
-        shutil.copytree(
-            runtime,
-            staged_addon / "runtime",
-            symlinks=False,
-            copy_function=os.link,
-        )
+        package_root = Path(temporary) / "audio2face"
+        _copy_addon_source(package_root)
+        try:
+            shutil.copytree(
+                runtime,
+                package_root / "runtime",
+                symlinks=False,
+                copy_function=os.link,
+            )
+        except OSError as exc:
+            raise ExtensionBuildError(
+                f"cannot add the runtime to Blender's package root: {exc}"
+            ) from exc
         extension_id, version = rewrite_manifest_platform(
-            staged_addon / "blender_manifest.toml", platform_id
+            package_root / "blender_manifest.toml", platform_id
         )
-        validate_runtime(staged_addon / "runtime", platform_id)
+        validate_runtime(package_root / "runtime", platform_id)
 
         DIST_DIRECTORY.mkdir(parents=True, exist_ok=True)
         output = DIST_DIRECTORY / f"{extension_id}-{version}-{platform_id}.zip"
@@ -436,7 +441,7 @@ def build_extension(blender: Path, platform_id: str) -> Path:
             )
         if partial.exists() or partial.is_symlink():
             raise ExtensionBuildError(f"stale partial extension output exists: {partial}")
-        _run([executable, "--command", "extension", "validate", staged_addon])
+        _run([executable, "--command", "extension", "validate", package_root])
         try:
             _run(
                 [
@@ -445,7 +450,7 @@ def build_extension(blender: Path, platform_id: str) -> Path:
                     "extension",
                     "build",
                     "--source-dir",
-                    staged_addon,
+                    package_root,
                     "--output-filepath",
                     partial,
                 ]
@@ -454,7 +459,7 @@ def build_extension(blender: Path, platform_id: str) -> Path:
                 raise ExtensionBuildError(
                     f"Blender did not produce extension ZIP: {partial}"
                 )
-            validate_extension_archive(partial, staged_addon, platform_id)
+            validate_extension_archive(partial, package_root, platform_id)
             if output.exists() or output.is_symlink():
                 raise ExtensionBuildError(f"extension output appeared during build: {output}")
             partial.replace(output)

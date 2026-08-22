@@ -1031,12 +1031,6 @@ def test_cmake_cache_paths_are_not_quote_or_whitespace_normalized() -> None:
     assert runtime_tool._absolute_path('"/tmp/release-input"') is None
     assert runtime_tool._absolute_path(" /tmp/release-input") is None
 
-    with pytest.raises(runtime_tool.BuildError, match="unsafe for a CMake list"):
-        runtime_tool._cmake_list(
-            ("/tmp/close]==]bracket",),
-            "test values",
-        )
-
 
 def test_cmake_cache_rejects_duplicate_declarations(tmp_path: Path) -> None:
     cache = tmp_path / "CMakeCache.txt"
@@ -1162,7 +1156,7 @@ def test_cmake_audit_rejects_external_cuda_path(tmp_path: Path) -> None:
         )
 
 
-def _minimal_staged_runtime(root: Path, platform_id: str) -> None:
+def _minimal_runtime_package(root: Path, platform_id: str) -> None:
     contract = runtime_tool.runtime_contract(platform_id)
     native_paths = (
         contract.worker,
@@ -1201,30 +1195,132 @@ def _minimal_staged_runtime(root: Path, platform_id: str) -> None:
     )
 
 
-def test_staged_runtime_rejects_extra_and_renamed_files(tmp_path: Path) -> None:
-    staged = tmp_path / "staged"
-    _minimal_staged_runtime(staged, "linux-x64")
-    extra = staged / "lib" / "unexpected.so"
+def test_runtime_package_rejects_extra_and_renamed_files(tmp_path: Path) -> None:
+    runtime = tmp_path / "runtime"
+    _minimal_runtime_package(runtime, "linux-x64")
+    extra = runtime / "lib" / "unexpected.so"
     extra.write_bytes(b"unexpected")
-    with pytest.raises(runtime_tool.BuildError, match="runtime/lib must contain"):
-        runtime_tool.validate_staged_runtime(staged, "linux-x64")
+    with pytest.raises(runtime_tool.BuildError, match="runtime package/lib must contain"):
+        runtime_tool.validate_runtime_package(runtime, "linux-x64")
 
     extra.unlink()
-    worker = staged / "bin" / "audio2face_worker"
-    worker.rename(staged / "bin" / "worker")
-    with pytest.raises(runtime_tool.BuildError, match="runtime/bin must contain"):
-        runtime_tool.validate_staged_runtime(staged, "linux-x64")
+    worker = runtime / "bin" / "audio2face_worker"
+    worker.rename(runtime / "bin" / "worker")
+    with pytest.raises(runtime_tool.BuildError, match="runtime package/bin must contain"):
+        runtime_tool.validate_runtime_package(runtime, "linux-x64")
 
 
-def test_python_contract_is_the_only_staged_package_filename_authority() -> None:
-    cmake_sources = (
-        REPOSITORY_ROOT.joinpath("worker", "CMakeLists.txt").read_text(
-            encoding="utf-8"
+def test_runtime_package_uses_repository_documents_directly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    source_license = repository / "LICENSE"
+    source_notices = repository / "THIRD_PARTY_NOTICES.md"
+    source_license.write_bytes(b"project license\n")
+    source_notices.write_bytes(b"third-party notices\n")
+    monkeypatch.setattr(runtime_tool, "REPOSITORY_ROOT", repository)
+
+    contract = runtime_tool.runtime_contract("linux-x64")
+    role_entries = {
+        entry.source: entry
+        for entry in contract.licenses
+        if entry.source in {"project_license", "project_notices"}
+    }
+    common = {
+        "sdk_source": tmp_path / "sdk",
+        "cuda_runtime": tmp_path / "cuda",
+        "tensorrt_runtime": tmp_path / "tensorrt",
+        "platform_runtime": tmp_path / "platform",
+        "platform_notices": tmp_path / "platform-notices",
+        "platform_metadata": None,
+        "platform_provenance": tmp_path / "platform-provenance",
+        "trtexec_provenance": tmp_path / "trtexec-provenance",
+    }
+    assert runtime_tool._runtime_source_for_file(
+        role_entries["project_license"],
+        **common,
+    ) == source_license
+    assert runtime_tool._runtime_source_for_file(
+        role_entries["project_notices"],
+        **common,
+    ) == source_notices
+
+
+@pytest.mark.parametrize("platform_id", ("windows-x64", "linux-x64"))
+def test_runtime_package_assembly_adds_declared_files_without_copying(
+    tmp_path: Path,
+    platform_id: str,
+) -> None:
+    contract = runtime_tool.runtime_contract(platform_id)
+    runtime = tmp_path / "runtime" / platform_id
+    generated_paths = {
+        contract.worker,
+        contract.files_for_source("audio2x")[0].path,
+    }
+    for relative in generated_paths:
+        output = runtime.joinpath(*PurePosixPath(relative).parts)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(relative.encode("utf-8"))
+    if platform_id == "linux-x64":
+        (runtime / contract.worker).chmod(0o755)
+
+    external_paths = {
+        "bundle.json",
+        contract.trtexec,
+        *(entry.path for entry in contract.libraries if entry.source != "audio2x"),
+        *(entry.path for entry in contract.licenses),
+    }
+    external_files: list[tuple[Path, str]] = []
+    for index, relative in enumerate(sorted(external_paths)):
+        source = tmp_path / "inputs" / str(index)
+        source.parent.mkdir(parents=True, exist_ok=True)
+        if relative == "bundle.json":
+            source.write_text(json.dumps(contract.manifest()), encoding="utf-8")
+        else:
+            source.write_bytes(relative.encode("utf-8"))
+        if platform_id == "linux-x64" and relative == contract.trtexec:
+            source.chmod(0o755)
+        external_files.append((source, relative))
+
+    with pytest.raises(runtime_tool.BuildError, match="exactly match"):
+        runtime_tool.assemble_runtime_package(runtime, contract, external_files[:-1])
+
+    runtime_tool.assemble_runtime_package(runtime, contract, external_files)
+    runtime_tool.validate_runtime_package(runtime, platform_id)
+
+    for source, relative in external_files:
+        assert os.path.samefile(
+            source,
+            runtime.joinpath(*PurePosixPath(relative).parts),
         )
-        + REPOSITORY_ROOT.joinpath(
-            "worker", "cmake", "StageRuntime.cmake"
-        ).read_text(encoding="utf-8")
+
+
+def test_native_build_has_no_custom_runtime_stage() -> None:
+    cmake_path = REPOSITORY_ROOT / "worker" / "CMakeLists.txt"
+    cmake_source = cmake_path.read_text(encoding="utf-8")
+
+    assert not (REPOSITORY_ROOT / "worker" / "cmake" / "StageRuntime.cmake").exists()
+    assert "A2F_STAGE" not in cmake_source
+    assert "audio2face_runtime_stage" not in cmake_source
+    assert "A2F_RUNTIME_OUTPUT_DIR" in cmake_source
+    assert 'RUNTIME_OUTPUT_DIRECTORY "${A2F_RUNTIME_OUTPUT_DIR}/bin"' in cmake_source
+    assert 'LIBRARY_OUTPUT_DIRECTORY "${A2F_RUNTIME_OUTPUT_DIR}/lib"' in cmake_source
+    assert 'PDB_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/symbols"' in cmake_source
+
+    runtime_builder = (REPOSITORY_ROOT / "tools" / "build_runtime.py").read_text(
+        encoding="utf-8"
     )
+    assert 'f"-DA2F_RUNTIME_OUTPUT_DIR:PATH={runtime}"' in runtime_builder
+    assert '"--target",\n            "audio2face_worker"' in runtime_builder
+    assert "audio2face_runtime_stage" not in runtime_builder
+
+
+def test_python_contract_is_the_only_package_filename_authority() -> None:
+    cmake_sources = REPOSITORY_ROOT.joinpath(
+        "worker", "CMakeLists.txt"
+    ).read_text(encoding="utf-8")
     packaged_files = {
         Path(relative).name
         for contract in runtime_tool.RUNTIME_CONTRACTS.values()
@@ -1249,8 +1345,8 @@ def test_python_contract_is_the_only_staged_package_filename_authority() -> None
 def test_linux_dependency_audit_fails_on_unbundled_native_library(
     tmp_path: Path,
 ) -> None:
-    staged = tmp_path / "staged"
-    _minimal_staged_runtime(staged, "linux-x64")
+    runtime = tmp_path / "runtime"
+    _minimal_runtime_package(runtime, "linux-x64")
     readelf = tmp_path / "readelf"
     readelf.write_text("pinned test readelf\n", encoding="utf-8")
     readelf.chmod(0o755)
@@ -1293,7 +1389,7 @@ def test_linux_dependency_audit_fails_on_unbundled_native_library(
         match="undeclared non-system dependencies",
     ):
         runtime_tool.audit_linux_dependencies(
-            Runner(), staged, lock, {}
+            Runner(), runtime, lock, {}
         )
 
 
@@ -1320,17 +1416,17 @@ def test_native_dependency_parsers_reject_unsafe_abi_inputs() -> None:
         )
 
 
-def test_publish_stage_uses_only_fixed_build_handoff(
+def test_publish_runtime_uses_only_fixed_build_handoff(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repository = tmp_path / "repository"
     repository.mkdir()
-    staged = tmp_path / "staged"
-    _minimal_staged_runtime(staged, "linux-x64")
+    runtime = tmp_path / "runtime"
+    _minimal_runtime_package(runtime, "linux-x64")
     monkeypatch.setattr(runtime_tool, "REPOSITORY_ROOT", repository)
     output = repository / "build" / "runtime" / "linux-x64"
 
-    assert runtime_tool.publish_stage(staged, "linux-x64") == output
+    assert runtime_tool.publish_runtime(runtime, "linux-x64") == output
 
     assert (output / "bundle.json").is_file()
     assert set(path.name for path in output.iterdir()) == {
@@ -1340,15 +1436,44 @@ def test_publish_stage_uses_only_fixed_build_handoff(
         "licenses",
     }
     with pytest.raises(runtime_tool.BuildError, match="already exists"):
-        runtime_tool.publish_stage(staged, "linux-x64")
+        runtime_tool.publish_runtime(runtime, "linux-x64")
+
+
+def test_publish_runtime_does_not_overwrite_a_racing_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    runtime = tmp_path / "runtime"
+    _minimal_runtime_package(runtime, "linux-x64")
+    monkeypatch.setattr(runtime_tool, "REPOSITORY_ROOT", repository)
+    output = repository / "build" / "runtime" / "linux-x64"
+    original_validate = runtime_tool.validate_runtime_package
+
+    def validate_and_create_race(path: Path, platform_id: str) -> None:
+        original_validate(path, platform_id)
+        if path.name == "linux-x64.partial":
+            output.mkdir()
+
+    monkeypatch.setattr(
+        runtime_tool,
+        "validate_runtime_package",
+        validate_and_create_race,
+    )
+    with pytest.raises(runtime_tool.BuildError, match="appeared during build"):
+        runtime_tool.publish_runtime(runtime, "linux-x64")
+
+    assert output.is_dir()
+    assert not output.with_name("linux-x64.partial").exists()
 
 
 def test_extension_runtime_rejects_wrong_architecture_and_mode(
     tmp_path: Path,
 ) -> None:
-    staged = tmp_path / "staged"
-    _minimal_staged_runtime(staged, "linux-x64")
-    library = staged / "lib" / "libaudio2x.so"
+    runtime = tmp_path / "runtime"
+    _minimal_runtime_package(runtime, "linux-x64")
+    library = runtime / "lib" / "libaudio2x.so"
     content = bytearray(library.read_bytes())
     content[18:20] = (183).to_bytes(2, "little")
     library.write_bytes(content)
@@ -1356,9 +1481,9 @@ def test_extension_runtime_rejects_wrong_architecture_and_mode(
         extension_tool.ExtensionBuildError,
         match="not Linux ELF64 x86-64",
     ):
-        extension_tool.validate_runtime(staged, "linux-x64")
+        extension_tool.validate_runtime(runtime, "linux-x64")
 
-    _minimal_staged_runtime(tmp_path / "mode", "linux-x64")
+    _minimal_runtime_package(tmp_path / "mode", "linux-x64")
     mode_runtime = tmp_path / "mode"
     (mode_runtime / "bin" / "audio2face_worker").chmod(0o644)
     with pytest.raises(
@@ -1389,37 +1514,37 @@ def test_manifest_rewrite_pins_exactly_one_platform(tmp_path: Path) -> None:
 
 
 def test_extension_zip_uses_package_files_at_root(tmp_path: Path) -> None:
-    staged = tmp_path / "audio2face"
-    (staged / "runtime").mkdir(parents=True)
-    (staged / "__init__.py").write_text("VALUE = 1\n", encoding="utf-8")
-    (staged / "blender_manifest.toml").write_text(
+    package_root = tmp_path / "audio2face"
+    (package_root / "runtime").mkdir(parents=True)
+    (package_root / "__init__.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (package_root / "blender_manifest.toml").write_text(
         'id = "audio2face"\nplatforms = ["linux-x64"]\n', encoding="utf-8"
     )
-    (staged / "runtime" / "bundle.json").write_text(
+    (package_root / "runtime" / "bundle.json").write_text(
         '{"platform":"linux-x64"}\n', encoding="utf-8"
     )
     archive = tmp_path / "audio2face.zip"
     with zipfile.ZipFile(archive, "w") as output:
-        for source in staged.rglob("*"):
+        for source in package_root.rglob("*"):
             if source.is_file():
-                output.write(source, source.relative_to(staged).as_posix())
+                output.write(source, source.relative_to(package_root).as_posix())
 
-    extension_tool.validate_extension_archive(archive, staged, "linux-x64")
+    extension_tool.validate_extension_archive(archive, package_root, "linux-x64")
 
     nested = tmp_path / "nested.zip"
     with zipfile.ZipFile(nested, "w") as output:
-        for source in staged.rglob("*"):
+        for source in package_root.rglob("*"):
             if source.is_file():
-                relative = source.relative_to(staged).as_posix()
+                relative = source.relative_to(package_root).as_posix()
                 output.write(source, f"audio2face/{relative}")
     with pytest.raises(extension_tool.ExtensionBuildError, match="layout differs"):
-        extension_tool.validate_extension_archive(nested, staged, "linux-x64")
+        extension_tool.validate_extension_archive(nested, package_root, "linux-x64")
 
     extra_directory = tmp_path / "extra-directory.zip"
     with zipfile.ZipFile(extra_directory, "w") as output:
-        for source in staged.rglob("*"):
+        for source in package_root.rglob("*"):
             if source.is_file():
-                output.write(source, source.relative_to(staged).as_posix())
+                output.write(source, source.relative_to(package_root).as_posix())
         output.writestr("undeclared/", b"")
     with pytest.raises(
         extension_tool.ExtensionBuildError,
@@ -1427,16 +1552,16 @@ def test_extension_zip_uses_package_files_at_root(tmp_path: Path) -> None:
     ):
         extension_tool.validate_extension_archive(
             extra_directory,
-            staged,
+            package_root,
             "linux-x64",
         )
 
     special_mode = tmp_path / "special-mode.zip"
     with zipfile.ZipFile(special_mode, "w") as output:
-        for source in staged.rglob("*"):
+        for source in package_root.rglob("*"):
             if not source.is_file():
                 continue
-            relative = source.relative_to(staged).as_posix()
+            relative = source.relative_to(package_root).as_posix()
             if relative != "__init__.py":
                 output.write(source, relative)
                 continue
@@ -1450,7 +1575,7 @@ def test_extension_zip_uses_package_files_at_root(tmp_path: Path) -> None:
     ):
         extension_tool.validate_extension_archive(
             special_mode,
-            staged,
+            package_root,
             "linux-x64",
         )
 
@@ -1472,8 +1597,10 @@ def test_release_workflow_stamps_dated_manifest_and_publishes_by_id() -> None:
     assert "DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}" in workflow
     assert "manual releases must use the repository default branch" in workflow
     assert workflow.count(
-        '"--add", "Microsoft.VisualStudio.Component.VC.CoreBuildTools"'
+        '"--add", "Microsoft.VisualStudio.Workload.VCTools"'
     ) == 1
+    assert "Microsoft.VisualStudio.Component.VC.CoreBuildTools" not in workflow
+    assert "--includeRecommended" not in workflow
     assert (
         '$vcvars = Join-Path $installPath "VC\\Auxiliary\\Build\\vcvars64.bat"'
         in workflow

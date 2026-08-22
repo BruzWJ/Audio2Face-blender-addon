@@ -49,13 +49,21 @@ The release build never discovers or consumes a host CUDA Toolkit, TensorRT
 SDK, Audio2Face installation, worker executable, or GPU development
 environment. It builds the worker, selects the exact `trtexec` shipped in the
 pinned TensorRT ZIP or Linux RPM set, checks source revisions and native paths,
-stages only
-the reviewed runtime dependency closure, and records the required notices.
+packages only the reviewed runtime dependency closure, and records the
+required notices.
 CUDA compiler files, headers, import/static libraries, and driver stubs are
 build inputs and are not shipped. On Linux, the builder moves the
 redistributable archives' single `lib` tree to the canonical `lib64` toolkit
 location required by their pinned `nvcc`; it does not create an alias or search
 a second CUDA library path.
+
+CMake has no install, staging, or packaging target. It builds
+`audio2face_worker` and its `audio2x` dependency directly into the temporary
+runtime package directory. After the native build command returns, host Python
+adds the contract-defined libraries and notices.
+Those package entries are hard links within the repository build filesystem,
+so the multi-gigabyte native payload remains single-copy. There is no
+cross-device operation or link/copy fallback.
 
 Build on the native target host:
 
@@ -74,12 +82,12 @@ handoff path not to exist before the build, and uses one temporary isolated
 working tree. The
 [`tools/build_extension.py`](../tools/build_extension.py) packaging step
 requires the exact handoff, validates Blender 5.2, embeds the runtime, and
-writes `dist/audio2face-0.1.0-<platform>.zip`. It does not invoke a compiler or
+writes `dist/audio2face-<version>-<platform>.zip`. It does not invoke a compiler or
 inspect the build machine's GPU stack.
 
 ## Runtime layout
 
-Windows staging produces exactly:
+The Windows runtime package contains exactly:
 
 ```text
 runtime/windows-x64/
@@ -90,7 +98,7 @@ runtime/windows-x64/
   licenses/...
 ```
 
-Linux staging produces exactly:
+The Linux runtime package contains exactly:
 
 ```text
 runtime/linux-x64/
@@ -105,8 +113,8 @@ Windows DLLs live beside the two executables so the application directory is
 the canonical package-local DLL source. They are not copied into a second
 directory. Linux executables use the one sibling `lib` directory.
 
-The platform extension builder copies the contents of that tree to the
-immutable package location:
+The platform extension builder adds the contents of that tree to the package
+location Blender archives:
 
 ```text
 audio2face/runtime/
@@ -120,8 +128,10 @@ audio2face/runtime/
 extension verifies that its platform matches the host, checks every packaged
 executable and DLL/shared object, confines every declared path to this tree,
 and launches the child with only the platform's package-local native directory
-in its search path. There is no separate runtime setup, runtime mutation,
-executable selector, or online request.
+in its search path. Because Blender's Linux ZIP installer does not preserve
+execute bits, the resolver validates the exact worker and `trtexec` ELF files,
+then idempotently restores their owner execute bit. There is no separate
+runtime setup, executable selector, or online request.
 
 The bundled runtime contains no Audio2Face or Audio2Emotion model files and no
 serialized TensorRT engines. Users obtain both complete model repositories
