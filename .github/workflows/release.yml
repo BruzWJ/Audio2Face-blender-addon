@@ -1063,7 +1063,7 @@ jobs:
             --header "Authorization: Bearer $GH_TOKEN" \
             --header "X-GitHub-Api-Version: 2022-11-28" \
             --header "Content-Type: application/octet-stream" \
-            --data-binary "@$asset" \
+            --upload-file "$asset" \
             "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?name=$ASSET_NAME" \
             > "$uploaded_json"
           UPLOADED_JSON="$uploaded_json" \

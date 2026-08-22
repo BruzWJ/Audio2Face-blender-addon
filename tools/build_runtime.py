@@ -2971,8 +2971,13 @@ def fetch_sdk_dependencies(
         script = sdk_source / "fetch_deps.bat"
         if not script.is_file():
             raise BuildError(f"pinned SDK fetch script is missing: {script}")
-        command_text = f'call "{script}" release'
-        runner.run([comspec, "/d", "/s", "/c", command_text], cwd=sdk_source, env=environment)
+        batch_environment = dict(environment)
+        batch_environment["A2F_FETCH_DEPS"] = f'"{script}"'
+        runner.run(
+            [comspec, "/d", "/s", "/c", "call %A2F_FETCH_DEPS% release"],
+            cwd=sdk_source,
+            env=batch_environment,
+        )
         ninja = sdk_source / "_deps" / "build-deps" / "ninja" / "ninja.exe"
     else:
         script = sdk_source / "fetch_deps.sh"

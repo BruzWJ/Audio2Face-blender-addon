@@ -519,6 +519,63 @@ def test_windows_compiler_requires_exact_pinned_producer(
         )
 
 
+def test_windows_fetch_deps_uses_cmd_safe_batch_path(
+    tmp_path: Path,
+) -> None:
+    sdk_source = tmp_path / "SDK source"
+    sdk_source.mkdir()
+    script = sdk_source / "fetch_deps.bat"
+    script.write_text("@echo off\n", encoding="ascii")
+    comspec = tmp_path / "Windows" / "System32" / "cmd.exe"
+    comspec.parent.mkdir(parents=True)
+    comspec.write_bytes(b"cmd")
+    environment = {
+        "COMSPEC": str(comspec),
+        "PATH": str(comspec.parent),
+    }
+    calls: list[tuple[list[Path | str], Path, dict[str, str]]] = []
+
+    class Runner:
+        def run(
+            self,
+            command: list[Path | str],
+            *,
+            cwd: Path,
+            env: dict[str, str],
+        ) -> str:
+            calls.append((command, cwd, env))
+            ninja = sdk_source / "_deps" / "build-deps" / "ninja" / "ninja.exe"
+            ninja.parent.mkdir(parents=True)
+            ninja.write_bytes(b"ninja")
+            return ""
+
+    ninja = runtime_tool.fetch_sdk_dependencies(
+        Runner(),
+        sdk_source,
+        "windows-x64",
+        environment,
+    )
+
+    assert ninja == sdk_source / "_deps" / "build-deps" / "ninja" / "ninja.exe"
+    assert calls == [
+        (
+            [
+                comspec.resolve(),
+                "/d",
+                "/s",
+                "/c",
+                "call %A2F_FETCH_DEPS% release",
+            ],
+            sdk_source,
+            {
+                **environment,
+                "A2F_FETCH_DEPS": f'"{script}"',
+            },
+        )
+    ]
+    assert "A2F_FETCH_DEPS" not in environment
+
+
 def test_release_environment_removes_ambient_gpu_search_paths(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1977,6 +2034,8 @@ def test_release_workflow_stamps_dated_manifest_and_publishes_by_id() -> None:
     assert workflow.count("ref: ${{ needs.prepare.outputs.source_sha }}") == 2
     assert workflow.count("https://uploads.github.com/repos/") == 2
     assert "gh release upload" not in workflow
+    assert '--upload-file "$asset"' in workflow
+    assert '--data-binary "@$asset"' not in workflow
     assert '--method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID"' in workflow
     assert "--raw-field make_latest=true" in workflow
     assert "published_sha" in workflow
