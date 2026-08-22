@@ -890,6 +890,7 @@ def test_windows_vcvarsall_capture_uses_pinned_versions_and_sanitized_shell(
         "INCLUDE=C:\\Visual Studio\\include;C:\\Windows Kits\\Include\r\n"
         "LIB=C:\\Visual Studio\\lib\r\n"
         "PATH=C:\\Visual Studio\\bin;C:\\Windows\\System32\r\n"
+        "GITHUB_ACTION_REF=\r\n"
         "A2F_TEST_VALUE=left=right\r\n"
     )
     calls: list[tuple[list[str], dict[str, object]]] = []
@@ -909,7 +910,8 @@ def test_windows_vcvarsall_capture_uses_pinned_versions_and_sanitized_shell(
         toolchain,
     )
 
-    assert environment["A2F_TEST_VALUE"] == "left=right"
+    assert "A2F_TEST_VALUE" not in environment
+    assert "GITHUB_ACTION_REF" not in environment
     assert environment["INCLUDE"] == (
         "C:\\Visual Studio\\include;C:\\Windows Kits\\Include"
     )
@@ -932,6 +934,39 @@ def test_windows_vcvarsall_capture_uses_pinned_versions_and_sanitized_shell(
     assert options["check"] is True
     assert options["stdout"] is runtime_tool.subprocess.PIPE
     assert options["stderr"] is runtime_tool.subprocess.PIPE
+
+
+def test_windows_vcvarsall_capture_rejects_empty_selected_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runtime_tool.os, "pathsep", ";")
+    monkeypatch.setattr(
+        runtime_tool,
+        "_discover_windows_vcvarsall",
+        lambda *_args: Path("C:/Visual Studio/vcvarsall.bat"),
+    )
+    output = "GITHUB_ACTION_REF=\r\nINCLUDE=\r\n".encode("utf-16le")
+    monkeypatch.setattr(
+        runtime_tool.subprocess,
+        "run",
+        lambda *_args, **_kwargs: runtime_tool.subprocess.CompletedProcess(
+            [],
+            0,
+            stdout=output,
+        ),
+    )
+    source = {
+        "COMSPEC": "C:/Windows/System32/cmd.exe",
+        "PATH": "C:/Windows/System32",
+        "PATHEXT": ".EXE;.BAT",
+        "SystemRoot": "C:/Windows",
+    }
+
+    with pytest.raises(runtime_tool.BuildError, match="empty environment value"):
+        runtime_tool._capture_windows_vcvarsall_environment(
+            source,
+            runtime_tool.load_lock()["windows_toolchain"],
+        )
 
 
 def test_windows_command_output_rejects_invalid_utf16() -> None:
@@ -1499,9 +1534,24 @@ def test_linux_dependency_audit_fails_on_unbundled_native_library(
                         "Shared library: [libnotpackaged.so.1]"
                     )
                 if path.parent.name == "lib":
+                    soname = (
+                        "do_not_link_against_nvinfer_builder_resource"
+                        if path.name
+                        == "libnvinfer_builder_resource.so.10.13.3"
+                        else path.name
+                    )
                     entries.append(
                         " 0x000000000000000e (SONAME)             "
-                        f"Library soname: [{path.name}]"
+                        f"Library soname: [{soname}]"
+                    )
+                if path.name in {
+                    "libcublas.so.12",
+                    "libcublasLt.so.12",
+                    "libcurand.so.10",
+                }:
+                    entries.append(
+                        " 0x000000000000001d (RUNPATH)            "
+                        "Library runpath: [$ORIGIN]"
                     )
                 return "Dynamic section at offset 0x100:\n" + "\n".join(entries)
             return (
@@ -1519,6 +1569,46 @@ def test_linux_dependency_audit_fails_on_unbundled_native_library(
 
 
 def test_native_dependency_parsers_reject_unsafe_abi_inputs() -> None:
+    linux_libraries = {
+        entry.path: entry
+        for entry in runtime_tool.runtime_contract("linux-x64").libraries
+    }
+    assert {
+        path: entry.elf_runpaths
+        for path, entry in linux_libraries.items()
+        if entry.elf_runpaths
+    } == {
+        "lib/libcublas.so.12": ("$ORIGIN",),
+        "lib/libcublasLt.so.12": ("$ORIGIN",),
+        "lib/libcurand.so.10": ("$ORIGIN",),
+    }
+    assert {
+        path: entry.elf_soname
+        for path, entry in linux_libraries.items()
+        if entry.elf_soname is not None
+    } == {
+        "lib/libnvinfer_builder_resource.so.10.13.3": (
+            "do_not_link_against_nvinfer_builder_resource"
+        ),
+    }
+    builder_entry = linux_libraries[
+        "lib/libnvinfer_builder_resource.so.10.13.3"
+    ]
+    builder_resource = PurePosixPath(builder_entry.path)
+    runtime_tool._audit_elf_dynamic_identity(
+        builder_resource,
+        (builder_entry.elf_soname,),
+        (),
+        builder_entry.elf_runpaths,
+    )
+    for entry in linux_libraries.values():
+        relative = PurePosixPath(entry.path)
+        runtime_tool._audit_elf_dynamic_identity(
+            relative,
+            (entry.elf_soname or relative.name,),
+            (),
+            entry.elf_runpaths,
+        )
     with pytest.raises(runtime_tool.BuildError, match="newer than 2.28"):
         runtime_tool._audit_glibc_requirements(
             {"2.29"},
@@ -1532,12 +1622,47 @@ def test_native_dependency_parsers_reject_unsafe_abi_inputs() -> None:
             ("$ORIGIN/../lib",),
             (),
         )
-    with pytest.raises(runtime_tool.BuildError, match="forbidden DT_RUNPATH"):
+    with pytest.raises(runtime_tool.BuildError, match="DT_SONAME differs"):
+        runtime_tool._audit_elf_dynamic_identity(
+            builder_resource,
+            (builder_resource.name,),
+            (),
+            (),
+        )
+    with pytest.raises(runtime_tool.BuildError, match="DT_RUNPATH differs"):
         runtime_tool._audit_elf_dynamic_identity(
             PurePosixPath("bin/audio2face_worker"),
             (),
             (),
+            ("$ORIGIN",),
+        )
+    with pytest.raises(runtime_tool.BuildError, match="DT_RUNPATH differs"):
+        runtime_tool._audit_elf_dynamic_identity(
+            PurePosixPath("lib/libcublas.so.12"),
+            ("libcublas.so.12",),
+            (),
             ("$ORIGIN/../lib",),
+        )
+    with pytest.raises(runtime_tool.BuildError, match="DT_RUNPATH differs"):
+        runtime_tool._audit_elf_dynamic_identity(
+            PurePosixPath("lib/libcublas.so.12"),
+            ("libcublas.so.12",),
+            (),
+            (),
+        )
+    with pytest.raises(runtime_tool.BuildError, match="DT_RUNPATH differs"):
+        runtime_tool._audit_elf_dynamic_identity(
+            PurePosixPath("lib/libnvrtc.so.12"),
+            ("libnvrtc.so.12",),
+            (),
+            ("$ORIGIN",),
+        )
+    with pytest.raises(runtime_tool.BuildError, match="DT_RUNPATH differs"):
+        runtime_tool._audit_elf_dynamic_identity(
+            PurePosixPath("lib/libnvrtc.so.12"),
+            ("libnvrtc.so.12",),
+            (),
+            ("$ORIGIN:",),
         )
 
 

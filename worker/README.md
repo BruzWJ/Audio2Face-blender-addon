@@ -64,6 +64,9 @@ adds the contract-defined libraries and notices.
 Those package entries are hard links within the repository build filesystem,
 so the multi-gigabyte native payload remains single-copy. There is no
 cross-device operation or link/copy fallback.
+The same Python runtime contract records the selected Linux libraries' exact
+SONAME and RUNPATH identities; the release audit rejects every DT_RPATH and
+any SONAME or RUNPATH that differs from that contract.
 
 Build on the native target host:
 

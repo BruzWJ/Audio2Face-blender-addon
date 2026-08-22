@@ -2581,19 +2581,25 @@ def _capture_windows_vcvarsall_environment(
     output = _decode_windows_command_output(result.stdout, "vcvarsall")
     environment: dict[str, str] = {}
     casefolded_names: set[str] = set()
+    selected_names = {
+        name.casefold(): name for name in WINDOWS_VCVARSALL_ENVIRONMENT_KEYS
+    }
     for line in output.splitlines():
         if not line or line.startswith("="):
             continue
         if "=" not in line:
             raise BuildError(f"vcvarsall returned malformed environment line: {line!r}")
         name, value = line.split("=", 1)
-        if not name or not value:
-            raise BuildError(f"vcvarsall returned an empty environment value: {line!r}")
         casefolded = name.casefold()
+        canonical = selected_names.get(casefolded)
+        if canonical is None:
+            continue
+        if not value:
+            raise BuildError(f"vcvarsall returned an empty environment value: {line!r}")
         if casefolded in casefolded_names:
             raise BuildError(f"vcvarsall returned duplicate environment name {name!r}")
         casefolded_names.add(casefolded)
-        environment[name] = value
+        environment[canonical] = value
     return environment
 
 
@@ -3732,18 +3738,36 @@ def _audit_elf_dynamic_identity(
     rpaths: tuple[str, ...],
     runpaths: tuple[str, ...],
 ) -> None:
-    expected_soname = relative.name if relative.parts[0] == "lib" else None
-    if expected_soname is None:
+    library = next(
+        (
+            entry
+            for entry in runtime_contract("linux-x64").libraries
+            if entry.path == relative.as_posix()
+        ),
+        None,
+    )
+    if library is None:
+        if relative.parts[0] == "lib":
+            raise BuildError(
+                f"packaged library is absent from the locked contract: {relative}"
+            )
         if sonames:
             raise BuildError(f"packaged executable declares DT_SONAME: {relative}")
-    elif sonames != (expected_soname,):
-        raise BuildError(
-            f"packaged library filename and DT_SONAME differ: {relative}: {sonames}"
-        )
+    else:
+        expected_sonames = (library.elf_soname or relative.name,)
+        if sonames != expected_sonames:
+            raise BuildError(
+                "packaged library DT_SONAME differs from the locked contract: "
+                f"{relative}: expected {expected_sonames}, got {sonames}"
+            )
     if rpaths:
         raise BuildError(f"packaged ELF file declares forbidden DT_RPATH: {relative}")
-    if runpaths:
-        raise BuildError(f"packaged ELF file declares forbidden DT_RUNPATH: {relative}")
+    expected_runpaths = library.elf_runpaths if library is not None else ()
+    if runpaths != expected_runpaths:
+        raise BuildError(
+            "packaged ELF file DT_RUNPATH differs from the locked contract: "
+            f"{relative}: expected {expected_runpaths}, got {runpaths}"
+        )
 
 
 def _glibc_version_tuple(value: str) -> tuple[int, int, int]:

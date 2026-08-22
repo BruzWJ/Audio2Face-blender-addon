@@ -40,10 +40,12 @@ PACKAGE_SOURCE_ROLES = frozenset(
 
 @dataclass(frozen=True, slots=True)
 class RuntimePackagedFile:
-    """One exact package path and the one build input role that supplies it."""
+    """One package path, source role, and any exact Linux ELF metadata."""
 
     path: str
     source: str
+    elf_soname: str | None = None
+    elf_runpaths: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if (
@@ -56,6 +58,27 @@ class RuntimePackagedFile:
             raise ValueError(f"runtime package path is not canonical: {self.path!r}")
         if self.source not in PACKAGE_SOURCE_ROLES:
             raise ValueError(f"unknown runtime package source role {self.source!r}")
+        if self.elf_soname is not None and (
+            not isinstance(self.elf_soname, str)
+            or not self.elf_soname
+            or self.elf_soname.strip() != self.elf_soname
+            or "/" in self.elf_soname
+            or "\\" in self.elf_soname
+            or "\0" in self.elf_soname
+        ):
+            raise ValueError(f"ELF SONAME is not canonical: {self.elf_soname!r}")
+        if (
+            not isinstance(self.elf_runpaths, tuple)
+            or any(
+                not isinstance(value, str)
+                or not value
+                or value.strip() != value
+                or "\0" in value
+                for value in self.elf_runpaths
+            )
+            or len(self.elf_runpaths) != len(set(self.elf_runpaths))
+        ):
+            raise ValueError(f"ELF RUNPATH contract is not canonical: {self.elf_runpaths!r}")
 
 
 _COMMON_NOTICE_FILES = (
@@ -106,6 +129,16 @@ class RuntimePlatformContract:
         self._validate_flat_paths(licenses, "licenses", "licenses")
         if set(bin_paths) & set(libraries):
             raise ValueError("runtime executables and libraries must not share a path")
+        if any(
+            entry.elf_soname is not None or entry.elf_runpaths
+            for entry in self.licenses
+        ):
+            raise ValueError("runtime license entries cannot declare ELF metadata")
+        if self.platform != "linux-x64" and any(
+            entry.elf_soname is not None or entry.elf_runpaths
+            for entry in self.libraries
+        ):
+            raise ValueError("only Linux runtime libraries can declare ELF metadata")
         if len(self.files_for_source("audio2x")) != 1:
             raise ValueError("runtime contract must contain exactly one audio2x library")
 
@@ -229,9 +262,21 @@ RUNTIME_CONTRACTS: Mapping[str, RuntimePlatformContract] = MappingProxyType(
             libraries=(
                 RuntimePackagedFile("lib/libaudio2x.so", "audio2x"),
                 RuntimePackagedFile("lib/libcudart.so.12", "cuda_runtime"),
-                RuntimePackagedFile("lib/libcublas.so.12", "cuda_runtime"),
-                RuntimePackagedFile("lib/libcublasLt.so.12", "cuda_runtime"),
-                RuntimePackagedFile("lib/libcurand.so.10", "cuda_runtime"),
+                RuntimePackagedFile(
+                    "lib/libcublas.so.12",
+                    "cuda_runtime",
+                    elf_runpaths=("$ORIGIN",),
+                ),
+                RuntimePackagedFile(
+                    "lib/libcublasLt.so.12",
+                    "cuda_runtime",
+                    elf_runpaths=("$ORIGIN",),
+                ),
+                RuntimePackagedFile(
+                    "lib/libcurand.so.10",
+                    "cuda_runtime",
+                    elf_runpaths=("$ORIGIN",),
+                ),
                 RuntimePackagedFile("lib/libnvrtc.so.12", "cuda_runtime"),
                 RuntimePackagedFile(
                     "lib/libnvrtc-builtins.so.12.9", "cuda_runtime"
@@ -248,6 +293,7 @@ RUNTIME_CONTRACTS: Mapping[str, RuntimePlatformContract] = MappingProxyType(
                 RuntimePackagedFile(
                     "lib/libnvinfer_builder_resource.so.10.13.3",
                     "tensorrt_runtime",
+                    elf_soname="do_not_link_against_nvinfer_builder_resource",
                 ),
                 RuntimePackagedFile("lib/libstdc++.so.6", "platform_runtime"),
                 RuntimePackagedFile("lib/libgcc_s.so.1", "platform_runtime"),
