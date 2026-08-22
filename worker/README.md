@@ -23,14 +23,16 @@ the platform's TensorRT 10.13 binary inputs, CMake distribution, Windows
 CRT package, Rocky Linux producer image and toolchain RPMs, and Rocky BaseOS
 GNU runtime RPMs. Artifact size and SHA-256 values are part of that lock.
 
-[`tools/build_runtime.py`](../tools/build_runtime.py) is the only supported
-native runtime build entry point. Run it natively on the target operating
-system: Windows builds `windows-x64`, and Linux builds `linux-x64`. A Windows
+[`tools/build_runtime.py`](../tools/build_runtime.py) is the supported native
+runtime entry point. Its required `--platform` argument routes to the dedicated
+[`build_windows_runtime.py`](../tools/build_windows_runtime.py) or
+[`build_linux_runtime.py`](../tools/build_linux_runtime.py) implementation. Each
+implementation runs only on its matching native operating system. A Windows
 release host provides the pinned Visual C++ toolset, Windows SDK, Git, and
 Python. A Linux release host provides Docker, Git, and Python; the compiler and
 system headers are installed from locked RPMs in the locked Rocky producer
-image. The script acquires every CUDA, TensorRT, CMake, SDK, Windows CRT, and
-Linux GNU runtime input from the lock into an isolated work directory.
+image. The selected builder acquires its CUDA, TensorRT, CMake, SDK, and
+platform runtime inputs from the lock into an isolated work directory.
 
 On Windows, run the command from ordinary PowerShell. The builder locates
 Visual Studio 2022 or Build Tools with Visual Studio Installer's `vswhere.exe`,

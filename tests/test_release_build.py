@@ -8,26 +8,30 @@ import io
 import json
 import os
 import stat
+import sys
 import zipfile
 from pathlib import Path, PurePosixPath
 from types import ModuleType
 
 import pytest
 
-
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _load_tool(name: str) -> ModuleType:
     path = REPOSITORY_ROOT / "tools" / f"{name}.py"
-    spec = importlib.util.spec_from_file_location(f"test_{name}", path)
+    spec = importlib.util.spec_from_file_location(name, path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
 
 
-runtime_tool = _load_tool("build_runtime")
+runtime_tool = _load_tool("runtime_build_common")
+runtime_dispatcher = _load_tool("build_runtime")
+windows_tool = _load_tool("build_windows_runtime")
+linux_tool = _load_tool("build_linux_runtime")
 extension_tool = _load_tool("build_extension")
 
 
@@ -195,14 +199,14 @@ def test_linux_runtime_materialization_uses_contract_notice_roles(
         "download_artifact",
         lambda *_args, **_kwargs: next(downloads),
     )
-    monkeypatch.setattr(runtime_tool, "_rpm_payload", lambda *_args: payload)
+    monkeypatch.setattr(linux_tool, "_rpm_payload", lambda *_args: payload)
     monkeypatch.setattr(
-        runtime_tool,
+        linux_tool,
         "_cpio_locked_members",
         lambda _payload, wanted, _label: {name: payload for name in wanted},
     )
 
-    runtime, notices = runtime_tool.materialize_linux_runtime(lock, tmp_path / "work")
+    runtime, notices = linux_tool.materialize_linux_runtime(lock, tmp_path / "work")
 
     assert {entry.name for entry in runtime.iterdir()} == {
         "libstdc++.so.6",
@@ -250,9 +254,9 @@ def test_linux_tensorrt_materialization_is_sequential_and_exact(
             output.chmod(int(entry["mode"]))
 
     monkeypatch.setattr(runtime_tool, "download_artifact", download)
-    monkeypatch.setattr(runtime_tool, "_extract_linux_tensorrt_rpm", extract)
+    monkeypatch.setattr(linux_tool, "_extract_linux_tensorrt_rpm", extract)
 
-    root = runtime_tool.materialize_linux_tensorrt(lock, tmp_path / "work")
+    root = linux_tool.materialize_linux_tensorrt(lock, tmp_path / "work")
 
     assert len(downloaded) == len(runtime_tool.LINUX_TENSORRT_PACKAGE_ROLES)
     assert all(not archive.exists() for archive in downloaded)
@@ -304,12 +308,12 @@ def test_linux_tensorrt_cpio_selection_streams_exact_regular_member(
     def payload(*_args: object) -> object:
         yield io.BytesIO(payload_bytes)
 
-    monkeypatch.setattr(runtime_tool, "_rpm_xz_payload", payload)
+    monkeypatch.setattr(linux_tool, "_rpm_xz_payload", payload)
     archive = tmp_path / "test.rpm"
     archive.write_bytes(b"not-read-by-the-mocked-payload")
     destination = tmp_path / "output"
     destination.mkdir()
-    runtime_tool._extract_linux_tensorrt_rpm(
+    linux_tool._extract_linux_tensorrt_rpm(
         archive,
         "https://example.invalid/test.rpm",
         "test.src.rpm",
@@ -388,6 +392,38 @@ def test_host_platform_matching_is_exact(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 @pytest.mark.parametrize(
+    ("platform_id", "platform_tool", "function_name"),
+    (
+        ("windows-x64", windows_tool, "build_windows_runtime"),
+        ("linux-x64", linux_tool, "build_linux_runtime"),
+    ),
+)
+def test_runtime_dispatcher_builds_with_selected_platform_module(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    platform_id: str,
+    platform_tool: ModuleType,
+    function_name: str,
+) -> None:
+    output = tmp_path / platform_id
+    calls: list[Path] = []
+
+    def builder(work_root: Path) -> Path:
+        calls.append(work_root)
+        return output
+
+    monkeypatch.setattr(platform_tool, function_name, builder)
+
+    assert runtime_dispatcher.build_runtime(platform_id, tmp_path) == output
+    assert calls == [tmp_path]
+
+
+def test_runtime_dispatcher_rejects_unsupported_platform() -> None:
+    with pytest.raises(runtime_tool.BuildError, match="unsupported runtime platform"):
+        runtime_dispatcher.build_runtime("macos-arm64", Path())
+
+
+@pytest.mark.parametrize(
     ("platform_id", "filename"),
     (("windows-x64", "trtexec.exe"), ("linux-x64", "trtexec")),
 )
@@ -416,12 +452,10 @@ def test_trtexec_provenance_identifies_pinned_linux_rpm_member(tmp_path: Path) -
     trtexec.chmod(0o755)
     work = tmp_path / "work"
 
-    provenance, msvc_provenance = runtime_tool.write_provenance(
+    provenance = linux_tool.write_provenance(
         runtime_tool.load_lock(),
-        "linux-x64",
         trtexec,
         work,
-        None,
     )
 
     record = json.loads(provenance.read_text(encoding="utf-8"))
@@ -433,7 +467,6 @@ def test_trtexec_provenance_identifies_pinned_linux_rpm_member(tmp_path: Path) -
         "sha256": hashlib.sha256(b"prebuilt-trtexec").hexdigest(),
     }
     assert "tensorrt_source" not in record
-    assert msvc_provenance is None
 
 
 def test_extension_release_requires_native_platform(
@@ -507,15 +540,15 @@ def test_windows_compiler_requires_exact_pinned_producer(
     )
 
     lock = runtime_tool.load_lock()
-    assert runtime_tool.validate_native_compiler(
-        Runner(), "windows-x64", lock, environment
+    assert windows_tool.validate_native_compiler(
+        Runner(), lock, environment
     ) == compiler
     assert calls == [([compiler, "/?"], environment, True)]
 
     environment["WindowsSDKVersion"] = "10.0.22621.0\\\\"
     with pytest.raises(runtime_tool.BuildError, match="WindowsSDKVersion"):
-        runtime_tool.validate_native_compiler(
-            Runner(), "windows-x64", lock, environment
+        windows_tool.validate_native_compiler(
+            Runner(), lock, environment
         )
 
 
@@ -549,10 +582,9 @@ def test_windows_fetch_deps_uses_cmd_safe_batch_path(
             ninja.write_bytes(b"ninja")
             return ""
 
-    ninja = runtime_tool.fetch_sdk_dependencies(
+    ninja = windows_tool.fetch_sdk_dependencies(
         Runner(),
         sdk_source,
-        "windows-x64",
         environment,
     )
 
@@ -592,10 +624,7 @@ def test_release_environment_removes_ambient_gpu_search_paths(
     monkeypatch.setenv("CUDA_PATH_V12_9", "/ambient/cuda")
     monkeypatch.setenv("TENSORRT_ROOT_DIR", "/ambient/tensorrt")
 
-    environment = runtime_tool.release_environment(
-        tmp_path,
-        runtime_tool.load_lock(),
-    )
+    environment = linux_tool.release_environment(tmp_path)
 
     assert set(environment) == {
         "GIT_CONFIG_GLOBAL",
@@ -625,9 +654,8 @@ def test_linux_private_build_environment_uses_cuda_lib64(tmp_path: Path) -> None
     ninja = tmp_path / "inputs" / "ninja" / "ninja"
     compiler = Path("/opt/rh/gcc-toolset-11/root/usr/bin/g++")
 
-    environment = runtime_tool.private_build_environment(
+    environment = linux_tool.private_build_environment(
         {"PATH": "/usr/bin:/bin"},
-        "linux-x64",
         cuda_root,
         tensorrt_root,
         cmake_root,
@@ -676,9 +704,8 @@ def test_windows_private_build_environment_excludes_ambient_path(
     cmake_root = tmp_path / "inputs" / "cmake"
     ninja = tmp_path / "inputs" / "ninja" / "ninja.exe"
 
-    environment = runtime_tool.private_build_environment(
+    environment = windows_tool.private_build_environment(
         base,
-        "windows-x64",
         cuda_root,
         tensorrt_root,
         cmake_root,
@@ -700,9 +727,8 @@ def test_windows_private_build_environment_excludes_ambient_path(
 
     base["LIB"] = str(tmp_path / "ambient-cuda" / "lib")
     with pytest.raises(runtime_tool.BuildError, match="external LIB path"):
-        runtime_tool.private_build_environment(
+        windows_tool.private_build_environment(
             base,
-            "windows-x64",
             cuda_root,
             tensorrt_root,
             cmake_root,
@@ -716,11 +742,12 @@ def test_windows_release_environment_is_an_exact_vcvarsall_allowlist(
 ) -> None:
     source = {
         name: f"declared-{name}"
-        for name in runtime_tool.WINDOWS_VCVARSALL_ENVIRONMENT_KEYS
+        for name in windows_tool.WINDOWS_VCVARSALL_ENVIRONMENT_KEYS
     }
     source.update(
         {
             "COMSPEC": "C:/Windows/System32/cmd.exe",
+            "PROCESSOR_ARCHITECTURE": "AMD64",
             "SystemRoot": "C:/Windows",
             "UniversalCRTSdkDir": "C:/Program Files (x86)/Windows Kits/10",
             "VCINSTALLDIR": "C:/Visual Studio/VC",
@@ -744,7 +771,7 @@ def test_windows_release_environment_is_an_exact_vcvarsall_allowlist(
         }
     )
 
-    environment = runtime_tool._windows_release_environment(source, tmp_path)
+    environment = windows_tool._windows_release_environment(source, tmp_path)
 
     owned = {
         "GIT_CONFIG_GLOBAL",
@@ -757,14 +784,17 @@ def test_windows_release_environment_is_an_exact_vcvarsall_allowlist(
         "USERPROFILE",
     }
     assert set(environment) == set(
-        runtime_tool.WINDOWS_VCVARSALL_ENVIRONMENT_KEYS
+        windows_tool.WINDOWS_VCVARSALL_ENVIRONMENT_KEYS
     ) | owned
-    for name in runtime_tool.WINDOWS_VCVARSALL_ENVIRONMENT_KEYS:
+    for name in windows_tool.WINDOWS_VCVARSALL_ENVIRONMENT_KEYS:
         assert environment[name] == source[name]
     assert environment["HOME"] == str(tmp_path / "producer-home")
     assert environment["USERPROFILE"] == environment["HOME"]
     assert environment["TEMP"] == str(tmp_path / "producer-tmp")
     assert environment["TMP"] == environment["TEMP"]
+    source["PROCESSOR_ARCHITECTURE"] = "ARM64"
+    with pytest.raises(runtime_tool.BuildError, match="PROCESSOR_ARCHITECTURE=AMD64"):
+        windows_tool._windows_release_environment(source, tmp_path)
 
 
 def test_windows_vcvarsall_discovery_enumerates_all_instances_for_exact_pin(
@@ -813,39 +843,39 @@ def test_windows_vcvarsall_discovery_enumerates_all_instances_for_exact_pin(
             {
                 "installationPath": str(newer_without_pin),
                 "installationVersion": "17.14.10000.1",
-                "state": runtime_tool.WINDOWS_VS_STATE_COMPLETE,
+                "state": windows_tool.WINDOWS_VS_STATE_COMPLETE,
             },
             {
                 "installationPath": str(errored_with_pin),
                 "installationVersion": "17.13.40000.1",
                 "state": (
-                    runtime_tool.WINDOWS_VS_STATE_LOCAL
-                    | runtime_tool.WINDOWS_VS_STATE_REGISTERED
+                    windows_tool.WINDOWS_VS_STATE_LOCAL
+                    | windows_tool.WINDOWS_VS_STATE_REGISTERED
                 ),
             },
             {
                 "installationPath": str(reboot_pending_with_pin),
                 "installationVersion": "17.13.35931.197",
-                "state": runtime_tool.WINDOWS_VS_REQUIRED_STATE,
+                "state": windows_tool.WINDOWS_VS_REQUIRED_STATE,
             },
             {
                 "installationPath": str(older_with_pin),
                 "installationVersion": "17.11.35327.3",
-                "state": runtime_tool.WINDOWS_VS_STATE_COMPLETE,
+                "state": windows_tool.WINDOWS_VS_STATE_COMPLETE,
             },
         ]
-        return runtime_tool.subprocess.CompletedProcess(
+        return windows_tool.subprocess.CompletedProcess(
             command,
             0,
             stdout=json.dumps(installations).encode("utf-8"),
         )
 
-    monkeypatch.setattr(runtime_tool.subprocess, "run", run)
+    monkeypatch.setattr(windows_tool.subprocess, "run", run)
     source = {
         "ProgramFiles(x86)": str(program_files),
     }
 
-    vcvarsall = runtime_tool._discover_windows_vcvarsall(source, toolchain)
+    vcvarsall = windows_tool._discover_windows_vcvarsall(source, toolchain)
 
     assert vcvarsall == reboot_pending_with_pin / vcvarsall_relative
     assert len(calls) == 1
@@ -863,8 +893,8 @@ def test_windows_vcvarsall_discovery_enumerates_all_instances_for_exact_pin(
         "-utf8",
     ]
     assert options["check"] is True
-    assert options["stdout"] is runtime_tool.subprocess.PIPE
-    assert options["stderr"] is runtime_tool.subprocess.PIPE
+    assert options["stdout"] is windows_tool.subprocess.PIPE
+    assert options["stderr"] is windows_tool.subprocess.PIPE
 
 
 def test_windows_vcvarsall_discovery_rejects_missing_pinned_toolset(
@@ -888,14 +918,14 @@ def test_windows_vcvarsall_discovery_rejects_missing_pinned_toolset(
         [
             {
                 "installationPath": str(installation),
-                "state": runtime_tool.WINDOWS_VS_STATE_COMPLETE,
+                "state": windows_tool.WINDOWS_VS_STATE_COMPLETE,
             }
         ]
     ).encode()
     monkeypatch.setattr(
-        runtime_tool.subprocess,
+        windows_tool.subprocess,
         "run",
-        lambda *_args, **_kwargs: runtime_tool.subprocess.CompletedProcess(
+        lambda *_args, **_kwargs: windows_tool.subprocess.CompletedProcess(
             [],
             0,
             stdout=output,
@@ -906,7 +936,7 @@ def test_windows_vcvarsall_discovery_rejects_missing_pinned_toolset(
         runtime_tool.BuildError,
         match="both vcvarsall[.]bat and the locked MSVC toolset",
     ):
-        runtime_tool._discover_windows_vcvarsall(
+        windows_tool._discover_windows_vcvarsall(
             {"ProgramFiles(x86)": str(program_files)},
             runtime_tool.load_lock()["windows_toolchain"],
         )
@@ -915,7 +945,7 @@ def test_windows_vcvarsall_discovery_rejects_missing_pinned_toolset(
 def test_windows_vcvarsall_capture_uses_pinned_versions_and_sanitized_shell(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(runtime_tool.os, "pathsep", ";")
+    monkeypatch.setattr(windows_tool.os, "pathsep", ";")
     toolchain = runtime_tool.load_lock()["windows_toolchain"]
     vcvarsall = Path(
         "C:/Program Files/Microsoft Visual Studio/2022/Community/"
@@ -930,12 +960,13 @@ def test_windows_vcvarsall_capture_uses_pinned_versions_and_sanitized_shell(
         "NETFXSDKDir": "C:/ambient/netfxsdk",
         "PATH": "C:/Windows/System32;;C:/host/git/bin;",
         "PATHEXT": ".COM;.EXE;.BAT;.CMD",
+        "PROCESSOR_ARCHITECTURE": "AMD64",
         "ProgramFiles(x86)": "C:/Program Files (x86)",
         "SystemRoot": "C:/Windows",
         "VCToolsInstallDir": "C:/ambient/vctools",
     }
     monkeypatch.setattr(
-        runtime_tool,
+        windows_tool,
         "_discover_windows_vcvarsall",
         lambda discovered_source, discovered_toolchain: (
             vcvarsall
@@ -951,6 +982,7 @@ def test_windows_vcvarsall_capture_uses_pinned_versions_and_sanitized_shell(
         "Kits\\NETFXSDK\\4.8\\Lib\\um\\x64\r\n"
         "NETFXSDKDir=C:\\Program Files (x86)\\Windows Kits\\NETFXSDK\\4.8\\\r\n"
         "PATH=C:\\Visual Studio\\bin;C:\\Windows\\System32\r\n"
+        "PROCESSOR_ARCHITECTURE=AMD64\r\n"
         "GITHUB_ACTION_REF=\r\n"
         "A2F_TEST_VALUE=left=right\r\n"
     )
@@ -958,15 +990,15 @@ def test_windows_vcvarsall_capture_uses_pinned_versions_and_sanitized_shell(
 
     def run(command: list[str], **kwargs: object) -> object:
         calls.append((command, kwargs))
-        return runtime_tool.subprocess.CompletedProcess(
+        return windows_tool.subprocess.CompletedProcess(
             command,
             0,
             stdout=captured_text.encode("utf-16le"),
         )
 
-    monkeypatch.setattr(runtime_tool.subprocess, "run", run)
+    monkeypatch.setattr(windows_tool.subprocess, "run", run)
 
-    environment = runtime_tool._capture_windows_vcvarsall_environment(
+    environment = windows_tool._capture_windows_vcvarsall_environment(
         source,
         toolchain,
     )
@@ -991,28 +1023,29 @@ def test_windows_vcvarsall_capture_uses_pinned_versions_and_sanitized_shell(
         "CUDA_PATH": source["CUDA_PATH"],
         "PATH": "C:/Windows/System32;C:/host/git/bin",
         "PATHEXT": source["PATHEXT"],
+        "PROCESSOR_ARCHITECTURE": source["PROCESSOR_ARCHITECTURE"],
         "ProgramFiles(x86)": source["ProgramFiles(x86)"],
         "SystemRoot": source["SystemRoot"],
     }
     assert options["check"] is True
-    assert options["stdout"] is runtime_tool.subprocess.PIPE
-    assert options["stderr"] is runtime_tool.subprocess.PIPE
+    assert options["stdout"] is windows_tool.subprocess.PIPE
+    assert options["stderr"] is windows_tool.subprocess.PIPE
 
 
 def test_windows_vcvarsall_capture_rejects_empty_selected_value(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(runtime_tool.os, "pathsep", ";")
+    monkeypatch.setattr(windows_tool.os, "pathsep", ";")
     monkeypatch.setattr(
-        runtime_tool,
+        windows_tool,
         "_discover_windows_vcvarsall",
         lambda *_args: Path("C:/Visual Studio/vcvarsall.bat"),
     )
     output = "GITHUB_ACTION_REF=\r\nINCLUDE=\r\n".encode("utf-16le")
     monkeypatch.setattr(
-        runtime_tool.subprocess,
+        windows_tool.subprocess,
         "run",
-        lambda *_args, **_kwargs: runtime_tool.subprocess.CompletedProcess(
+        lambda *_args, **_kwargs: windows_tool.subprocess.CompletedProcess(
             [],
             0,
             stdout=output,
@@ -1026,7 +1059,7 @@ def test_windows_vcvarsall_capture_rejects_empty_selected_value(
     }
 
     with pytest.raises(runtime_tool.BuildError, match="empty environment value"):
-        runtime_tool._capture_windows_vcvarsall_environment(
+        windows_tool._capture_windows_vcvarsall_environment(
             source,
             runtime_tool.load_lock()["windows_toolchain"],
         )
@@ -1034,25 +1067,25 @@ def test_windows_vcvarsall_capture_rejects_empty_selected_value(
 
 def test_windows_command_output_rejects_invalid_utf16() -> None:
     with pytest.raises(runtime_tool.BuildError, match="truncated UTF-16"):
-        runtime_tool._decode_windows_command_output(b"x", "vcvarsall")
+        windows_tool._decode_windows_command_output(b"x", "vcvarsall")
     with pytest.raises(runtime_tool.BuildError, match="invalid UTF-16"):
-        runtime_tool._decode_windows_command_output(b"\x00\xd8", "vcvarsall")
+        windows_tool._decode_windows_command_output(b"\x00\xd8", "vcvarsall")
 
 
 def test_windows_vcvarsall_capture_rejects_duplicate_environment_names(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(runtime_tool.os, "pathsep", ";")
+    monkeypatch.setattr(windows_tool.os, "pathsep", ";")
     monkeypatch.setattr(
-        runtime_tool,
+        windows_tool,
         "_discover_windows_vcvarsall",
         lambda *_args: Path("C:/Visual Studio/vcvarsall.bat"),
     )
     output = "PATH=C:\\Windows\r\nPath=C:\\Visual Studio\r\n".encode("utf-16le")
     monkeypatch.setattr(
-        runtime_tool.subprocess,
+        windows_tool.subprocess,
         "run",
-        lambda *_args, **_kwargs: runtime_tool.subprocess.CompletedProcess(
+        lambda *_args, **_kwargs: windows_tool.subprocess.CompletedProcess(
             [],
             0,
             stdout=output,
@@ -1066,7 +1099,7 @@ def test_windows_vcvarsall_capture_rejects_duplicate_environment_names(
     }
 
     with pytest.raises(runtime_tool.BuildError, match="duplicate environment name"):
-        runtime_tool._capture_windows_vcvarsall_environment(
+        windows_tool._capture_windows_vcvarsall_environment(
             source,
             runtime_tool.load_lock()["windows_toolchain"],
         )
@@ -1077,11 +1110,12 @@ def test_windows_release_environment_rejects_case_colliding_keys(
 ) -> None:
     source = {
         name: f"declared-{name}"
-        for name in runtime_tool.WINDOWS_VCVARSALL_ENVIRONMENT_KEYS
+        for name in windows_tool.WINDOWS_VCVARSALL_ENVIRONMENT_KEYS
     }
     source.update(
         {
             "COMSPEC": "C:/Windows/System32/cmd.exe",
+            "PROCESSOR_ARCHITECTURE": "AMD64",
             "SystemRoot": "C:/Windows",
             "UniversalCRTSdkDir": "C:/Program Files (x86)/Windows Kits/10",
             "VCINSTALLDIR": "C:/Visual Studio/VC",
@@ -1093,8 +1127,11 @@ def test_windows_release_environment_rejects_case_colliding_keys(
     )
     source["Path"] = "C:/case-collision"
 
-    with pytest.raises(runtime_tool.BuildError, match="duplicate case variants of PATH"):
-        runtime_tool._windows_release_environment(source, tmp_path)
+    with pytest.raises(
+        runtime_tool.BuildError,
+        match="duplicate case variants of PATH",
+    ):
+        windows_tool._windows_release_environment(source, tmp_path)
 
 
 def test_host_program_resolution_uses_declared_path_order(
@@ -1201,7 +1238,7 @@ def test_linux_cuda_toolkit_uses_nvcc_library_layout(tmp_path: Path) -> None:
     except OSError:
         pytest.skip("file symlinks are unavailable")
 
-    runtime_tool.finalize_linux_cuda_toolkit(toolkit)
+    linux_tool.finalize_linux_cuda_toolkit(toolkit)
 
     compiler_libraries = toolkit / runtime_tool.LINUX_CUDA_LIBRARY_DIRECTORY
     assert not archive_libraries.exists()
@@ -1216,14 +1253,6 @@ def test_linux_cuda_toolkit_uses_nvcc_library_layout(tmp_path: Path) -> None:
     soname = compiler_libraries / "libcudart.so.12"
     assert soname.is_symlink()
     assert soname.resolve(strict=True) == compiler_libraries / versioned_runtime.name
-    assert runtime_tool.cuda_library_directory(toolkit, "linux-x64") == (
-        compiler_libraries
-    )
-    assert runtime_tool.cuda_library_directory(toolkit, "windows-x64") == (
-        toolkit / "bin"
-    )
-    with pytest.raises(runtime_tool.BuildError, match="unsupported CUDA library"):
-        runtime_tool.cuda_library_directory(toolkit, "macos-arm64")
 
 
 def test_cuda_runtime_package_source_resolves_soname_inside_locked_toolkit(
@@ -1348,7 +1377,7 @@ def test_linux_cuda_toolkit_requires_static_compiler_libraries(
         runtime_tool.BuildError,
         match="missing compiler library libcudadevrt[.]a",
     ):
-        runtime_tool.finalize_linux_cuda_toolkit(toolkit)
+        linux_tool.finalize_linux_cuda_toolkit(toolkit)
 
     assert (toolkit / "lib").is_dir()
     assert not (toolkit / runtime_tool.LINUX_CUDA_LIBRARY_DIRECTORY).exists()
@@ -1365,10 +1394,10 @@ def test_linux_producer_image_identity_is_cryptographically_exact() -> None:
             json.dumps([producer["reference"]]),
         )
     )
-    runtime_tool._parse_linux_image_identity(identity, lock)
+    linux_tool._parse_linux_image_identity(identity, lock)
 
     with pytest.raises(runtime_tool.BuildError, match="config digest drifted"):
-        runtime_tool._parse_linux_image_identity(
+        linux_tool._parse_linux_image_identity(
             identity.replace(producer["config_sha256"], "0" * 64),
             lock,
         )
@@ -1435,13 +1464,19 @@ def test_runtime_package_rejects_extra_and_renamed_files(tmp_path: Path) -> None
     _minimal_runtime_package(runtime, "linux-x64")
     extra = runtime / "lib" / "unexpected.so"
     extra.write_bytes(b"unexpected")
-    with pytest.raises(runtime_tool.BuildError, match="runtime package/lib must contain"):
+    with pytest.raises(
+        runtime_tool.BuildError,
+        match="runtime package/lib must contain",
+    ):
         runtime_tool.validate_runtime_package(runtime, "linux-x64")
 
     extra.unlink()
     worker = runtime / "bin" / "audio2face_worker"
     worker.rename(runtime / "bin" / "worker")
-    with pytest.raises(runtime_tool.BuildError, match="runtime package/bin must contain"):
+    with pytest.raises(
+        runtime_tool.BuildError,
+        match="runtime package/bin must contain",
+    ):
         runtime_tool.validate_runtime_package(runtime, "linux-x64")
 
 
@@ -1544,12 +1579,12 @@ def test_native_build_has_no_custom_runtime_stage() -> None:
     assert 'LIBRARY_OUTPUT_DIRECTORY "${A2F_RUNTIME_OUTPUT_DIR}/lib"' in cmake_source
     assert 'PDB_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/symbols"' in cmake_source
 
-    runtime_builder = (REPOSITORY_ROOT / "tools" / "build_runtime.py").read_text(
-        encoding="utf-8"
-    )
-    assert 'f"-DA2F_RUNTIME_OUTPUT_DIR:PATH={runtime}"' in runtime_builder
-    assert '"--target",\n            "audio2face_worker"' in runtime_builder
-    assert "audio2face_runtime_stage" not in runtime_builder
+    runtime_common = (
+        REPOSITORY_ROOT / "tools" / "runtime_build_common.py"
+    ).read_text(encoding="utf-8")
+    assert 'f"-DA2F_RUNTIME_OUTPUT_DIR:PATH={runtime}"' in runtime_common
+    assert '"--target",\n            "audio2face_worker"' in runtime_common
+    assert "audio2face_runtime_stage" not in runtime_common
 
 
 def test_python_contract_is_the_only_package_filename_authority() -> None:
@@ -1638,7 +1673,7 @@ def test_linux_dependency_audit_fails_on_unbundled_native_library(
         runtime_tool.BuildError,
         match="undeclared non-system dependencies",
     ):
-        runtime_tool.audit_linux_dependencies(
+        linux_tool.audit_linux_dependencies(
             Runner(), runtime, lock, {}
         )
 
@@ -1670,7 +1705,7 @@ def test_native_dependency_parsers_reject_unsafe_abi_inputs() -> None:
         "lib/libnvinfer_builder_resource.so.10.13.3"
     ]
     builder_resource = PurePosixPath(builder_entry.path)
-    runtime_tool._audit_elf_dynamic_identity(
+    linux_tool._audit_elf_dynamic_identity(
         builder_resource,
         (builder_entry.elf_soname,),
         (),
@@ -1678,62 +1713,62 @@ def test_native_dependency_parsers_reject_unsafe_abi_inputs() -> None:
     )
     for entry in linux_libraries.values():
         relative = PurePosixPath(entry.path)
-        runtime_tool._audit_elf_dynamic_identity(
+        linux_tool._audit_elf_dynamic_identity(
             relative,
             (entry.elf_soname or relative.name,),
             (),
             entry.elf_runpaths,
         )
     with pytest.raises(runtime_tool.BuildError, match="newer than 2.28"):
-        runtime_tool._audit_glibc_requirements(
+        linux_tool._audit_glibc_requirements(
             {"2.29"},
             Path("libaudio2x.so"),
             "2.28",
         )
     with pytest.raises(runtime_tool.BuildError, match="forbidden DT_RPATH"):
-        runtime_tool._audit_elf_dynamic_identity(
+        linux_tool._audit_elf_dynamic_identity(
             PurePosixPath("bin/audio2face_worker"),
             (),
             ("$ORIGIN/../lib",),
             (),
         )
     with pytest.raises(runtime_tool.BuildError, match="DT_SONAME differs"):
-        runtime_tool._audit_elf_dynamic_identity(
+        linux_tool._audit_elf_dynamic_identity(
             builder_resource,
             (builder_resource.name,),
             (),
             (),
         )
     with pytest.raises(runtime_tool.BuildError, match="DT_RUNPATH differs"):
-        runtime_tool._audit_elf_dynamic_identity(
+        linux_tool._audit_elf_dynamic_identity(
             PurePosixPath("bin/audio2face_worker"),
             (),
             (),
             ("$ORIGIN",),
         )
     with pytest.raises(runtime_tool.BuildError, match="DT_RUNPATH differs"):
-        runtime_tool._audit_elf_dynamic_identity(
+        linux_tool._audit_elf_dynamic_identity(
             PurePosixPath("lib/libcublas.so.12"),
             ("libcublas.so.12",),
             (),
             ("$ORIGIN/../lib",),
         )
     with pytest.raises(runtime_tool.BuildError, match="DT_RUNPATH differs"):
-        runtime_tool._audit_elf_dynamic_identity(
+        linux_tool._audit_elf_dynamic_identity(
             PurePosixPath("lib/libcublas.so.12"),
             ("libcublas.so.12",),
             (),
             (),
         )
     with pytest.raises(runtime_tool.BuildError, match="DT_RUNPATH differs"):
-        runtime_tool._audit_elf_dynamic_identity(
+        linux_tool._audit_elf_dynamic_identity(
             PurePosixPath("lib/libnvrtc.so.12"),
             ("libnvrtc.so.12",),
             (),
             ("$ORIGIN",),
         )
     with pytest.raises(runtime_tool.BuildError, match="DT_RUNPATH differs"):
-        runtime_tool._audit_elf_dynamic_identity(
+        linux_tool._audit_elf_dynamic_identity(
             PurePosixPath("lib/libnvrtc.so.12"),
             ("libnvrtc.so.12",),
             (),

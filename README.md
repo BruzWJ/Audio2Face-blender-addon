@@ -230,9 +230,9 @@ dist/audio2face-<version>-linux-x64.zip
 Extension packaging does not compile the native worker. ZIP-LZMA keeps the
 complete locked NVIDIA runtime in one Blender-installable GitHub release asset
 below GitHub's per-asset limit. The two-step release scripts are therefore the
-complete production path. `tools/build_runtime.py` refuses a target that
-differs from its native host and never reads an installed CUDA or TensorRT
-development stack.
+complete production path. `tools/build_runtime.py` routes the selected platform
+to its dedicated native builder, rejects a target that differs from its host,
+and never reads an installed CUDA or TensorRT development stack.
 
 Run the Python and Blender source smoke suites with:
 

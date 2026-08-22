@@ -135,14 +135,19 @@ Linux runtime keeps executables in `runtime/bin`, shared objects in
 `LD_LIBRARY_PATH`. Neither platform carries duplicate native files in a second
 directory.
 
-A clean native release job uses [`tools/build_runtime.py`](../tools/build_runtime.py)
-and [`worker/runtime-lock.json`](../worker/runtime-lock.json) to acquire the
-exact Audio2Face SDK revision, CUDA 12.9 components, TensorRT 10.13 inputs,
-CMake, and Windows CRT inputs. It builds the worker and packages the `trtexec`
-shipped in those exact TensorRT binary inputs without consulting a workstation or
-runner CUDA or TensorRT installation. CUDA compiler files, headers,
-import/static libraries, and driver stubs are build inputs only. The NVIDIA
-display driver is the one required host component.
+A clean native release job uses
+[`tools/build_runtime.py`](../tools/build_runtime.py) with an explicit platform
+and [`worker/runtime-lock.json`](../worker/runtime-lock.json). The dispatcher
+loads the dedicated
+[`build_windows_runtime.py`](../tools/build_windows_runtime.py) or
+[`build_linux_runtime.py`](../tools/build_linux_runtime.py) implementation. The
+selected implementation acquires the exact Audio2Face SDK revision, CUDA 12.9
+components, TensorRT 10.13 inputs, and CMake distribution for that platform.
+The Windows builder also acquires the locked CRT input. Each builds the worker
+and packages the `trtexec` shipped in the exact TensorRT binary input without
+consulting a workstation or runner CUDA or TensorRT installation. CUDA compiler files,
+headers, import/static libraries, and driver stubs are build inputs only. The
+NVIDIA display driver is the one required host component.
 
 The Windows producer is pinned to VCToolsVersion 14.43.34808, `cl` 19.43.34810,
 and Windows SDK 10.0.22621.0. The Linux producer is pinned to the Rocky Linux
