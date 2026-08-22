@@ -181,6 +181,7 @@ WINDOWS_REQUIRED_ENVIRONMENT_KEYS = frozenset(
     }
 )
 WINDOWS_VCVARSALL_PATH_VARIABLE = "A2F_VCVARSALL"
+WINDOWS_VCVARSALL_NETFXSDK_VARIABLE = "NETFXSDKDir"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:")
@@ -2531,6 +2532,7 @@ def _capture_windows_vcvarsall_environment(
         for key in WINDOWS_VCVARSALL_ENVIRONMENT_KEYS
         if key.casefold() not in preserved_vcvarsall_keys
     }
+    generated_vcvarsall_keys.add(WINDOWS_VCVARSALL_NETFXSDK_VARIABLE.casefold())
     capture_environment = {
         key: value
         for key, value in source.items()
@@ -2583,6 +2585,9 @@ def _capture_windows_vcvarsall_environment(
     selected_names = {
         name.casefold(): name for name in WINDOWS_VCVARSALL_ENVIRONMENT_KEYS
     }
+    selected_names[WINDOWS_VCVARSALL_NETFXSDK_VARIABLE.casefold()] = (
+        WINDOWS_VCVARSALL_NETFXSDK_VARIABLE
+    )
     for line in output.splitlines():
         if not line or line.startswith("="):
             continue
@@ -2599,6 +2604,30 @@ def _capture_windows_vcvarsall_environment(
             raise BuildError(f"vcvarsall returned duplicate environment name {name!r}")
         casefolded_names.add(casefolded)
         environment[canonical] = value
+
+    netfxsdk_value = environment.pop(WINDOWS_VCVARSALL_NETFXSDK_VARIABLE, None)
+    if netfxsdk_value is not None:
+        netfxsdk_root = PureWindowsPath(netfxsdk_value)
+        if not netfxsdk_root.is_absolute():
+            raise BuildError("vcvarsall returned a non-absolute NETFXSDKDir")
+        netfxsdk_search_paths = {
+            "INCLUDE": netfxsdk_root / "Include" / "um",
+            "LIB": netfxsdk_root / "Lib" / "um" / "x64",
+        }
+        for name, netfxsdk_path in netfxsdk_search_paths.items():
+            value = environment.get(name)
+            if value is None:
+                continue
+            retained = [
+                item
+                for item in value.split(os.pathsep)
+                if PureWindowsPath(item) != netfxsdk_path
+            ]
+            if not retained:
+                raise BuildError(
+                    f"vcvarsall {name} contains only the optional .NET Framework SDK"
+                )
+            environment[name] = os.pathsep.join(retained)
     return environment
 
 

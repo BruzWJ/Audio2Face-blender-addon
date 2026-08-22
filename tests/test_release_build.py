@@ -927,6 +927,7 @@ def test_windows_vcvarsall_capture_uses_pinned_versions_and_sanitized_shell(
         "CUDA_PATH": "C:/ambient/cuda",
         "INCLUDE": "C:/ambient/include",
         "LIB": "C:/ambient/lib",
+        "NETFXSDKDir": "C:/ambient/netfxsdk",
         "PATH": "C:/Windows/System32;;C:/host/git/bin;",
         "PATHEXT": ".COM;.EXE;.BAT;.CMD",
         "ProgramFiles(x86)": "C:/Program Files (x86)",
@@ -944,8 +945,11 @@ def test_windows_vcvarsall_capture_uses_pinned_versions_and_sanitized_shell(
     )
     captured_text = (
         "COMSPEC=C:\\Windows\\System32\\cmd.exe\r\n"
-        "INCLUDE=C:\\Visual Studio\\include;C:\\Windows Kits\\Include\r\n"
-        "LIB=C:\\Visual Studio\\lib\r\n"
+        "INCLUDE=C:\\Visual Studio\\include;C:\\Program Files (x86)\\Windows "
+        "Kits\\NETFXSDK\\4.8\\Include\\um;C:\\Windows Kits\\Include\r\n"
+        "LIB=C:\\Visual Studio\\lib;C:\\Program Files (x86)\\Windows "
+        "Kits\\NETFXSDK\\4.8\\Lib\\um\\x64\r\n"
+        "NETFXSDKDir=C:\\Program Files (x86)\\Windows Kits\\NETFXSDK\\4.8\\\r\n"
         "PATH=C:\\Visual Studio\\bin;C:\\Windows\\System32\r\n"
         "GITHUB_ACTION_REF=\r\n"
         "A2F_TEST_VALUE=left=right\r\n"
@@ -972,6 +976,8 @@ def test_windows_vcvarsall_capture_uses_pinned_versions_and_sanitized_shell(
     assert environment["INCLUDE"] == (
         "C:\\Visual Studio\\include;C:\\Windows Kits\\Include"
     )
+    assert environment["LIB"] == "C:\\Visual Studio\\lib"
+    assert "NETFXSDKDir" not in environment
     assert len(calls) == 1
     command, options = calls[0]
     assert command == (
