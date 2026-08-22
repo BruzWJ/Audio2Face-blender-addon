@@ -1034,7 +1034,7 @@ def test_windows_release_environment_rejects_case_colliding_keys(
         runtime_tool._windows_release_environment(source, tmp_path)
 
 
-def test_host_program_resolution_uses_only_declared_path(
+def test_host_program_resolution_uses_declared_path_order(
     tmp_path: Path,
 ) -> None:
     executable = tmp_path / "declared-bin" / "release-tool"
@@ -1054,10 +1054,22 @@ def test_host_program_resolution_uses_only_declared_path(
     second.parent.mkdir()
     second.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     second.chmod(0o755)
-    with pytest.raises(runtime_tool.BuildError, match="ambiguous"):
+    first_path = os.pathsep.join((str(executable.parent), str(second.parent)))
+    assert runtime_tool.require_host_program(
+        "release-tool",
+        {"PATH": first_path},
+    ) == executable.resolve()
+    reversed_path = os.pathsep.join((str(second.parent), str(executable.parent)))
+    assert runtime_tool.require_host_program(
+        "release-tool",
+        {"PATH": reversed_path},
+    ) == second.resolve()
+
+    malformed_path = os.pathsep.join((str(executable.parent), "relative"))
+    with pytest.raises(runtime_tool.BuildError, match="non-absolute directory"):
         runtime_tool.require_host_program(
             "release-tool",
-            {"PATH": os.pathsep.join((str(executable.parent), str(second.parent)))},
+            {"PATH": malformed_path},
         )
 
 
@@ -1774,7 +1786,7 @@ def test_extension_zip_uses_package_files_at_root(tmp_path: Path) -> None:
         '{"platform":"linux-x64"}\n', encoding="utf-8"
     )
     archive = tmp_path / "audio2face.zip"
-    with zipfile.ZipFile(archive, "w") as output:
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_LZMA) as output:
         for source in package_root.rglob("*"):
             if source.is_file():
                 output.write(source, source.relative_to(package_root).as_posix())
@@ -1782,7 +1794,7 @@ def test_extension_zip_uses_package_files_at_root(tmp_path: Path) -> None:
     extension_tool.validate_extension_archive(archive, package_root, "linux-x64")
 
     nested = tmp_path / "nested.zip"
-    with zipfile.ZipFile(nested, "w") as output:
+    with zipfile.ZipFile(nested, "w", compression=zipfile.ZIP_LZMA) as output:
         for source in package_root.rglob("*"):
             if source.is_file():
                 relative = source.relative_to(package_root).as_posix()
@@ -1791,7 +1803,11 @@ def test_extension_zip_uses_package_files_at_root(tmp_path: Path) -> None:
         extension_tool.validate_extension_archive(nested, package_root, "linux-x64")
 
     extra_directory = tmp_path / "extra-directory.zip"
-    with zipfile.ZipFile(extra_directory, "w") as output:
+    with zipfile.ZipFile(
+        extra_directory,
+        "w",
+        compression=zipfile.ZIP_LZMA,
+    ) as output:
         for source in package_root.rglob("*"):
             if source.is_file():
                 output.write(source, source.relative_to(package_root).as_posix())
@@ -1807,7 +1823,7 @@ def test_extension_zip_uses_package_files_at_root(tmp_path: Path) -> None:
         )
 
     special_mode = tmp_path / "special-mode.zip"
-    with zipfile.ZipFile(special_mode, "w") as output:
+    with zipfile.ZipFile(special_mode, "w", compression=zipfile.ZIP_LZMA) as output:
         for source in package_root.rglob("*"):
             if not source.is_file():
                 continue
@@ -1818,6 +1834,7 @@ def test_extension_zip_uses_package_files_at_root(tmp_path: Path) -> None:
             info = zipfile.ZipInfo(relative)
             info.create_system = 3
             info.external_attr = (stat.S_IFIFO | 0o644) << 16
+            info.compress_type = zipfile.ZIP_LZMA
             output.writestr(info, source.read_bytes())
     with pytest.raises(
         extension_tool.ExtensionBuildError,
@@ -1828,6 +1845,55 @@ def test_extension_zip_uses_package_files_at_root(tmp_path: Path) -> None:
             package_root,
             "linux-x64",
         )
+
+    wrong_compression = tmp_path / "wrong-compression.zip"
+    with zipfile.ZipFile(
+        wrong_compression,
+        "w",
+        compression=zipfile.ZIP_DEFLATED,
+    ) as output:
+        for source in package_root.rglob("*"):
+            if source.is_file():
+                output.write(source, source.relative_to(package_root).as_posix())
+    with pytest.raises(
+        extension_tool.ExtensionBuildError,
+        match="not ZIP-LZMA compressed",
+    ):
+        extension_tool.validate_extension_archive(
+            wrong_compression,
+            package_root,
+            "linux-x64",
+        )
+
+
+def test_extension_archive_writer_uses_lzma_and_preserves_files(
+    tmp_path: Path,
+) -> None:
+    package_root = tmp_path / "audio2face"
+    nested = package_root / "runtime" / "bin"
+    nested.mkdir(parents=True)
+    source = package_root / "__init__.py"
+    source.write_text("VALUE = 1\n", encoding="utf-8")
+    executable = nested / "audio2face_worker"
+    executable.write_bytes(b"worker\n" * 64)
+    executable.chmod(0o755)
+    archive = tmp_path / "audio2face.zip"
+
+    extension_tool.write_extension_archive(package_root, archive)
+
+    with zipfile.ZipFile(archive) as output:
+        assert {info.filename for info in output.infolist()} == {
+            "__init__.py",
+            "runtime/bin/audio2face_worker",
+        }
+        assert all(
+            info.compress_type == zipfile.ZIP_LZMA for info in output.infolist()
+        )
+    extension_tool.validate_extension_archive(
+        archive,
+        package_root,
+        "linux-x64",
+    )
 
 
 def test_release_workflow_stamps_dated_manifest_and_publishes_by_id() -> None:

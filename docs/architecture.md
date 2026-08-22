@@ -160,7 +160,8 @@ CMake staging target. The native builder publishes exactly
 [`tools/build_extension.py`](../tools/build_extension.py) accepts that one
 handoff plus an absolute Blender 5.2 executable, creates the complete temporary
 extension source directory required by Blender, pins its manifest to one
-platform, invokes Blender's extension validator and builder, and verifies the
+platform, writes one standard ZIP-LZMA archive, invokes Blender's extension
+validator on both the source directory and finished archive, and verifies the
 ZIP layout and bytes. The only outputs are
 `dist/audio2face-<version>-windows-x64.zip` and
 `dist/audio2face-<version>-linux-x64.zip`. Native compilation never occurs inside

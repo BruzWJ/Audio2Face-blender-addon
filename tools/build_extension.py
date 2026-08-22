@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import lzma
 import os
 import platform as platform_module
 import re
@@ -367,6 +368,10 @@ def validate_extension_archive(
                         raise ExtensionBuildError(
                             f"extension ZIP file has non-regular mode: {name}"
                         )
+                    if info.compress_type != zipfile.ZIP_LZMA:
+                        raise ExtensionBuildError(
+                            f"extension ZIP file is not ZIP-LZMA compressed: {name}"
+                        )
                     actual_files[name] = info
             extra_directories = sorted(actual_directories - expected_directories)
             if extra_directories:
@@ -399,8 +404,40 @@ def validate_extension_archive(
                             f"extension ZIP mode differs for {name}: "
                             f"expected {source_mode:o}, got {archive_mode:o}"
                         )
-    except (OSError, zipfile.BadZipFile, NotImplementedError) as exc:
+    except (OSError, lzma.LZMAError, zipfile.BadZipFile, NotImplementedError) as exc:
         raise ExtensionBuildError(f"cannot validate extension ZIP {archive_path}: {exc}") from exc
+
+
+def write_extension_archive(package_root: Path, archive_path: Path) -> None:
+    """Write one all-file ZIP-LZMA archive accepted by Blender 5.2."""
+
+    try:
+        with zipfile.ZipFile(
+            archive_path,
+            "x",
+            compression=zipfile.ZIP_LZMA,
+            allowZip64=True,
+        ) as archive:
+            for source in sorted(package_root.rglob("*")):
+                if source.is_symlink() or not (source.is_file() or source.is_dir()):
+                    raise ExtensionBuildError(
+                        f"extension package contains a symlink or special file: {source}"
+                    )
+                if source.is_dir():
+                    continue
+                relative = source.relative_to(package_root).as_posix()
+                print(
+                    f"Packaging {relative} with ZIP-LZMA "
+                    f"({source.stat().st_size} bytes)",
+                    flush=True,
+                )
+                archive.write(source, relative, compress_type=zipfile.ZIP_LZMA)
+    except ExtensionBuildError:
+        raise
+    except (OSError, lzma.LZMAError, RuntimeError, zipfile.LargeZipFile) as exc:
+        raise ExtensionBuildError(
+            f"cannot create extension ZIP {archive_path}: {exc}"
+        ) from exc
 
 
 def build_extension(blender: Path, platform_id: str) -> Path:
@@ -443,23 +480,13 @@ def build_extension(blender: Path, platform_id: str) -> Path:
             raise ExtensionBuildError(f"stale partial extension output exists: {partial}")
         _run([executable, "--command", "extension", "validate", package_root])
         try:
-            _run(
-                [
-                    executable,
-                    "--command",
-                    "extension",
-                    "build",
-                    "--source-dir",
-                    package_root,
-                    "--output-filepath",
-                    partial,
-                ]
-            )
+            write_extension_archive(package_root, partial)
             if not partial.is_file() or partial.stat().st_size < 1:
                 raise ExtensionBuildError(
-                    f"Blender did not produce extension ZIP: {partial}"
+                    f"extension ZIP was not produced: {partial}"
                 )
             validate_extension_archive(partial, package_root, platform_id)
+            _run([executable, "--command", "extension", "validate", partial])
             if output.exists() or output.is_symlink():
                 raise ExtensionBuildError(f"extension output appeared during build: {output}")
             partial.replace(output)
@@ -488,7 +515,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ExtensionBuildError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    print(f"Built Blender 5.2 Audio2Face extension: {output}")
+    print(
+        f"Built Blender 5.2 Audio2Face extension: {output} "
+        f"({output.stat().st_size} bytes)"
+    )
     return 0
 
 

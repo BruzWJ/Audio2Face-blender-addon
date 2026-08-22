@@ -141,4 +141,5 @@ workflow enforces that limit before upload and again before publication. If a
 complete platform ZIP reaches that limit, it cannot be published as a
 ready-to-install GitHub release asset; the runtime/package composition or
 distribution host must be changed rather than splitting the Blender extension
-ZIP.
+ZIP. The release builder uses Blender-readable ZIP-LZMA compression so the
+complete locked runtime remains one installable asset.

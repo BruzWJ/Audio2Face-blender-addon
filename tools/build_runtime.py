@@ -2307,7 +2307,7 @@ def require_host_program(name: str, environment: Mapping[str, str]) -> Path:
     search_path = environment.get("PATH")
     if not isinstance(search_path, str) or not search_path:
         raise BuildError("release environment has no canonical PATH")
-    resolved: set[Path] = set()
+    first_resolved: Path | None = None
     for raw_directory in search_path.split(os.pathsep):
         if not raw_directory:
             raise BuildError("release PATH contains an empty search directory")
@@ -2317,16 +2317,15 @@ def require_host_program(name: str, environment: Mapping[str, str]) -> Path:
                 f"release PATH contains a non-absolute directory: {raw_directory!r}"
             )
         candidate = directory / name
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            resolved.add(candidate.resolve())
-    if not resolved:
+        if (
+            first_resolved is None
+            and candidate.is_file()
+            and os.access(candidate, os.X_OK)
+        ):
+            first_resolved = candidate.resolve()
+    if first_resolved is None:
         raise BuildError(f"required native host tool is not on PATH: {name}")
-    if len(resolved) != 1:
-        raise BuildError(
-            f"required native host tool is ambiguous on release PATH: "
-            f"{name}: {sorted(os.fspath(path) for path in resolved)}"
-        )
-    return next(iter(resolved))
+    return first_resolved
 
 
 def checkout_exact(

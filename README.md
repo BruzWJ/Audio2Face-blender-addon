@@ -218,19 +218,21 @@ python3 tools/build_extension.py --blender /absolute/path/to/blender --platform 
 
 The runtime build writes exactly `build/runtime/<platform>`. The extension
 builder validates that handoff, creates the complete temporary package root
-required by Blender, pins the manifest to one platform, runs Blender 5.2
-extension validation and packaging, and verifies the resulting ZIP
-byte-for-byte. It writes:
+required by Blender, pins the manifest to one platform, writes one standard
+ZIP-LZMA archive, and runs Blender 5.2 validation on both the package root and
+the finished archive before verifying its contents byte-for-byte. It writes:
 
 ```text
 dist/audio2face-<version>-windows-x64.zip
 dist/audio2face-<version>-linux-x64.zip
 ```
 
-Blender's extension builder packages files; it does not compile the native
-worker. The two-step release scripts are therefore the complete production
-path. `tools/build_runtime.py` refuses a target that differs from its native
-host and never reads an installed CUDA or TensorRT development stack.
+Extension packaging does not compile the native worker. ZIP-LZMA keeps the
+complete locked NVIDIA runtime in one Blender-installable GitHub release asset
+below GitHub's per-asset limit. The two-step release scripts are therefore the
+complete production path. `tools/build_runtime.py` refuses a target that
+differs from its native host and never reads an installed CUDA or TensorRT
+development stack.
 
 Run the Python and Blender source smoke suites with:
 
