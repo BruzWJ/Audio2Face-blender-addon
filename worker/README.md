@@ -52,7 +52,10 @@ pinned TensorRT ZIP or Linux RPM set, checks source revisions and native paths,
 stages only
 the reviewed runtime dependency closure, and records the required notices.
 CUDA compiler files, headers, import/static libraries, and driver stubs are
-build inputs and are not shipped.
+build inputs and are not shipped. On Linux, the builder moves the
+redistributable archives' single `lib` tree to the canonical `lib64` toolkit
+location required by their pinned `nvcc`; it does not create an alias or search
+a second CUDA library path.
 
 Build on the native target host:
 

@@ -73,13 +73,17 @@ and [six-hour hosted-job limit](https://docs.github.com/en/actions/reference/lim
 The Windows job downloads Microsoft's official Visual Studio 2022 Build Tools
 bootstrapper and installs only the components required by the locked build:
 
+- `Microsoft.VisualStudio.Component.VC.CoreBuildTools`;
 - `Microsoft.VisualStudio.Component.VC.14.43.17.13.x86.x64`; and
 - `Microsoft.VisualStudio.Component.Windows11SDK.22621`.
 
-It then verifies MSVC toolset `14.43.34808` and Windows SDK
-`10.0.22621.0` before invoking the runtime builder. The Ubuntu image supplies
-Git, `curl`, `tar`, `xz`, GitHub CLI, and Docker Engine; the locked Rocky Linux
-producer container supplies the compiler and system headers.
+It then verifies the x64 build-environment script, MSVC toolset `14.43.34808`,
+and Windows SDK `10.0.22621.0` before invoking the runtime builder. The builder
+includes error-free, registered, reboot-pending Visual Studio Setup instances in
+discovery because installer exit code `3010` is accepted, but still selects only
+an instance containing both `vcvars64.bat` and the locked compiler. The Ubuntu
+image supplies Git, `curl`, `tar`, `xz`, GitHub CLI, and Docker Engine; the locked
+Rocky Linux producer container supplies the compiler and system headers.
 
 Neither runner needs an NVIDIA GPU, CUDA Toolkit, TensorRT installation,
 Audio2Face installation, or either model repository. The runtime builder

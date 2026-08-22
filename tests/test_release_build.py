@@ -561,6 +561,32 @@ def test_release_environment_removes_ambient_gpu_search_paths(
     assert environment["PM_PACKAGES_ROOT"] == str(tmp_path / "packman-cache")
 
 
+def test_linux_private_build_environment_uses_cuda_lib64(tmp_path: Path) -> None:
+    cuda_root = tmp_path / "inputs" / "cuda"
+    tensorrt_root = tmp_path / "inputs" / "tensorrt"
+    cmake_root = tmp_path / "inputs" / "cmake"
+    ninja = tmp_path / "inputs" / "ninja" / "ninja"
+    compiler = Path("/opt/rh/gcc-toolset-11/root/usr/bin/g++")
+
+    environment = runtime_tool.private_build_environment(
+        {"PATH": "/usr/bin:/bin"},
+        "linux-x64",
+        cuda_root,
+        tensorrt_root,
+        cmake_root,
+        ninja,
+        compiler,
+    )
+
+    assert environment["LD_LIBRARY_PATH"].split(os.pathsep) == [
+        str(cuda_root / runtime_tool.LINUX_CUDA_LIBRARY_DIRECTORY),
+        str(tensorrt_root / "lib"),
+    ]
+    assert str(cuda_root / "lib") not in environment["LD_LIBRARY_PATH"].split(
+        os.pathsep
+    )
+
+
 def test_windows_private_build_environment_excludes_ambient_path(
     tmp_path: Path,
 ) -> None:
@@ -694,7 +720,8 @@ def test_windows_vcvars_discovery_enumerates_all_instances_for_exact_pin(
         / "vswhere.exe"
     )
     newer_without_pin = tmp_path / "Visual Studio" / "2022" / "Newer"
-    newest_with_pin = tmp_path / "Visual Studio" / "2022" / "Community"
+    errored_with_pin = tmp_path / "Visual Studio" / "2022" / "Errored"
+    reboot_pending_with_pin = tmp_path / "Visual Studio" / "2022" / "Community"
     older_with_pin = tmp_path / "Visual Studio" / "2022" / "BuildTools"
     toolchain = runtime_tool.load_lock()["windows_toolchain"]
     vcvars_relative = Path("VC/Auxiliary/Build/vcvars64.bat")
@@ -709,8 +736,10 @@ def test_windows_vcvars_discovery_enumerates_all_instances_for_exact_pin(
     files = (
         vswhere,
         newer_without_pin / vcvars_relative,
-        newest_with_pin / vcvars_relative,
-        newest_with_pin / compiler_relative,
+        errored_with_pin / vcvars_relative,
+        errored_with_pin / compiler_relative,
+        reboot_pending_with_pin / vcvars_relative,
+        reboot_pending_with_pin / compiler_relative,
         older_with_pin / vcvars_relative,
         older_with_pin / compiler_relative,
     )
@@ -725,14 +754,25 @@ def test_windows_vcvars_discovery_enumerates_all_instances_for_exact_pin(
             {
                 "installationPath": str(newer_without_pin),
                 "installationVersion": "17.14.10000.1",
+                "state": runtime_tool.WINDOWS_VS_STATE_COMPLETE,
             },
             {
-                "installationPath": str(newest_with_pin),
+                "installationPath": str(errored_with_pin),
+                "installationVersion": "17.13.40000.1",
+                "state": (
+                    runtime_tool.WINDOWS_VS_STATE_LOCAL
+                    | runtime_tool.WINDOWS_VS_STATE_REGISTERED
+                ),
+            },
+            {
+                "installationPath": str(reboot_pending_with_pin),
                 "installationVersion": "17.13.35931.197",
+                "state": runtime_tool.WINDOWS_VS_REQUIRED_STATE,
             },
             {
                 "installationPath": str(older_with_pin),
                 "installationVersion": "17.11.35327.3",
+                "state": runtime_tool.WINDOWS_VS_STATE_COMPLETE,
             },
         ]
         return runtime_tool.subprocess.CompletedProcess(
@@ -748,11 +788,12 @@ def test_windows_vcvars_discovery_enumerates_all_instances_for_exact_pin(
 
     vcvars = runtime_tool._discover_windows_vcvars(source, toolchain)
 
-    assert vcvars == newest_with_pin / vcvars_relative
+    assert vcvars == reboot_pending_with_pin / vcvars_relative
     assert len(calls) == 1
     command, options = calls[0]
     assert Path(command[0]) == vswhere
     assert command[1:] == [
+        "-all",
         "-products",
         "*",
         "-version",
@@ -784,7 +825,14 @@ def test_windows_vcvars_discovery_rejects_missing_pinned_toolset(
     vcvars = installation / "VC" / "Auxiliary" / "Build" / "vcvars64.bat"
     vcvars.parent.mkdir(parents=True)
     vcvars.write_bytes(b"test")
-    output = json.dumps([{"installationPath": str(installation)}]).encode()
+    output = json.dumps(
+        [
+            {
+                "installationPath": str(installation),
+                "state": runtime_tool.WINDOWS_VS_STATE_COMPLETE,
+            }
+        ]
+    ).encode()
     monkeypatch.setattr(
         runtime_tool.subprocess,
         "run",
@@ -795,7 +843,10 @@ def test_windows_vcvars_discovery_rejects_missing_pinned_toolset(
         ),
     )
 
-    with pytest.raises(runtime_tool.BuildError, match="locked MSVC toolset"):
+    with pytest.raises(
+        runtime_tool.BuildError,
+        match="both vcvars64[.]bat and the locked MSVC toolset",
+    ):
         runtime_tool._discover_windows_vcvars(
             {"ProgramFiles(x86)": str(program_files)},
             runtime_tool.load_lock()["windows_toolchain"],
@@ -1028,6 +1079,50 @@ def test_archive_root_and_cuda_merge_require_exact_members(
     (destination / "same.h").write_bytes(b"identical")
     with pytest.raises(runtime_tool.BuildError, match="collides"):
         runtime_tool.merge_component_tree(source, destination, "component")
+
+
+def test_linux_cuda_toolkit_uses_nvcc_library_layout(tmp_path: Path) -> None:
+    toolkit = tmp_path / "cuda"
+    archive_libraries = toolkit / "lib"
+    archive_libraries.mkdir(parents=True)
+    for filename in runtime_tool.LINUX_CUDA_COMPILER_LIBRARIES:
+        (archive_libraries / filename).write_bytes(filename.encode("ascii"))
+    (archive_libraries / "libcudart.so.12").write_bytes(b"shared runtime")
+
+    runtime_tool.finalize_linux_cuda_toolkit(toolkit)
+
+    compiler_libraries = toolkit / runtime_tool.LINUX_CUDA_LIBRARY_DIRECTORY
+    assert not archive_libraries.exists()
+    assert compiler_libraries.is_dir()
+    assert not compiler_libraries.is_symlink()
+    assert {path.name for path in compiler_libraries.iterdir()} == {
+        *runtime_tool.LINUX_CUDA_COMPILER_LIBRARIES,
+        "libcudart.so.12",
+    }
+    assert runtime_tool.cuda_library_directory(toolkit, "linux-x64") == (
+        compiler_libraries
+    )
+    assert runtime_tool.cuda_library_directory(toolkit, "windows-x64") == (
+        toolkit / "bin"
+    )
+    with pytest.raises(runtime_tool.BuildError, match="unsupported CUDA library"):
+        runtime_tool.cuda_library_directory(toolkit, "macos-arm64")
+
+
+def test_linux_cuda_toolkit_requires_static_compiler_libraries(
+    tmp_path: Path,
+) -> None:
+    toolkit = tmp_path / "cuda"
+    (toolkit / "lib").mkdir(parents=True)
+
+    with pytest.raises(
+        runtime_tool.BuildError,
+        match="missing compiler library libcudadevrt[.]a",
+    ):
+        runtime_tool.finalize_linux_cuda_toolkit(toolkit)
+
+    assert (toolkit / "lib").is_dir()
+    assert not (toolkit / runtime_tool.LINUX_CUDA_LIBRARY_DIRECTORY).exists()
 
 
 def test_linux_producer_image_identity_is_cryptographically_exact() -> None:
@@ -1376,6 +1471,17 @@ def test_release_workflow_stamps_dated_manifest_and_publishes_by_id() -> None:
     assert workflow.count("persist-credentials: false") == 3
     assert "DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}" in workflow
     assert "manual releases must use the repository default branch" in workflow
+    assert workflow.count(
+        '"--add", "Microsoft.VisualStudio.Component.VC.CoreBuildTools"'
+    ) == 1
+    assert (
+        '$vcvars = Join-Path $installPath "VC\\Auxiliary\\Build\\vcvars64.bat"'
+        in workflow
+    )
+    assert (
+        "Visual Studio x64 build environment is missing after installation"
+        in workflow
+    )
     assert "release_day = datetime.now(UTC).date()" in workflow
     assert 'version = f"{release_day.year}.{release_day.month}.{release_day.day}"' in workflow
     assert 'release_tag = f"v{version}"' in workflow

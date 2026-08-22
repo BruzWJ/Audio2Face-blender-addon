@@ -78,6 +78,11 @@ CUDA_MANIFEST_PLATFORMS = {
     "windows-x64": "windows-x86_64",
     "linux-x64": "linux-x86_64",
 }
+LINUX_CUDA_LIBRARY_DIRECTORY = "lib64"
+LINUX_CUDA_COMPILER_LIBRARIES = (
+    "libcudadevrt.a",
+    "libcudart_static.a",
+)
 NVIDIA_TENSORRT_RHEL8_BASE_URL = (
     "https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/"
 )
@@ -142,6 +147,15 @@ WINDOWS_VCVARS_ENVIRONMENT_KEYS = (
     "WindowsSdkDir",
     "WindowsSDKLibVersion",
     "WindowsSDKVersion",
+)
+WINDOWS_VS_STATE_LOCAL = 1
+WINDOWS_VS_STATE_REGISTERED = 2
+WINDOWS_VS_STATE_NO_ERRORS = 8
+WINDOWS_VS_STATE_COMPLETE = (1 << 32) - 1
+WINDOWS_VS_REQUIRED_STATE = (
+    WINDOWS_VS_STATE_LOCAL
+    | WINDOWS_VS_STATE_REGISTERED
+    | WINDOWS_VS_STATE_NO_ERRORS
 )
 WINDOWS_REQUIRED_ENVIRONMENT_KEYS = frozenset(
     {
@@ -1095,6 +1109,34 @@ def merge_component_tree(source: Path, destination: Path, label: str) -> None:
             raise BuildError(f"{label} contains unsupported file {relative}")
 
 
+def cuda_library_directory(cuda_root: Path, platform_id: str) -> Path:
+    if platform_id == "windows-x64":
+        return cuda_root / "bin"
+    if platform_id == "linux-x64":
+        return cuda_root / LINUX_CUDA_LIBRARY_DIRECTORY
+    raise BuildError(f"unsupported CUDA library platform {platform_id!r}")
+
+
+def finalize_linux_cuda_toolkit(toolkit: Path) -> None:
+    """Put NVIDIA's Linux redistributables in nvcc's canonical toolkit layout."""
+
+    archive_libraries = toolkit / "lib"
+    compiler_libraries = toolkit / LINUX_CUDA_LIBRARY_DIRECTORY
+    if not archive_libraries.is_dir() or archive_libraries.is_symlink():
+        raise BuildError("Linux CUDA redistributables have no regular lib directory")
+    if compiler_libraries.exists() or compiler_libraries.is_symlink():
+        raise BuildError(
+            "Linux CUDA redistributables unexpectedly contain both lib and lib64"
+        )
+    for filename in LINUX_CUDA_COMPILER_LIBRARIES:
+        library = archive_libraries / filename
+        if not library.is_file() or library.is_symlink():
+            raise BuildError(
+                f"Linux CUDA redistributables are missing compiler library {filename}"
+            )
+    archive_libraries.rename(compiler_libraries)
+
+
 def validate_cuda_manifest(
     manifest_path: Path, lock: Mapping[str, Any], platform_id: str
 ) -> None:
@@ -1186,6 +1228,8 @@ def materialize_cuda(
         merge_component_tree(component_root, toolkit, f"CUDA {component_name}")
         shutil.rmtree(extracted)
 
+    if platform_id == "linux-x64":
+        finalize_linux_cuda_toolkit(toolkit)
     nvcc_name = "nvcc.exe" if platform_id == "windows-x64" else "nvcc"
     nvcc = toolkit / "bin" / nvcc_name
     if not nvcc.is_file():
@@ -2325,7 +2369,7 @@ def _windows_environment_value(
 def _discover_windows_vcvars(
     source: Mapping[str, str], toolchain: Mapping[str, Any]
 ) -> Path:
-    """Enumerate VS 2022 instances and select the newest locked compiler."""
+    """Select the newest error-free VS 2022 instance with the locked compiler."""
 
     program_files = _windows_environment_value(source, "ProgramFiles(x86)")
     if program_files is None:
@@ -2347,6 +2391,7 @@ def _discover_windows_vcvars(
 
     command = [
         os.fspath(vswhere),
+        "-all",
         "-products",
         "*",
         "-version",
@@ -2400,6 +2445,16 @@ def _discover_windows_vcvars(
     for index, raw_installation in enumerate(installations):
         label = f"vswhere installation {index}"
         installation = _object(raw_installation, label)
+        state = _field(installation, "state", label)
+        if (
+            isinstance(state, bool)
+            or not isinstance(state, int)
+            or state < 0
+            or state > WINDOWS_VS_STATE_COMPLETE
+        ):
+            raise BuildError(f"{label}.state must be a Windows Setup state integer")
+        if (state & WINDOWS_VS_REQUIRED_STATE) != WINDOWS_VS_REQUIRED_STATE:
+            continue
         raw_path = _field(installation, "installationPath", label)
         installation_path = Path(_string(raw_path, f"{label}.installationPath"))
         if not installation_path.is_absolute():
@@ -2419,8 +2474,8 @@ def _discover_windows_vcvars(
         if vcvars.is_file() and compiler.is_file():
             return vcvars
     raise BuildError(
-        "Visual Studio 2022 has no complete x64 C++ installation containing "
-        f"the locked MSVC toolset {vctools_version}"
+        "No registered Visual Studio 2022 instance contains both vcvars64.bat "
+        f"and the locked MSVC toolset {vctools_version}"
     )
 
 
@@ -2639,7 +2694,7 @@ def private_build_environment(
     if platform_id not in RUNTIME_CONTRACTS:
         raise BuildError(f"unsupported private build platform {platform_id!r}")
     environment = dict(base)
-    cuda_library = cuda_root / ("bin" if platform_id == "windows-x64" else "lib")
+    cuda_library = cuda_library_directory(cuda_root, platform_id)
     tensorrt_library = tensorrt_root / "lib"
     path_entries = [
         cmake_root / "bin",
@@ -3332,7 +3387,7 @@ def configure_and_stage_worker(
         json.dumps(contract.manifest(), indent=2) + "\n",
         encoding="utf-8",
     )
-    cuda_runtime = cuda_root / ("bin" if platform_id == "windows-x64" else "lib")
+    cuda_runtime = cuda_library_directory(cuda_root, platform_id)
     if platform_id == "windows-x64":
         if msvc_runtime is None or msvc_manifest is None or msvc_provenance is None:
             raise BuildError("Windows worker staging requires pinned MSVC inputs")
