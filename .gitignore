@@ -24,3 +24,4 @@ dist/*
 
 # Generated Audio2Face results
 *.a2f.json
+/%SystemDrive%
