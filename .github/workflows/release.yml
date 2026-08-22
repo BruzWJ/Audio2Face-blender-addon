@@ -576,11 +576,56 @@ jobs:
             IFS=$'\t' read -r existing_id existing_tag existing_target existing_name draft prerelease \
               <<< "$existing"
             if [[ "$existing_id" != "$release_id" || "$existing_tag" != "$RELEASE_TAG" ||
-                  "$existing_target" != "$SOURCE_SHA" ||
                   "$existing_name" != "Audio2Face $RELEASE_TAG" || "$draft" != "true" ||
                   "$prerelease" != "false" ]]; then
               echo "Existing draft REST identity does not match the dated release." >&2
               exit 1
+            fi
+            if [[ "$existing_target" != "$SOURCE_SHA" ]]; then
+              if [[ ! "$existing_target" =~ ^[0-9a-f]{40}$ ]] ||
+                 ! git cat-file -e "$existing_target^{commit}" ||
+                 ! git merge-base --is-ancestor "$existing_target" "$SOURCE_SHA"; then
+                echo "Existing draft target must be a commit ancestor of $SOURCE_SHA; got $existing_target." >&2
+                exit 1
+              fi
+              generated_notes="$RUNNER_TEMP/generated-release-notes.json"
+              release_update="$RUNNER_TEMP/update-draft-release.json"
+              gh api --method POST \
+                "repos/$GITHUB_REPOSITORY/releases/generate-notes" \
+                --raw-field tag_name="$RELEASE_TAG" \
+                --raw-field target_commitish="$SOURCE_SHA" > "$generated_notes"
+              GENERATED_NOTES="$generated_notes" python - <<'PY' > "$release_update"
+          import json
+          import os
+          from pathlib import Path
+
+          generated = json.loads(
+              Path(os.environ["GENERATED_NOTES"]).read_text(encoding="utf-8")
+          )
+          body = generated.get("body")
+          if not isinstance(body, str):
+              raise SystemExit("generated release notes returned no text body")
+          print(json.dumps({
+              "target_commitish": os.environ["SOURCE_SHA"],
+              "body": body,
+          }))
+          PY
+              retargeted="$(
+                gh api --method PATCH \
+                  "repos/$GITHUB_REPOSITORY/releases/$release_id" \
+                  --input "$release_update" \
+                  --jq '[.id, .tag_name, .target_commitish, .name, .draft, .prerelease] | @tsv'
+              )"
+              rm -f -- "$generated_notes" "$release_update"
+              IFS=$'\t' read -r updated_id updated_tag updated_target updated_name updated_draft updated_prerelease \
+                <<< "$retargeted"
+              if [[ "$updated_id" != "$release_id" || "$updated_tag" != "$RELEASE_TAG" ||
+                    "$updated_target" != "$SOURCE_SHA" ||
+                    "$updated_name" != "Audio2Face $RELEASE_TAG" ||
+                    "$updated_draft" != "true" || "$updated_prerelease" != "false" ]]; then
+                echo "Retargeted draft REST identity does not match the dated release." >&2
+                exit 1
+              fi
             fi
           else
             created_json="$RUNNER_TEMP/created-release.json"
@@ -690,6 +735,7 @@ jobs:
             "--nocache",
             "--installPath", $installPath,
             "--add", "Microsoft.VisualStudio.Workload.VCTools",
+            "--add", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
             "--add", "Microsoft.VisualStudio.Component.VC.14.43.17.13.x86.x64",
             "--add", "Microsoft.VisualStudio.Component.Windows11SDK.22621"
           )
@@ -699,13 +745,13 @@ jobs:
           }
           Remove-Item -LiteralPath $bootstrapper -Force
           $compiler = Join-Path $installPath "VC\Tools\MSVC\14.43.34808\bin\Hostx64\x64\cl.exe"
-          $vcvars = Join-Path $installPath "VC\Auxiliary\Build\vcvars64.bat"
+          $vcvarsall = Join-Path $installPath "VC\Auxiliary\Build\vcvarsall.bat"
           $sdk = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\Lib\10.0.22621.0"
           if (-not (Test-Path -LiteralPath $compiler -PathType Leaf)) {
             throw "Locked MSVC compiler is missing after installation: $compiler"
           }
-          if (-not (Test-Path -LiteralPath $vcvars -PathType Leaf)) {
-            throw "Visual Studio x64 build environment is missing after installation: $vcvars"
+          if (-not (Test-Path -LiteralPath $vcvarsall -PathType Leaf)) {
+            throw "Visual Studio C++ build environment is missing after installation: $vcvarsall"
           }
           if (-not (Test-Path -LiteralPath $sdk -PathType Container)) {
             throw "Locked Windows SDK is missing after installation: $sdk"

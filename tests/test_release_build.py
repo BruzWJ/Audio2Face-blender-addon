@@ -654,12 +654,12 @@ def test_windows_private_build_environment_excludes_ambient_path(
         )
 
 
-def test_windows_release_environment_is_an_exact_vcvars_allowlist(
+def test_windows_release_environment_is_an_exact_vcvarsall_allowlist(
     tmp_path: Path,
 ) -> None:
     source = {
         name: f"declared-{name}"
-        for name in runtime_tool.WINDOWS_VCVARS_ENVIRONMENT_KEYS
+        for name in runtime_tool.WINDOWS_VCVARSALL_ENVIRONMENT_KEYS
     }
     source.update(
         {
@@ -699,8 +699,10 @@ def test_windows_release_environment_is_an_exact_vcvars_allowlist(
         "TMP",
         "USERPROFILE",
     }
-    assert set(environment) == set(runtime_tool.WINDOWS_VCVARS_ENVIRONMENT_KEYS) | owned
-    for name in runtime_tool.WINDOWS_VCVARS_ENVIRONMENT_KEYS:
+    assert set(environment) == set(
+        runtime_tool.WINDOWS_VCVARSALL_ENVIRONMENT_KEYS
+    ) | owned
+    for name in runtime_tool.WINDOWS_VCVARSALL_ENVIRONMENT_KEYS:
         assert environment[name] == source[name]
     assert environment["HOME"] == str(tmp_path / "producer-home")
     assert environment["USERPROFILE"] == environment["HOME"]
@@ -708,7 +710,7 @@ def test_windows_release_environment_is_an_exact_vcvars_allowlist(
     assert environment["TMP"] == environment["TEMP"]
 
 
-def test_windows_vcvars_discovery_enumerates_all_instances_for_exact_pin(
+def test_windows_vcvarsall_discovery_enumerates_all_instances_for_exact_pin(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -724,7 +726,7 @@ def test_windows_vcvars_discovery_enumerates_all_instances_for_exact_pin(
     reboot_pending_with_pin = tmp_path / "Visual Studio" / "2022" / "Community"
     older_with_pin = tmp_path / "Visual Studio" / "2022" / "BuildTools"
     toolchain = runtime_tool.load_lock()["windows_toolchain"]
-    vcvars_relative = Path("VC/Auxiliary/Build/vcvars64.bat")
+    vcvarsall_relative = Path("VC/Auxiliary/Build/vcvarsall.bat")
     compiler_relative = (
         Path("VC/Tools/MSVC")
         / toolchain["vctools_version"]
@@ -735,12 +737,12 @@ def test_windows_vcvars_discovery_enumerates_all_instances_for_exact_pin(
     )
     files = (
         vswhere,
-        newer_without_pin / vcvars_relative,
-        errored_with_pin / vcvars_relative,
+        newer_without_pin / vcvarsall_relative,
+        errored_with_pin / vcvarsall_relative,
         errored_with_pin / compiler_relative,
-        reboot_pending_with_pin / vcvars_relative,
+        reboot_pending_with_pin / vcvarsall_relative,
         reboot_pending_with_pin / compiler_relative,
-        older_with_pin / vcvars_relative,
+        older_with_pin / vcvarsall_relative,
         older_with_pin / compiler_relative,
     )
     for path in files:
@@ -786,9 +788,9 @@ def test_windows_vcvars_discovery_enumerates_all_instances_for_exact_pin(
         "ProgramFiles(x86)": str(program_files),
     }
 
-    vcvars = runtime_tool._discover_windows_vcvars(source, toolchain)
+    vcvarsall = runtime_tool._discover_windows_vcvarsall(source, toolchain)
 
-    assert vcvars == reboot_pending_with_pin / vcvars_relative
+    assert vcvarsall == reboot_pending_with_pin / vcvarsall_relative
     assert len(calls) == 1
     command, options = calls[0]
     assert Path(command[0]) == vswhere
@@ -808,7 +810,7 @@ def test_windows_vcvars_discovery_enumerates_all_instances_for_exact_pin(
     assert options["stderr"] is runtime_tool.subprocess.PIPE
 
 
-def test_windows_vcvars_discovery_rejects_missing_pinned_toolset(
+def test_windows_vcvarsall_discovery_rejects_missing_pinned_toolset(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -822,9 +824,9 @@ def test_windows_vcvars_discovery_rejects_missing_pinned_toolset(
     vswhere.parent.mkdir(parents=True)
     vswhere.write_bytes(b"test")
     installation = tmp_path / "Visual Studio" / "2022" / "Community"
-    vcvars = installation / "VC" / "Auxiliary" / "Build" / "vcvars64.bat"
-    vcvars.parent.mkdir(parents=True)
-    vcvars.write_bytes(b"test")
+    vcvarsall = installation / "VC" / "Auxiliary" / "Build" / "vcvarsall.bat"
+    vcvarsall.parent.mkdir(parents=True)
+    vcvarsall.write_bytes(b"test")
     output = json.dumps(
         [
             {
@@ -845,25 +847,25 @@ def test_windows_vcvars_discovery_rejects_missing_pinned_toolset(
 
     with pytest.raises(
         runtime_tool.BuildError,
-        match="both vcvars64[.]bat and the locked MSVC toolset",
+        match="both vcvarsall[.]bat and the locked MSVC toolset",
     ):
-        runtime_tool._discover_windows_vcvars(
+        runtime_tool._discover_windows_vcvarsall(
             {"ProgramFiles(x86)": str(program_files)},
             runtime_tool.load_lock()["windows_toolchain"],
         )
 
 
-def test_windows_vcvars_capture_uses_pinned_versions_and_sanitized_shell(
+def test_windows_vcvarsall_capture_uses_pinned_versions_and_sanitized_shell(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(runtime_tool.os, "pathsep", ";")
     toolchain = runtime_tool.load_lock()["windows_toolchain"]
-    vcvars = Path(
+    vcvarsall = Path(
         "C:/Program Files/Microsoft Visual Studio/2022/Community/"
-        "VC/Auxiliary/Build/vcvars64.bat"
+        "VC/Auxiliary/Build/vcvarsall.bat"
     )
     source = {
-        "A2F_VCVARS64": "C:/hostile.bat",
+        "A2F_VCVARSALL": "C:/hostile.bat",
         "COMSPEC": "C:/Windows/System32/cmd.exe",
         "CUDA_PATH": "C:/ambient/cuda",
         "INCLUDE": "C:/ambient/include",
@@ -876,9 +878,9 @@ def test_windows_vcvars_capture_uses_pinned_versions_and_sanitized_shell(
     }
     monkeypatch.setattr(
         runtime_tool,
-        "_discover_windows_vcvars",
+        "_discover_windows_vcvarsall",
         lambda discovered_source, discovered_toolchain: (
-            vcvars
+            vcvarsall
             if discovered_source is source and discovered_toolchain is toolchain
             else pytest.fail("capture changed its discovery inputs")
         ),
@@ -902,7 +904,7 @@ def test_windows_vcvars_capture_uses_pinned_versions_and_sanitized_shell(
 
     monkeypatch.setattr(runtime_tool.subprocess, "run", run)
 
-    environment = runtime_tool._capture_windows_vcvars_environment(
+    environment = runtime_tool._capture_windows_vcvarsall_environment(
         source,
         toolchain,
     )
@@ -915,11 +917,11 @@ def test_windows_vcvars_capture_uses_pinned_versions_and_sanitized_shell(
     command, options = calls[0]
     assert command == (
         '"C:/Windows/System32/cmd.exe" /d /u /s /c '
-        '"call "%A2F_VCVARS64%" 10.0.22621.0 '
+        '"call "%A2F_VCVARSALL%" amd64 10.0.22621.0 '
         '-vcvars_ver=14.43.34808 >nul && set"'
     )
     assert options["env"] == {
-        "A2F_VCVARS64": str(vcvars),
+        "A2F_VCVARSALL": str(vcvarsall),
         "COMSPEC": source["COMSPEC"],
         "CUDA_PATH": source["CUDA_PATH"],
         "PATH": "C:/Windows/System32;C:/host/git/bin",
@@ -934,19 +936,19 @@ def test_windows_vcvars_capture_uses_pinned_versions_and_sanitized_shell(
 
 def test_windows_command_output_rejects_invalid_utf16() -> None:
     with pytest.raises(runtime_tool.BuildError, match="truncated UTF-16"):
-        runtime_tool._decode_windows_command_output(b"x", "vcvars64")
+        runtime_tool._decode_windows_command_output(b"x", "vcvarsall")
     with pytest.raises(runtime_tool.BuildError, match="invalid UTF-16"):
-        runtime_tool._decode_windows_command_output(b"\x00\xd8", "vcvars64")
+        runtime_tool._decode_windows_command_output(b"\x00\xd8", "vcvarsall")
 
 
-def test_windows_vcvars_capture_rejects_duplicate_environment_names(
+def test_windows_vcvarsall_capture_rejects_duplicate_environment_names(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(runtime_tool.os, "pathsep", ";")
     monkeypatch.setattr(
         runtime_tool,
-        "_discover_windows_vcvars",
-        lambda *_args: Path("C:/Visual Studio/vcvars64.bat"),
+        "_discover_windows_vcvarsall",
+        lambda *_args: Path("C:/Visual Studio/vcvarsall.bat"),
     )
     output = "PATH=C:\\Windows\r\nPath=C:\\Visual Studio\r\n".encode("utf-16le")
     monkeypatch.setattr(
@@ -966,7 +968,7 @@ def test_windows_vcvars_capture_rejects_duplicate_environment_names(
     }
 
     with pytest.raises(runtime_tool.BuildError, match="duplicate environment name"):
-        runtime_tool._capture_windows_vcvars_environment(
+        runtime_tool._capture_windows_vcvarsall_environment(
             source,
             runtime_tool.load_lock()["windows_toolchain"],
         )
@@ -977,7 +979,7 @@ def test_windows_release_environment_rejects_case_colliding_keys(
 ) -> None:
     source = {
         name: f"declared-{name}"
-        for name in runtime_tool.WINDOWS_VCVARS_ENVIRONMENT_KEYS
+        for name in runtime_tool.WINDOWS_VCVARSALL_ENVIRONMENT_KEYS
     }
     source.update(
         {
@@ -1081,7 +1083,13 @@ def test_linux_cuda_toolkit_uses_nvcc_library_layout(tmp_path: Path) -> None:
     archive_libraries.mkdir(parents=True)
     for filename in runtime_tool.LINUX_CUDA_COMPILER_LIBRARIES:
         (archive_libraries / filename).write_bytes(filename.encode("ascii"))
-    (archive_libraries / "libcudart.so.12").write_bytes(b"shared runtime")
+    versioned_runtime = archive_libraries / "libcudart.so.12.9.79"
+    versioned_runtime.write_bytes(b"shared runtime")
+    try:
+        (archive_libraries / "libcudart.so.12").symlink_to(versioned_runtime.name)
+        (archive_libraries / "libcudart.so").symlink_to("libcudart.so.12")
+    except OSError:
+        pytest.skip("file symlinks are unavailable")
 
     runtime_tool.finalize_linux_cuda_toolkit(toolkit)
 
@@ -1091,8 +1099,13 @@ def test_linux_cuda_toolkit_uses_nvcc_library_layout(tmp_path: Path) -> None:
     assert not compiler_libraries.is_symlink()
     assert {path.name for path in compiler_libraries.iterdir()} == {
         *runtime_tool.LINUX_CUDA_COMPILER_LIBRARIES,
+        "libcudart.so",
         "libcudart.so.12",
+        "libcudart.so.12.9.79",
     }
+    soname = compiler_libraries / "libcudart.so.12"
+    assert soname.is_symlink()
+    assert soname.resolve(strict=True) == compiler_libraries / versioned_runtime.name
     assert runtime_tool.cuda_library_directory(toolkit, "linux-x64") == (
         compiler_libraries
     )
@@ -1101,6 +1114,118 @@ def test_linux_cuda_toolkit_uses_nvcc_library_layout(tmp_path: Path) -> None:
     )
     with pytest.raises(runtime_tool.BuildError, match="unsupported CUDA library"):
         runtime_tool.cuda_library_directory(toolkit, "macos-arm64")
+
+
+def test_cuda_runtime_package_source_resolves_soname_inside_locked_toolkit(
+    tmp_path: Path,
+) -> None:
+    cuda_runtime = tmp_path / "cuda" / "lib64"
+    cuda_runtime.mkdir(parents=True)
+    payload = cuda_runtime / "libcudart.so.12.9.79"
+    payload.write_bytes(b"locked CUDA runtime")
+    alias = cuda_runtime / "libcudart.so.12"
+    try:
+        alias.symlink_to(payload.name)
+    except OSError:
+        pytest.skip("file symlinks are unavailable")
+    entry = next(
+        entry
+        for entry in runtime_tool.runtime_contract("linux-x64").libraries
+        if entry.path == "lib/libcudart.so.12"
+    )
+
+    source = runtime_tool._runtime_source_for_file(
+        entry,
+        sdk_source=tmp_path / "sdk",
+        cuda_runtime=cuda_runtime,
+        tensorrt_runtime=tmp_path / "tensorrt",
+        platform_runtime=tmp_path / "platform-runtime",
+        platform_notices=None,
+        platform_metadata=None,
+        platform_provenance=None,
+        trtexec_provenance=tmp_path / "trtexec-provenance.txt",
+    )
+
+    assert source == payload
+    assert source.is_file()
+    assert not source.is_symlink()
+
+    contract = runtime_tool.RuntimePlatformContract(
+        platform="linux-x64",
+        worker="bin/audio2face_worker",
+        trtexec="bin/trtexec",
+        library_directories=("lib",),
+        libraries=(
+            runtime_tool.RuntimePackagedFile("lib/libaudio2x.so", "audio2x"),
+            entry,
+        ),
+        licenses=(
+            runtime_tool.RuntimePackagedFile(
+                "licenses/audio2face-LICENSE.txt",
+                "project_license",
+            ),
+        ),
+    )
+    runtime = tmp_path / "runtime"
+    worker = runtime / contract.worker
+    audio2x = runtime / "lib" / "libaudio2x.so"
+    trtexec = tmp_path / "trtexec"
+    bundle_manifest = tmp_path / "bundle.json"
+    license_file = tmp_path / "LICENSE"
+    for generated in (worker, audio2x):
+        generated.parent.mkdir(parents=True, exist_ok=True)
+        generated.write_bytes(generated.name.encode("ascii"))
+    trtexec.write_bytes(b"trtexec")
+    license_file.write_bytes(b"license")
+    bundle_manifest.write_text(json.dumps(contract.manifest()), encoding="utf-8")
+
+    runtime_tool.assemble_runtime_package(
+        runtime,
+        contract,
+        (
+            (trtexec, contract.trtexec),
+            (bundle_manifest, "bundle.json"),
+            (source, entry.path),
+            (license_file, contract.licenses[0].path),
+        ),
+    )
+
+    packaged = runtime / entry.path
+    assert packaged.is_file()
+    assert not packaged.is_symlink()
+    assert os.path.samefile(packaged, payload)
+
+
+def test_cuda_runtime_package_source_rejects_alias_outside_locked_toolkit(
+    tmp_path: Path,
+) -> None:
+    cuda_runtime = tmp_path / "cuda" / "lib64"
+    cuda_runtime.mkdir(parents=True)
+    outside = tmp_path / "outside.so"
+    outside.write_bytes(b"outside")
+    alias = cuda_runtime / "libcudart.so.12"
+    try:
+        alias.symlink_to(outside)
+    except OSError:
+        pytest.skip("file symlinks are unavailable")
+    entry = next(
+        entry
+        for entry in runtime_tool.runtime_contract("linux-x64").libraries
+        if entry.path == "lib/libcudart.so.12"
+    )
+
+    with pytest.raises(runtime_tool.BuildError, match="does not resolve inside"):
+        runtime_tool._runtime_source_for_file(
+            entry,
+            sdk_source=tmp_path / "sdk",
+            cuda_runtime=cuda_runtime,
+            tensorrt_runtime=tmp_path / "tensorrt",
+            platform_runtime=tmp_path / "platform-runtime",
+            platform_notices=None,
+            platform_metadata=None,
+            platform_provenance=None,
+            trtexec_provenance=tmp_path / "trtexec-provenance.txt",
+        )
 
 
 def test_linux_cuda_toolkit_requires_static_compiler_libraries(
@@ -1599,14 +1724,17 @@ def test_release_workflow_stamps_dated_manifest_and_publishes_by_id() -> None:
     assert workflow.count(
         '"--add", "Microsoft.VisualStudio.Workload.VCTools"'
     ) == 1
+    assert workflow.count(
+        '"--add", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64"'
+    ) == 1
     assert "Microsoft.VisualStudio.Component.VC.CoreBuildTools" not in workflow
     assert "--includeRecommended" not in workflow
     assert (
-        '$vcvars = Join-Path $installPath "VC\\Auxiliary\\Build\\vcvars64.bat"'
+        '$vcvarsall = Join-Path $installPath "VC\\Auxiliary\\Build\\vcvarsall.bat"'
         in workflow
     )
     assert (
-        "Visual Studio x64 build environment is missing after installation"
+        "Visual Studio C++ build environment is missing after installation"
         in workflow
     )
     assert "release_day = datetime.now(UTC).date()" in workflow
@@ -1637,7 +1765,15 @@ def test_release_workflow_stamps_dated_manifest_and_publishes_by_id() -> None:
     assert 'ref(qualifiedName: $qualified)' in workflow
     assert '--method POST "repos/$GITHUB_REPOSITORY/releases"' in workflow
     assert '--raw-field tag_name="$RELEASE_TAG"' in workflow
-    assert '--raw-field target_commitish="$SOURCE_SHA"' in workflow
+    assert workflow.count('--raw-field target_commitish="$SOURCE_SHA"') == 2
+    assert '"repos/$GITHUB_REPOSITORY/releases/$release_id"' in workflow
+    assert 'git cat-file -e "$existing_target^{commit}"' in workflow
+    assert 'git merge-base --is-ancestor "$existing_target" "$SOURCE_SHA"' in workflow
+    assert '"repos/$GITHUB_REPOSITORY/releases/generate-notes"' in workflow
+    assert '"target_commitish": os.environ["SOURCE_SHA"]' in workflow
+    assert '"body": body' in workflow
+    assert '--input "$release_update"' in workflow
+    assert "Retargeted draft REST identity does not match the dated release." in workflow
     assert '--raw-field name="Audio2Face $RELEASE_TAG"' in workflow
     assert "--field draft=true" in workflow
     assert "--field prerelease=false" in workflow

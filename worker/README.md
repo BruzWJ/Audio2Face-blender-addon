@@ -34,7 +34,7 @@ Linux GNU runtime input from the lock into an isolated work directory.
 
 On Windows, run the command from ordinary PowerShell. The builder locates
 Visual Studio 2022 or Build Tools with Visual Studio Installer's `vswhere.exe`,
-selects the exact locked toolset, and initializes `vcvars64.bat` automatically.
+selects the exact locked toolset, and initializes `vcvarsall.bat` automatically.
 It does not require a Developer Command Prompt or caller-provided Visual Studio
 environment variables.
 
