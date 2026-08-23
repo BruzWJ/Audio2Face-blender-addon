@@ -70,26 +70,16 @@ target_include_directories(audio2face_worker PRIVATE
 target_link_libraries(audio2face_worker PRIVATE
   audio2x)
 
-if(MSVC)
+if(WIN32 AND MSVC)
   target_compile_options(audio2face_worker PRIVATE /W4 /permissive- /EHsc)
-else()
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND
+       CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
   target_compile_options(audio2face_worker PRIVATE -Wall -Wextra -Wpedantic)
   find_package(Threads REQUIRED)
   target_link_libraries(audio2face_worker PRIVATE Threads::Threads)
-endif()
-
-string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" _a2f_system_processor)
-if(CMAKE_SIZEOF_VOID_P EQUAL 8 AND WIN32 AND
-   _a2f_system_processor STREQUAL "amd64")
-  set(A2F_RUNTIME_PLATFORM "windows-x64")
-elseif(CMAKE_SIZEOF_VOID_P EQUAL 8 AND
-       CMAKE_SYSTEM_NAME STREQUAL "Linux" AND
-       _a2f_system_processor STREQUAL "x86_64")
-  set(A2F_RUNTIME_PLATFORM "linux-x64")
 else()
   message(FATAL_ERROR
-    "The bundled runtime supports only Windows x64 and Linux x64; "
-    "got ${CMAKE_SYSTEM_NAME}/${CMAKE_SYSTEM_PROCESSOR}")
+    "The runtime builder requires MSVC on Windows or GNU C++ on Linux")
 endif()
 
 if(A2F_RUNTIME_OUTPUT_DIR STREQUAL "" OR
@@ -109,13 +99,10 @@ if(MSVC)
     COMPILE_PDB_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/symbols"
     PDB_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/symbols")
 endif()
-if(WIN32)
+if(MSVC)
   set_target_properties(audio2x PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${A2F_RUNTIME_OUTPUT_DIR}/bin")
 else()
   set_target_properties(audio2x PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY "${A2F_RUNTIME_OUTPUT_DIR}/lib")
 endif()
-
-message(STATUS
-  "Audio2Face ${A2F_RUNTIME_PLATFORM} native outputs: ${A2F_RUNTIME_OUTPUT_DIR}")

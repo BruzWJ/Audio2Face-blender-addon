@@ -506,13 +506,12 @@ def materialize_linux_tensorrt(lock: Mapping[str, Any], work_root: Path) -> Path
             "size": relative_artifact["size"],
             "sha256": relative_artifact["sha256"],
         }
-        archive: Path | None = None
+        archive = common.download_artifact(
+            artifact,
+            work_root / "downloads" / "tensorrt",
+            f"NVIDIA TensorRT Linux {role} RPM",
+        )
         try:
-            archive = common.download_artifact(
-                artifact,
-                work_root / "downloads" / "tensorrt",
-                f"NVIDIA TensorRT Linux {role} RPM",
-            )
             _extract_linux_tensorrt_rpm(
                 archive,
                 artifact["url"],
@@ -521,13 +520,12 @@ def materialize_linux_tensorrt(lock: Mapping[str, Any], work_root: Path) -> Path
                 root,
             )
         finally:
-            if archive is not None:
-                try:
-                    archive.unlink()
-                except OSError as exc:
-                    raise BuildError(
-                        f"cannot delete consumed TensorRT RPM {archive}: {exc}"
-                    ) from exc
+            try:
+                archive.unlink()
+            except OSError as exc:
+                raise BuildError(
+                    f"cannot delete consumed TensorRT RPM {archive}: {exc}"
+                ) from exc
         selected_outputs.update(package["files"])
     for link_name, target_name in common.LINUX_TENSORRT_LINKER_HARDLINKS.items():
         link = common._member_destination(
@@ -540,8 +538,6 @@ def materialize_linux_tensorrt(lock: Mapping[str, Any], work_root: Path) -> Path
         if not target.is_file() or target.is_symlink():
             raise BuildError(f"TensorRT linker input target is not regular: {target}")
         os.link(target, link)
-        if link.stat().st_ino != target.stat().st_ino:
-            raise BuildError(f"TensorRT linker input is not a hard link: {link}")
     expected_files = selected_outputs | set(common.LINUX_TENSORRT_LINKER_HARDLINKS)
     actual_files: set[str] = set()
     actual_directories: set[str] = set()
@@ -680,7 +676,7 @@ class LinuxProducerRunner(common.CommandRunner):
         container_id: str,
         host_environment: Mapping[str, str],
     ) -> None:
-        super().__init__(work_root)
+        self.work_root = work_root
         self.docker = docker
         self.container_id = container_id
         self.host_environment = dict(host_environment)
@@ -695,7 +691,6 @@ class LinuxProducerRunner(common.CommandRunner):
         capture: bool = False,
     ) -> str:
         args = [os.fspath(value) for value in command]
-        self.commands.append(args)
         print(f"+ [pinned Rocky producer] {shlex.join(args)}", flush=True)
         command_directory = self.work_root if cwd is None else cwd
         directory = command_directory.resolve(strict=False)
@@ -764,8 +759,7 @@ def _parse_linux_image_identity(output: str, lock: Mapping[str, Any]) -> None:
         raise BuildError(f"Rocky producer config digest drifted: {image_id!r}")
     if architecture != producer["architecture"] or operating_system != "linux":
         raise BuildError(
-            "Rocky producer image platform drifted: "
-            f"{operating_system}/{architecture}"
+            f"Rocky producer image platform drifted: {operating_system}/{architecture}"
         )
     try:
         repo_digests = json.loads(
@@ -836,10 +830,7 @@ def linux_producer_runner(
                 f"target={common.REPOSITORY_ROOT.resolve()},readonly"
             ),
             "--mount",
-            (
-                f"type=bind,source={work_root.resolve()},"
-                f"target={work_root.resolve()}"
-            ),
+            (f"type=bind,source={work_root.resolve()},target={work_root.resolve()}"),
             "--entrypoint",
             "/bin/bash",
             reference,
@@ -859,7 +850,6 @@ def linux_producer_runner(
         container_id,
         environment,
     )
-    runner.commands.extend(host_runner.commands)
     try:
         runner.user = "0:0"
         runner.run(
@@ -1291,7 +1281,7 @@ def audit_linux_dependencies(
     contract = common.runtime_contract(PLATFORM_ID)
     readelf = Path(lock["linux_toolchain"]["readelf_path"])
     packaged = frozenset(
-        path.name for path in common._native_runtime_files(runtime, contract)
+        path.name for path in common.native_runtime_files(runtime, contract)
     )
     unresolved: dict[str, list[str]] = {}
     version_definitions = {name: set() for name in ("GLIBCXX", "CXXABI", "GCC")}
@@ -1309,7 +1299,7 @@ def audit_linux_dependencies(
     )
     if native_files != tuple(
         sorted(
-            common._native_runtime_files(runtime, contract),
+            common.native_runtime_files(runtime, contract),
             key=lambda path: path.relative_to(runtime).as_posix(),
         )
     ):
@@ -1399,7 +1389,7 @@ def build_linux_runtime(work_root: Path) -> Path:
 
     common.require_native_target(PLATFORM_ID)
     lock = common.load_lock()
-    host_runner = common.CommandRunner(work_root)
+    host_runner = common.CommandRunner()
     environment = release_environment(work_root)
     git = common.require_host_program("git", environment)
 

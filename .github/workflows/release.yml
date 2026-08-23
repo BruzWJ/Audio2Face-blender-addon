@@ -18,7 +18,6 @@ jobs:
     permissions:
       contents: write
     outputs:
-      version: ${{ steps.identity.outputs.version }}
       windows_asset: ${{ steps.identity.outputs.windows_asset }}
       linux_asset: ${{ steps.identity.outputs.linux_asset }}
       source_sha: ${{ steps.stamp.outputs.source_sha }}
@@ -116,71 +115,10 @@ jobs:
           CURRENT_VERSION: ${{ steps.identity.outputs.version }}
           DISPATCH_SHA: ${{ steps.identity.outputs.dispatch_sha }}
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ steps.identity.outputs.release_tag }}
         run: |
           set -euo pipefail
-          releases_json="$RUNNER_TEMP/releases.json"
           repository_owner="${GITHUB_REPOSITORY%%/*}"
           repository_name="${GITHUB_REPOSITORY#*/}"
-          # shellcheck disable=SC2016
-          gh api graphql --paginate --slurp \
-            -f owner="$repository_owner" \
-            -f name="$repository_name" \
-            -f query='query($owner: String!, $name: String!, $endCursor: String) {
-              repository(owner: $owner, name: $name) {
-                releases(
-                  first: 100
-                  after: $endCursor
-                  orderBy: {field: CREATED_AT, direction: DESC}
-                ) {
-                  nodes {
-                    tagName
-                    isDraft
-                  }
-                  pageInfo { hasNextPage endCursor }
-                }
-              }
-            }' > "$releases_json"
-          RELEASES_JSON="$releases_json" python - <<'PY'
-          import json
-          import os
-          from pathlib import Path
-
-          pages = json.loads(
-              Path(os.environ["RELEASES_JSON"]).read_text(encoding="utf-8")
-          )
-          if not isinstance(pages, list) or any(not isinstance(page, dict) for page in pages):
-              raise SystemExit("GitHub releases response is not a paginated GraphQL array")
-          try:
-              releases = [
-                  release
-                  for page in pages
-                  for release in page["data"]["repository"]["releases"]["nodes"]
-              ]
-          except (KeyError, TypeError) as error:
-              raise SystemExit("GitHub releases response has an invalid GraphQL shape") from error
-          if any(not isinstance(release, dict) for release in releases):
-              raise SystemExit("GitHub releases response contains a non-object")
-          pending = [
-              release.get("tagName")
-              for release in releases
-              if release.get("isDraft") is True
-              and release.get("tagName") != os.environ["RELEASE_TAG"]
-          ]
-          if pending:
-              raise SystemExit(
-                  "resolve pending draft releases before starting a new version: "
-                  + ", ".join(repr(tag) for tag in pending)
-              )
-          if any(
-              release.get("tagName") == os.environ["RELEASE_TAG"]
-              and release.get("isDraft") is False
-              for release in releases
-          ):
-              raise SystemExit(
-                  f"dated release {os.environ['RELEASE_TAG']} is already published"
-              )
-          PY
           # shellcheck disable=SC2016
           previous_tag="$(
             gh api graphql \
@@ -193,9 +131,7 @@ jobs:
               }' \
               --jq '.data.repository.latestRelease.tagName // ""'
           )"
-          rm -f -- "$releases_json"
 
-          previous_sha=""
           if [[ -n "$previous_tag" ]]; then
             git check-ref-format "refs/tags/$previous_tag"
             previous_sha="$(git rev-parse --verify "refs/tags/$previous_tag^{commit}")"
@@ -793,7 +729,6 @@ jobs:
           $name = "blender-5.2.0-windows-x64"
           $archive = Join-Path $env:RUNNER_TEMP "$name-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT.zip"
           $destination = Join-Path $env:RUNNER_TEMP "$name-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
-          "BLENDER_DIRECTORY=$destination" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Invoke-WebRequest -Uri "https://download.blender.org/release/Blender5.2/$name.zip" -OutFile $archive
           $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
           $expected = "2d184b626c001692c362291911293b6a297179d618d95e9e9192c3a80318adc4"
@@ -879,20 +814,6 @@ jobs:
           }
           "sha256=$sha256" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "size=$size" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-
-      - name: Remove native build workspace
-        if: always()
-        shell: pwsh
-        run: |
-          $workspace = [System.IO.Path]::GetFullPath($env:GITHUB_WORKSPACE)
-          if (-not (Test-Path -LiteralPath (Join-Path $workspace ".git"))) {
-            throw "Refusing cleanup outside a checked-out Actions workspace: $workspace"
-          }
-          Remove-Item -LiteralPath (Join-Path $workspace "build") -Recurse -Force -ErrorAction SilentlyContinue
-          Remove-Item -LiteralPath (Join-Path $workspace "dist\$env:ASSET_NAME") -Force -ErrorAction SilentlyContinue
-          if ($env:BLENDER_DIRECTORY) {
-            Remove-Item -LiteralPath $env:BLENDER_DIRECTORY -Recurse -Force -ErrorAction SilentlyContinue
-          }
 
   build_linux:
     name: Build Linux x64 extension
@@ -985,7 +906,6 @@ jobs:
           name="blender-5.2.0-linux-x64"
           archive="$RUNNER_TEMP/$name-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.tar.xz"
           destination="$RUNNER_TEMP/$name-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-          printf 'BLENDER_DIRECTORY=%s\n' "$destination" >> "$GITHUB_ENV"
           curl --fail --location --retry 5 --output "$archive" \
             "https://download.blender.org/release/Blender5.2/$name.tar.xz"
           printf '%s  %s\n' \
@@ -1090,20 +1010,6 @@ jobs:
           rm -f -- "$assets_json" "$uploaded_json"
           printf 'sha256=%s\n' "$sha256" >> "$GITHUB_OUTPUT"
           printf 'size=%s\n' "$size" >> "$GITHUB_OUTPUT"
-
-      - name: Remove native build workspace
-        if: always()
-        shell: bash
-        run: |
-          set -euo pipefail
-          workspace="${GITHUB_WORKSPACE:?}"
-          if [[ "$workspace" == "/" || ! -d "$workspace/.git" ]]; then
-            echo "Refusing cleanup outside a checked-out Actions workspace: $workspace" >&2
-            exit 1
-          fi
-          rm -rf -- "$workspace/build"
-          rm -f -- "$workspace/dist/$ASSET_NAME"
-          if [[ -n "${BLENDER_DIRECTORY:-}" ]]; then rm -rf -- "$BLENDER_DIRECTORY"; fi
 
   publish:
     name: Verify and publish release

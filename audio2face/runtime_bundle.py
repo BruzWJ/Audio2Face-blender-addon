@@ -253,10 +253,7 @@ def _validate_native_binary(path: Path, platform_id: str, label: str) -> None:
     if platform_id == "linux-x64":
         _validate_elf_x64(path, label)
         return
-    if platform_id == "windows-x64":
-        _validate_pe_x64(path, label)
-        return
-    raise BundleError(f"cannot validate native binary for platform {platform_id!r}")
+    _validate_pe_x64(path, label)
 
 
 def _validate_executable(path: Path, platform_id: str, label: str) -> None:
@@ -316,21 +313,15 @@ def _child_environment(
 
     source = os.environ
     if platform_id == "windows-x64":
-        if library_directory != executable_directory:
-            raise BundleError("Windows runtime libraries must be beside the executables")
         system_root, system32 = _windows_system_directories(source)
         return {
             "SystemRoot": system_root,
             "PATH": system32,
         }
-    if platform_id == "linux-x64":
-        if library_directory == executable_directory:
-            raise BundleError("Linux runtime libraries must use the lib directory")
-        return {
-            "PATH": str(executable_directory),
-            "LD_LIBRARY_PATH": str(library_directory),
-        }
-    raise BundleError(f"cannot build child environment for {platform_id!r}")
+    return {
+        "PATH": str(executable_directory),
+        "LD_LIBRARY_PATH": str(library_directory),
+    }
 
 
 def resolve_runtime_bundle() -> RuntimeBundle:

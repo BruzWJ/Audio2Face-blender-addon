@@ -182,7 +182,7 @@ def _https_url(value: Any, label: str, *, directory: bool = False) -> str:
 def safe_member_path(name: str, label: str = "archive member") -> PurePosixPath:
     if not isinstance(name, str) or not name or "\x00" in name or "\\" in name:
         raise BuildError(f"unsafe {label}: {name!r}")
-    if name.startswith("/") or name.startswith("//") or WINDOWS_DRIVE_RE.match(name):
+    if name.startswith("/") or WINDOWS_DRIVE_RE.match(name):
         raise BuildError(f"absolute {label} is forbidden: {name!r}")
     path = PurePosixPath(name)
     if not path.parts or any(part in ("", ".", "..") for part in path.parts):
@@ -207,7 +207,7 @@ def _validate_artifact(value: Any, label: str) -> dict[str, Any]:
     return artifact
 
 
-def _validate_rooted_artifact(value: Any, label: str) -> dict[str, Any]:
+def _validate_rooted_artifact(value: Any, label: str) -> None:
     artifact = _object(value, label)
     _keys(artifact, {"url", "size", "sha256", "archive_root"}, label)
     _https_url(artifact["url"], f"{label}.url")
@@ -219,7 +219,6 @@ def _validate_rooted_artifact(value: Any, label: str) -> dict[str, Any]:
     )
     if len(root.parts) != 1:
         raise BuildError(f"{label}.archive_root must be one directory name")
-    return artifact
 
 
 def _validate_relative_artifact(value: Any, label: str) -> dict[str, Any]:
@@ -233,12 +232,11 @@ def _validate_relative_artifact(value: Any, label: str) -> dict[str, Any]:
     return artifact
 
 
-def _validate_platform_artifacts(value: Any, label: str) -> dict[str, Any]:
+def _validate_platform_artifacts(value: Any, label: str) -> None:
     artifacts = _object(value, label)
     _keys(artifacts, set(SUPPORTED_PLATFORMS), label)
     for platform_id in SUPPORTED_PLATFORMS:
         _validate_rooted_artifact(artifacts[platform_id], f"{label}.{platform_id}")
-    return artifacts
 
 
 def load_lock() -> dict[str, Any]:
@@ -334,8 +332,7 @@ def load_lock() -> dict[str, Any]:
         != NVIDIA_TENSORRT_RHEL8_BASE_URL
     ):
         raise BuildError(
-            "tensorrt.linux_packages.base_url must be NVIDIA's RHEL8 x86_64 "
-            "repository"
+            "tensorrt.linux_packages.base_url must be NVIDIA's RHEL8 x86_64 repository"
         )
     source_rpm = _string(
         linux_tensorrt["source_rpm"], "tensorrt.linux_packages.source_rpm"
@@ -826,7 +823,7 @@ def safe_extract_tar(archive_path: Path, destination: Path, platform_id: str) ->
 
 def safe_extract(archive_path: Path, destination: Path, platform_id: str) -> None:
     name = archive_path.name.lower()
-    if name.endswith((".zip", ".vsix")):
+    if name.endswith(".zip"):
         safe_extract_zip(archive_path, destination, platform_id)
         return
     if name.endswith((".tar.gz", ".tar.xz")):
@@ -902,8 +899,7 @@ def download_artifact(
     if actual_sha256 != expected_sha256:
         temporary.unlink(missing_ok=True)
         raise BuildError(
-            f"{label} SHA-256 mismatch: expected {expected_sha256}, "
-            f"got {actual_sha256}"
+            f"{label} SHA-256 mismatch: expected {expected_sha256}, got {actual_sha256}"
         )
     temporary.replace(destination)
     return destination
@@ -1071,10 +1067,6 @@ def materialize_archive_root(
 
 
 class CommandRunner:
-    def __init__(self, work_root: Path) -> None:
-        self.work_root = work_root
-        self.commands: list[list[str]] = []
-
     def run(
         self,
         command: Sequence[os.PathLike[str] | str],
@@ -1084,7 +1076,6 @@ class CommandRunner:
         capture: bool = False,
     ) -> str:
         args = [os.fspath(value) for value in command]
-        self.commands.append(args)
         print(f"+ {shlex.join(args)}", flush=True)
         try:
             result = subprocess.run(
@@ -1470,9 +1461,6 @@ def runtime_package_map(
 ) -> tuple[tuple[Path, str], ...]:
     """Resolve every non-generated runtime file from the package contract."""
 
-    audio2x_entries = contract.files_for_source("audio2x")
-    if len(audio2x_entries) != 1:
-        raise BuildError("runtime contract must declare exactly one audio2x path")
     external: list[tuple[Path, str]] = [
         (trtexec, contract.trtexec),
         (bundle_manifest, "bundle.json"),
@@ -1519,8 +1507,6 @@ def assemble_runtime_package(
     """Add declared runtime inputs to the native target output directory."""
 
     audio2x_entries = contract.files_for_source("audio2x")
-    if len(audio2x_entries) != 1:
-        raise BuildError("runtime contract must declare exactly one audio2x path")
     generated_paths = {contract.worker, audio2x_entries[0].path}
     expected_external_paths = {
         "bundle.json",
@@ -1641,9 +1627,11 @@ def validate_runtime_package(runtime: Path, platform_id: str) -> None:
         )
 
 
-def _native_runtime_files(
+def native_runtime_files(
     runtime: Path, contract: RuntimePlatformContract
 ) -> tuple[Path, ...]:
+    """Return every executable or library whose machine format is audited."""
+
     paths = (
         contract.worker,
         contract.trtexec,

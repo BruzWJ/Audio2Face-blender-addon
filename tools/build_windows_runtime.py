@@ -27,20 +27,17 @@ WINDOWS_VCVARSALL_ENVIRONMENT_KEYS = (
     "LIB",
     "LIBPATH",
     "PATH",
-    "PATHEXT",
     "PROCESSOR_ARCHITECTURE",
     "SystemRoot",
     "UCRTVersion",
     "UniversalCRTSdkDir",
     "VCINSTALLDIR",
     "VCToolsInstallDir",
-    "VCToolsRedistDir",
     "VCToolsVersion",
     "VisualStudioVersion",
     "VSCMD_ARG_HOST_ARCH",
     "VSCMD_ARG_TGT_ARCH",
     "VSINSTALLDIR",
-    "WindowsLibPath",
     "WindowsSdkBinPath",
     "WindowsSdkDir",
     "WindowsSDKLibVersion",
@@ -53,11 +50,6 @@ WINDOWS_VS_STATE_COMPLETE = (1 << 32) - 1
 WINDOWS_VS_REQUIRED_STATE = (
     WINDOWS_VS_STATE_LOCAL | WINDOWS_VS_STATE_REGISTERED | WINDOWS_VS_STATE_NO_ERRORS
 )
-WINDOWS_REQUIRED_ENVIRONMENT_KEYS = frozenset(WINDOWS_VCVARSALL_ENVIRONMENT_KEYS) - {
-    "PATHEXT",
-    "VCToolsRedistDir",
-    "WindowsLibPath",
-}
 WINDOWS_VCVARSALL_PATH_VARIABLE = "A2F_VCVARSALL"
 WINDOWS_VCVARSALL_NETFXSDK_VARIABLE = "NETFXSDKDir"
 WINDOWS_SYSTEM_DLLS = frozenset(
@@ -429,7 +421,7 @@ def _capture_windows_vcvarsall_environment(
     expected_comspec = PureWindowsPath(system_root_value) / "System32" / "cmd.exe"
     if not comspec.is_absolute() or comspec != expected_comspec:
         raise BuildError(
-            "COMSPEC must be the SystemRoot command processor: " f"{expected_comspec}"
+            f"COMSPEC must be the SystemRoot command processor: {expected_comspec}"
         )
 
     source_path = _windows_environment_value(source, "PATH")
@@ -451,7 +443,6 @@ def _capture_windows_vcvarsall_environment(
     preserved_vcvarsall_keys = {
         "comspec",
         "path",
-        "pathext",
         "processor_architecture",
         "systemroot",
     }
@@ -569,7 +560,7 @@ def _windows_release_environment(
         value = _windows_environment_value(source, canonical)
         if value is not None:
             environment[canonical] = value
-    missing = sorted(WINDOWS_REQUIRED_ENVIRONMENT_KEYS - set(environment))
+    missing = sorted(set(WINDOWS_VCVARSALL_ENVIRONMENT_KEYS) - set(environment))
     if missing:
         raise BuildError(
             "Windows release requires these vcvarsall environment values: "
@@ -695,8 +686,7 @@ def private_build_environment(
             path = Path(item)
             if not item or not path.is_absolute():
                 raise BuildError(
-                    f"Windows private build environment has unsafe {key} path: "
-                    f"{item!r}"
+                    f"Windows private build environment has unsafe {key} path: {item!r}"
                 )
             resolved = path.resolve(strict=False)
             if not any(common._inside(resolved, root) for root in allowed_search_roots):
@@ -872,7 +862,7 @@ def audit_windows_dependencies(
     if not dumpbin.is_file():
         raise BuildError(f"pinned Windows producer dumpbin is unavailable: {dumpbin}")
     contract = common.runtime_contract(PLATFORM_ID)
-    native_files = common._native_runtime_files(runtime, contract)
+    native_files = common.native_runtime_files(runtime, contract)
     packaged = frozenset(path.name.casefold() for path in native_files)
     unresolved: dict[str, list[str]] = {}
     for path in native_files:
@@ -903,7 +893,7 @@ def build_windows_runtime(work_root: Path) -> Path:
 
     common.require_native_target(PLATFORM_ID)
     lock = common.load_lock()
-    runner = common.CommandRunner(work_root)
+    runner = common.CommandRunner()
     environment = release_environment(work_root, lock)
     git = common.require_host_program("git.exe", environment)
 

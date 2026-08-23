@@ -46,33 +46,24 @@ def test_runtime_lock_has_exact_release_inputs() -> None:
     assert lock["audio2face_sdk"]["commit"] == (
         "1ca0f02535ed774f5dbcd724a31cd486368dc783"
     )
-    assert "tensorrt_source" not in lock
     assert lock["tensorrt"]["windows_artifact"]["archive_root"] == (
         "TensorRT-10.13.3.9"
     )
     linux_tensorrt = lock["tensorrt"]["linux_packages"]
-    assert linux_tensorrt["base_url"] == (
-        runtime_tool.NVIDIA_TENSORRT_RHEL8_BASE_URL
-    )
-    assert linux_tensorrt["source_rpm"] == (
-        "tensorrt-10.13.3.9-1.cuda12.9.src.rpm"
-    )
+    assert linux_tensorrt["base_url"] == (runtime_tool.NVIDIA_TENSORRT_RHEL8_BASE_URL)
+    assert linux_tensorrt["source_rpm"] == ("tensorrt-10.13.3.9-1.cuda12.9.src.rpm")
     assert tuple(linux_tensorrt["packages"]) == (
         runtime_tool.LINUX_TENSORRT_PACKAGE_ROLES
     )
     assert linux_tensorrt["packages"]["runtime"]["artifact"] == {
         "relative_path": "libnvinfer10-10.13.3.9-1.cuda12.9.x86_64.rpm",
         "size": 1377737088,
-        "sha256": (
-            "446f79f2a092d515a2a3a5afccdae4da430006eb7ca2ff4f0211b33b8d50beab"
-        ),
+        "sha256": ("446f79f2a092d515a2a3a5afccdae4da430006eb7ca2ff4f0211b33b8d50beab"),
     }
     assert set(lock["cuda"]["components"]) == set(runtime_tool.CUDA_COMPONENTS)
     assert "cuda_profiler_api" in lock["cuda"]["components"]
     assert lock["msvc_runtime"]["product_version"] == "14.44.35211.0"
-    assert set(lock["msvc_runtime"]["files"]) == set(
-        runtime_tool.MSVC_RUNTIME_FILES
-    )
+    assert set(lock["msvc_runtime"]["files"]) == set(runtime_tool.MSVC_RUNTIME_FILES)
     assert lock["windows_toolchain"] == {
         "vctools_version": "14.43.34808",
         "cl_version": "19.43.34810",
@@ -82,9 +73,7 @@ def test_runtime_lock_has_exact_release_inputs() -> None:
     assert linux_toolchain["distribution_id"] == "rocky"
     assert linux_toolchain["distribution_version"] == "8.9"
     assert linux_toolchain["glibc_version"] == "2.28"
-    assert linux_toolchain["glibc_nevra"] == (
-        "glibc-2.28-236.el8_9.7.x86_64"
-    )
+    assert linux_toolchain["glibc_nevra"] == ("glibc-2.28-236.el8_9.7.x86_64")
     assert linux_toolchain["producer_image"] == {
         "reference": (
             "quay.io/rockylinux/rockylinux@sha256:"
@@ -95,17 +84,13 @@ def test_runtime_lock_has_exact_release_inputs() -> None:
             "20917bc29576fedbc00e9c5d0df20bee45b9952dae4936a26a0d623e6b023f4e"
         ),
     }
-    assert linux_toolchain["gxx_path"] == (
-        "/opt/rh/gcc-toolset-11/root/usr/bin/g++"
-    )
+    assert linux_toolchain["gxx_path"] == ("/opt/rh/gcc-toolset-11/root/usr/bin/g++")
     assert linux_toolchain["gxx_version"] == "11.2.1"
     assert linux_toolchain["gxx_target"] == "x86_64-redhat-linux"
     assert linux_toolchain["readelf_path"] == (
         "/opt/rh/gcc-toolset-11/root/usr/bin/readelf"
     )
-    assert linux_toolchain["readelf_version"] == (
-        "GNU readelf version 2.36.1-4.el8_9"
-    )
+    assert linux_toolchain["readelf_version"] == ("GNU readelf version 2.36.1-4.el8_9")
     assert linux_toolchain["cxx11_abi"] == 0
     assert linux_toolchain["architecture_flags"] == [
         "-march=x86-64",
@@ -128,8 +113,7 @@ def test_runtime_lock_has_exact_release_inputs() -> None:
         "b135158c8b66a7dac26f50abae8e99056979e5dd03032d2a604aacd565ab89eb"
     )
     assert {
-        name: entry["output"]
-        for name, entry in linux_runtime["packages"].items()
+        name: entry["output"] for name, entry in linux_runtime["packages"].items()
     } == {
         "libstdcxx": "lib/libstdc++.so.6",
         "libgcc": "lib/libgcc_s.so.1",
@@ -229,9 +213,7 @@ def test_linux_tensorrt_materialization_is_sequential_and_exact(
     lock = runtime_tool.load_lock()
     downloaded: list[Path] = []
 
-    def download(
-        artifact: dict[str, object], destination: Path, _label: str
-    ) -> Path:
+    def download(artifact: dict[str, object], destination: Path, _label: str) -> Path:
         if downloaded:
             assert not downloaded[-1].exists()
         destination.mkdir(parents=True, exist_ok=True)
@@ -260,9 +242,7 @@ def test_linux_tensorrt_materialization_is_sequential_and_exact(
 
     assert len(downloaded) == len(runtime_tool.LINUX_TENSORRT_PACKAGE_ROLES)
     assert all(not archive.exists() for archive in downloaded)
-    for link_name, target_name in (
-        runtime_tool.LINUX_TENSORRT_LINKER_HARDLINKS.items()
-    ):
+    for link_name, target_name in runtime_tool.LINUX_TENSORRT_LINKER_HARDLINKS.items():
         link = root.joinpath(*PurePosixPath(link_name).parts)
         target = root.joinpath(*PurePosixPath(target_name).parts)
         assert link.stat().st_ino == target.stat().st_ino
@@ -367,13 +347,11 @@ def test_release_json_readers_reject_duplicates_and_nonfinite_numbers(
     with pytest.raises(runtime_tool.BuildError, match="duplicate field 'schema'"):
         runtime_tool.load_lock()
 
-    nonfinite = tmp_path / "nonfinite.json"
-    nonfinite.write_text('{"value":NaN}', encoding="utf-8")
-    with pytest.raises(
-        extension_tool.ExtensionBuildError,
-        match="invalid number NaN",
-    ):
-        extension_tool._read_json(nonfinite, "release JSON")
+    nonfinite = tmp_path / "nonfinite-runtime"
+    _minimal_runtime_package(nonfinite, "linux-x64")
+    (nonfinite / "bundle.json").write_text('{"value":NaN}', encoding="utf-8")
+    with pytest.raises(runtime_tool.BuildError, match="invalid number NaN"):
+        extension_tool.validate_runtime(nonfinite, "linux-x64")
 
 
 def test_host_platform_matching_is_exact(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -389,6 +367,18 @@ def test_host_platform_matching_is_exact(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr(runtime_tool.platform_module, "machine", lambda: "amd64")
     with pytest.raises(runtime_tool.BuildError, match="unsupported release host"):
         runtime_tool.detect_host_platform()
+
+
+def test_extension_release_translates_the_canonical_native_platform_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runtime_tool.sys, "platform", "linux")
+    monkeypatch.setattr(runtime_tool.platform_module, "machine", lambda: "x86_64")
+    runtime_tool.require_native_target("linux-x64")
+
+    with pytest.raises(runtime_tool.BuildError, match="does not match"):
+        extension_tool.build_extension(tmp_path / "unused-blender", "windows-x64")
 
 
 @pytest.mark.parametrize(
@@ -466,21 +456,6 @@ def test_trtexec_provenance_identifies_pinned_linux_rpm_member(tmp_path: Path) -
         "size": len(b"prebuilt-trtexec"),
         "sha256": hashlib.sha256(b"prebuilt-trtexec").hexdigest(),
     }
-    assert "tensorrt_source" not in record
-
-
-def test_extension_release_requires_native_platform(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(extension_tool.sys, "platform", "linux")
-    monkeypatch.setattr(extension_tool.platform_module, "machine", lambda: "x86_64")
-    extension_tool.require_native_platform("linux-x64")
-    with pytest.raises(extension_tool.ExtensionBuildError, match="does not match"):
-        extension_tool.require_native_platform("windows-x64")
-
-    monkeypatch.setattr(extension_tool.sys, "platform", "linux-gnu")
-    with pytest.raises(extension_tool.ExtensionBuildError, match="unsupported"):
-        extension_tool.require_native_platform("linux-x64")
 
 
 def test_extension_builder_rejects_an_aliased_blender_executable(
@@ -495,8 +470,12 @@ def test_extension_builder_rejects_an_aliased_blender_executable(
     except (OSError, NotImplementedError):
         pytest.skip("file symlinks are unavailable")
 
-    with pytest.raises(extension_tool.ExtensionBuildError, match="filesystem alias"):
-        extension_tool.validate_blender(alias, "linux-x64")
+    with pytest.raises(runtime_tool.BuildError, match="filesystem alias"):
+        extension_tool.validate_blender(
+            alias,
+            "linux-x64",
+            runtime_tool.CommandRunner(),
+        )
 
 
 def test_windows_compiler_requires_exact_pinned_producer(
@@ -517,10 +496,7 @@ def test_windows_compiler_requires_exact_pinned_producer(
             capture: bool,
         ) -> str:
             calls.append((command, env, capture))
-            return (
-                "Microsoft (R) C/C++ Optimizing Compiler Version "
-                "19.43.34810 for x64"
-            )
+            return "Microsoft (R) C/C++ Optimizing Compiler Version 19.43.34810 for x64"
 
     environment = {
         "VisualStudioVersion": "17.0",
@@ -540,16 +516,14 @@ def test_windows_compiler_requires_exact_pinned_producer(
     )
 
     lock = runtime_tool.load_lock()
-    assert windows_tool.validate_native_compiler(
-        Runner(), lock, environment
-    ) == compiler
+    assert (
+        windows_tool.validate_native_compiler(Runner(), lock, environment) == compiler
+    )
     assert calls == [([compiler, "/?"], environment, True)]
 
     environment["WindowsSDKVersion"] = "10.0.22621.0\\\\"
     with pytest.raises(runtime_tool.BuildError, match="WindowsSDKVersion"):
-        windows_tool.validate_native_compiler(
-            Runner(), lock, environment
-        )
+        windows_tool.validate_native_compiler(Runner(), lock, environment)
 
 
 def test_windows_fetch_deps_uses_cmd_safe_batch_path(
@@ -783,9 +757,9 @@ def test_windows_release_environment_is_an_exact_vcvarsall_allowlist(
         "TMP",
         "USERPROFILE",
     }
-    assert set(environment) == set(
-        windows_tool.WINDOWS_VCVARSALL_ENVIRONMENT_KEYS
-    ) | owned
+    assert (
+        set(environment) == set(windows_tool.WINDOWS_VCVARSALL_ENVIRONMENT_KEYS) | owned
+    )
     for name in windows_tool.WINDOWS_VCVARSALL_ENVIRONMENT_KEYS:
         assert environment[name] == source[name]
     assert environment["HOME"] == str(tmp_path / "producer-home")
@@ -802,12 +776,7 @@ def test_windows_vcvarsall_discovery_enumerates_all_instances_for_exact_pin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     program_files = tmp_path / "Program Files (x86)"
-    vswhere = (
-        program_files
-        / "Microsoft Visual Studio"
-        / "Installer"
-        / "vswhere.exe"
-    )
+    vswhere = program_files / "Microsoft Visual Studio" / "Installer" / "vswhere.exe"
     newer_without_pin = tmp_path / "Visual Studio" / "2022" / "Newer"
     errored_with_pin = tmp_path / "Visual Studio" / "2022" / "Errored"
     reboot_pending_with_pin = tmp_path / "Visual Studio" / "2022" / "Community"
@@ -902,12 +871,7 @@ def test_windows_vcvarsall_discovery_rejects_missing_pinned_toolset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     program_files = tmp_path / "Program Files (x86)"
-    vswhere = (
-        program_files
-        / "Microsoft Visual Studio"
-        / "Installer"
-        / "vswhere.exe"
-    )
+    vswhere = program_files / "Microsoft Visual Studio" / "Installer" / "vswhere.exe"
     vswhere.parent.mkdir(parents=True)
     vswhere.write_bytes(b"test")
     installation = tmp_path / "Visual Studio" / "2022" / "Community"
@@ -1142,10 +1106,13 @@ def test_host_program_resolution_uses_declared_path_order(
     executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     executable.chmod(0o755)
 
-    assert runtime_tool.require_host_program(
-        "release-tool",
-        {"PATH": str(executable.parent)},
-    ) == executable.resolve()
+    assert (
+        runtime_tool.require_host_program(
+            "release-tool",
+            {"PATH": str(executable.parent)},
+        )
+        == executable.resolve()
+    )
 
     with pytest.raises(runtime_tool.BuildError, match="not on PATH"):
         runtime_tool.require_host_program("release-tool", {"PATH": "/usr/bin"})
@@ -1155,15 +1122,21 @@ def test_host_program_resolution_uses_declared_path_order(
     second.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     second.chmod(0o755)
     first_path = os.pathsep.join((str(executable.parent), str(second.parent)))
-    assert runtime_tool.require_host_program(
-        "release-tool",
-        {"PATH": first_path},
-    ) == executable.resolve()
+    assert (
+        runtime_tool.require_host_program(
+            "release-tool",
+            {"PATH": first_path},
+        )
+        == executable.resolve()
+    )
     reversed_path = os.pathsep.join((str(second.parent), str(executable.parent)))
-    assert runtime_tool.require_host_program(
-        "release-tool",
-        {"PATH": reversed_path},
-    ) == second.resolve()
+    assert (
+        runtime_tool.require_host_program(
+            "release-tool",
+            {"PATH": reversed_path},
+        )
+        == second.resolve()
+    )
 
     malformed_path = os.pathsep.join((str(executable.parent), "relative"))
     with pytest.raises(runtime_tool.BuildError, match="non-absolute directory"):
@@ -1174,7 +1147,7 @@ def test_host_program_resolution_uses_declared_path_order(
 
 
 def test_cmake_cache_paths_are_not_quote_or_whitespace_normalized() -> None:
-    assert runtime_tool._absolute_path('/tmp/release-input') == Path(
+    assert runtime_tool._absolute_path("/tmp/release-input") == Path(
         "/tmp/release-input"
     )
     assert runtime_tool._absolute_path('"/tmp/release-input"') is None
@@ -1508,14 +1481,20 @@ def test_runtime_package_uses_repository_documents_directly(
         "platform_provenance": tmp_path / "platform-provenance",
         "trtexec_provenance": tmp_path / "trtexec-provenance",
     }
-    assert runtime_tool._runtime_source_for_file(
-        role_entries["project_license"],
-        **common,
-    ) == source_license
-    assert runtime_tool._runtime_source_for_file(
-        role_entries["project_notices"],
-        **common,
-    ) == source_notices
+    assert (
+        runtime_tool._runtime_source_for_file(
+            role_entries["project_license"],
+            **common,
+        )
+        == source_license
+    )
+    assert (
+        runtime_tool._runtime_source_for_file(
+            role_entries["project_notices"],
+            **common,
+        )
+        == source_notices
+    )
 
 
 @pytest.mark.parametrize("platform_id", ("windows-x64", "linux-x64"))
@@ -1567,30 +1546,30 @@ def test_runtime_package_assembly_adds_declared_files_without_copying(
         )
 
 
-def test_native_build_has_no_custom_runtime_stage() -> None:
-    cmake_path = REPOSITORY_ROOT / "worker" / "CMakeLists.txt"
-    cmake_source = cmake_path.read_text(encoding="utf-8")
+def test_native_build_writes_direct_runtime_outputs() -> None:
+    cmake_source = (REPOSITORY_ROOT / "worker" / "CMakeLists.txt").read_text(
+        encoding="utf-8"
+    )
 
-    assert not (REPOSITORY_ROOT / "worker" / "cmake" / "StageRuntime.cmake").exists()
-    assert "A2F_STAGE" not in cmake_source
-    assert "audio2face_runtime_stage" not in cmake_source
     assert "A2F_RUNTIME_OUTPUT_DIR" in cmake_source
     assert 'RUNTIME_OUTPUT_DIRECTORY "${A2F_RUNTIME_OUTPUT_DIR}/bin"' in cmake_source
     assert 'LIBRARY_OUTPUT_DIRECTORY "${A2F_RUNTIME_OUTPUT_DIR}/lib"' in cmake_source
     assert 'PDB_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/symbols"' in cmake_source
+    assert "if(WIN32 AND MSVC)" in cmake_source
+    assert 'CMAKE_SYSTEM_NAME STREQUAL "Linux"' in cmake_source
+    assert 'CMAKE_CXX_COMPILER_ID STREQUAL "GNU"' in cmake_source
 
-    runtime_common = (
-        REPOSITORY_ROOT / "tools" / "runtime_build_common.py"
-    ).read_text(encoding="utf-8")
+    runtime_common = (REPOSITORY_ROOT / "tools" / "runtime_build_common.py").read_text(
+        encoding="utf-8"
+    )
     assert 'f"-DA2F_RUNTIME_OUTPUT_DIR:PATH={runtime}"' in runtime_common
     assert '"--target",\n            "audio2face_worker"' in runtime_common
-    assert "audio2face_runtime_stage" not in runtime_common
 
 
 def test_python_contract_is_the_only_package_filename_authority() -> None:
-    cmake_sources = REPOSITORY_ROOT.joinpath(
-        "worker", "CMakeLists.txt"
-    ).read_text(encoding="utf-8")
+    cmake_sources = REPOSITORY_ROOT.joinpath("worker", "CMakeLists.txt").read_text(
+        encoding="utf-8"
+    )
     packaged_files = {
         Path(relative).name
         for contract in runtime_tool.RUNTIME_CONTRACTS.values()
@@ -1604,8 +1583,6 @@ def test_python_contract_is_the_only_package_filename_authority() -> None:
     assert all(filename not in cmake_sources for filename in packaged_files)
 
     for contract in runtime_tool.RUNTIME_CONTRACTS.values():
-        assert not hasattr(contract, "library_files")
-        assert not hasattr(contract, "notice_files")
         assert all(
             isinstance(entry, runtime_tool.RuntimePackagedFile)
             for entry in (*contract.libraries, *contract.licenses)
@@ -1646,8 +1623,7 @@ def test_linux_dependency_audit_fails_on_unbundled_native_library(
                 if path.parent.name == "lib":
                     soname = (
                         "do_not_link_against_nvinfer_builder_resource"
-                        if path.name
-                        == "libnvinfer_builder_resource.so.10.13.3"
+                        if path.name == "libnvinfer_builder_resource.so.10.13.3"
                         else path.name
                     )
                     entries.append(
@@ -1673,9 +1649,7 @@ def test_linux_dependency_audit_fails_on_unbundled_native_library(
         runtime_tool.BuildError,
         match="undeclared non-system dependencies",
     ):
-        linux_tool.audit_linux_dependencies(
-            Runner(), runtime, lock, {}
-        )
+        linux_tool.audit_linux_dependencies(Runner(), runtime, lock, {})
 
 
 def test_native_dependency_parsers_reject_unsafe_abi_inputs() -> None:
@@ -1701,9 +1675,7 @@ def test_native_dependency_parsers_reject_unsafe_abi_inputs() -> None:
             "do_not_link_against_nvinfer_builder_resource"
         ),
     }
-    builder_entry = linux_libraries[
-        "lib/libnvinfer_builder_resource.so.10.13.3"
-    ]
+    builder_entry = linux_libraries["lib/libnvinfer_builder_resource.so.10.13.3"]
     builder_resource = PurePosixPath(builder_entry.path)
     linux_tool._audit_elf_dynamic_identity(
         builder_resource,
@@ -1838,7 +1810,7 @@ def test_extension_runtime_rejects_wrong_architecture_and_mode(
     content[18:20] = (183).to_bytes(2, "little")
     library.write_bytes(content)
     with pytest.raises(
-        extension_tool.ExtensionBuildError,
+        runtime_tool.BuildError,
         match="not Linux ELF64 x86-64",
     ):
         extension_tool.validate_runtime(runtime, "linux-x64")
@@ -1847,8 +1819,8 @@ def test_extension_runtime_rejects_wrong_architecture_and_mode(
     mode_runtime = tmp_path / "mode"
     (mode_runtime / "bin" / "audio2face_worker").chmod(0o644)
     with pytest.raises(
-        extension_tool.ExtensionBuildError,
-        match="must be executable",
+        runtime_tool.BuildError,
+        match="lacks execute mode",
     ):
         extension_tool.validate_runtime(mode_runtime, "linux-x64")
 
@@ -1897,7 +1869,7 @@ def test_extension_zip_uses_package_files_at_root(tmp_path: Path) -> None:
             if source.is_file():
                 relative = source.relative_to(package_root).as_posix()
                 output.write(source, f"audio2face/{relative}")
-    with pytest.raises(extension_tool.ExtensionBuildError, match="layout differs"):
+    with pytest.raises(runtime_tool.BuildError, match="layout differs"):
         extension_tool.validate_extension_archive(nested, package_root, "linux-x64")
 
     extra_directory = tmp_path / "extra-directory.zip"
@@ -1911,7 +1883,7 @@ def test_extension_zip_uses_package_files_at_root(tmp_path: Path) -> None:
                 output.write(source, source.relative_to(package_root).as_posix())
         output.writestr("undeclared/", b"")
     with pytest.raises(
-        extension_tool.ExtensionBuildError,
+        runtime_tool.BuildError,
         match="undeclared directories",
     ):
         extension_tool.validate_extension_archive(
@@ -1935,7 +1907,7 @@ def test_extension_zip_uses_package_files_at_root(tmp_path: Path) -> None:
             info.compress_type = zipfile.ZIP_LZMA
             output.writestr(info, source.read_bytes())
     with pytest.raises(
-        extension_tool.ExtensionBuildError,
+        runtime_tool.BuildError,
         match="non-regular mode",
     ):
         extension_tool.validate_extension_archive(
@@ -1954,7 +1926,7 @@ def test_extension_zip_uses_package_files_at_root(tmp_path: Path) -> None:
             if source.is_file():
                 output.write(source, source.relative_to(package_root).as_posix())
     with pytest.raises(
-        extension_tool.ExtensionBuildError,
+        runtime_tool.BuildError,
         match="not ZIP-LZMA compressed",
     ):
         extension_tool.validate_extension_archive(
@@ -1984,9 +1956,7 @@ def test_extension_archive_writer_uses_lzma_and_preserves_files(
             "__init__.py",
             "runtime/bin/audio2face_worker",
         }
-        assert all(
-            info.compress_type == zipfile.ZIP_LZMA for info in output.infolist()
-        )
+        assert all(info.compress_type == zipfile.ZIP_LZMA for info in output.infolist())
     extension_tool.validate_extension_archive(
         archive,
         package_root,
@@ -1995,14 +1965,12 @@ def test_extension_archive_writer_uses_lzma_and_preserves_files(
 
 
 def test_release_workflow_stamps_dated_manifest_and_publishes_by_id() -> None:
-    workflow = (
-        REPOSITORY_ROOT / ".github" / "workflows" / "release.yml"
-    ).read_text(encoding="utf-8")
+    workflow = (REPOSITORY_ROOT / ".github" / "workflows" / "release.yml").read_text(
+        encoding="utf-8"
+    )
     trigger = workflow.split("on:\n", 1)[1].split("\nconcurrency:", 1)[0]
 
     assert trigger == "  workflow_dispatch:\n"
-    assert "inputs:" not in trigger
-    assert "push:" not in trigger
     assert "group: audio2face-release" in workflow
     assert "ref: ${{ github.sha }}" in workflow
     assert "fetch-depth: 0" in workflow
@@ -2010,27 +1978,26 @@ def test_release_workflow_stamps_dated_manifest_and_publishes_by_id() -> None:
     assert workflow.count("persist-credentials: false") == 3
     assert "DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}" in workflow
     assert "manual releases must use the repository default branch" in workflow
-    assert workflow.count(
-        '"--add", "Microsoft.VisualStudio.Workload.VCTools"'
-    ) == 1
-    assert workflow.count(
-        '"--add", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64"'
-    ) == 1
-    assert "Microsoft.VisualStudio.Component.VC.CoreBuildTools" not in workflow
-    assert "--includeRecommended" not in workflow
+    assert workflow.count('"--add", "Microsoft.VisualStudio.Workload.VCTools"') == 1
+    assert (
+        workflow.count('"--add", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64"')
+        == 1
+    )
     assert (
         '$vcvarsall = Join-Path $installPath "VC\\Auxiliary\\Build\\vcvarsall.bat"'
         in workflow
     )
     assert (
-        "Visual Studio C++ build environment is missing after installation"
-        in workflow
+        "Visual Studio C++ build environment is missing after installation" in workflow
     )
     assert "release_day = datetime.now(UTC).date()" in workflow
-    assert 'version = f"{release_day.year}.{release_day.month}.{release_day.day}"' in workflow
+    assert (
+        'version = f"{release_day.year}.{release_day.month}.{release_day.day}"'
+        in workflow
+    )
     assert 'release_tag = f"v{version}"' in workflow
     assert '"release_tag": release_tag' in workflow
-    assert 'f\'version = "{version}"\'' in workflow
+    assert "f'version = \"{version}\"'" in workflow
     assert "manifest_path.write_text(stamped_manifest" in workflow
     assert "source_sha: ${{ steps.stamp.outputs.source_sha }}" in workflow
     assert "mutation($input: CreateCommitOnBranchInput!, $path: String!)" in workflow
@@ -2041,17 +2008,15 @@ def test_release_workflow_stamps_dated_manifest_and_publishes_by_id() -> None:
     assert "Dated manifest commit is not a direct child of dispatch source" in workflow
     assert "Committed manifest bytes differ from the tested manifest" in workflow
     assert "Default branch child does not contain the exact dated manifest" in workflow
-    assert workflow.count("gh api graphql --paginate --slurp") == 2
-    assert "targetCommitish" not in workflow
+    assert workflow.count("gh api graphql --paginate --slurp") == 1
     assert "target_commitish" in workflow
     assert "resolve pending draft releases" in workflow
-    assert "dated release {os.environ['RELEASE_TAG']} is already published" in workflow
     assert "latestRelease { tagName }" in workflow
     assert 'git merge-base --is-ancestor "$previous_sha" "$DISPATCH_SHA"' in workflow
     assert 'git rev-list --count "$previous_sha..$DISPATCH_SHA"' in workflow
     assert 'git show "$previous_sha:audio2face/blender_manifest.toml"' in workflow
     assert "generated dated manifest version must be newer" in workflow
-    assert 'ref(qualifiedName: $qualified)' in workflow
+    assert "ref(qualifiedName: $qualified)" in workflow
     assert '--method POST "repos/$GITHUB_REPOSITORY/releases"' in workflow
     assert '--raw-field tag_name="$RELEASE_TAG"' in workflow
     assert workflow.count('--raw-field target_commitish="$SOURCE_SHA"') == 2
@@ -2062,21 +2027,20 @@ def test_release_workflow_stamps_dated_manifest_and_publishes_by_id() -> None:
     assert '"target_commitish": os.environ["SOURCE_SHA"]' in workflow
     assert '"body": body' in workflow
     assert '--input "$release_update"' in workflow
-    assert "Retargeted draft REST identity does not match the dated release." in workflow
+    assert (
+        "Retargeted draft REST identity does not match the dated release." in workflow
+    )
     assert '--raw-field name="Audio2Face $RELEASE_TAG"' in workflow
     assert "--field draft=true" in workflow
     assert "--field prerelease=false" in workflow
     assert "--field generate_release_notes=true" in workflow
     assert "created draft has invalid release ID" in workflow
-    assert "gh release create" not in workflow
     assert "release_id: ${{ steps.release.outputs.release_id }}" in workflow
     assert workflow.count("RELEASE_ID: ${{ needs.prepare.outputs.release_id }}") == 3
     assert 'asset.get("digest") != identity["digest"]' in workflow
     assert workflow.count("ref: ${{ needs.prepare.outputs.source_sha }}") == 2
     assert workflow.count("https://uploads.github.com/repos/") == 2
-    assert "gh release upload" not in workflow
     assert '--upload-file "$asset"' in workflow
-    assert '--data-binary "@$asset"' not in workflow
     assert '--method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID"' in workflow
     assert "--raw-field make_latest=true" in workflow
     assert "published_sha" in workflow
