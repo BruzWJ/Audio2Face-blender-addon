@@ -37,10 +37,33 @@ def test_output_keeps_model_order_and_named_eye_resolution() -> None:
     assert len(set(re.findall(r'"(eyeLook[A-Za-z]+)"', resolver.group(0)))) == 8
 
 
-def test_results_carry_the_model_channel_order() -> None:
-    assert '{{"schema", "a2f-animation/2"}' in SOURCE
+def test_stream_frames_carry_the_model_channel_order() -> None:
     assert '{"channels", output_channels_}' in SOURCE
-    assert "kMaximumResultScalars / output_channels_.size()" in SOURCE
+    assert "capture.weight_count = executor().GetWeightCount()" in SOURCE
+    assert "pending.weights->Data()[channel]" in SOURCE
+    assert "frame_callback(StreamFrame{timestamp, std::move(arkit)})" in SOURCE
+    assert "a2f-animation/2" not in SOURCE
+
+
+def test_arkit_solve_uses_the_model_owned_default_identity() -> None:
+    assert "constexpr std::size_t kDefaultIdentityIndex = 0" in SOURCE
+    assert "ReadDiffusionBlendshapeSolveModelInfo(" in SOURCE
+    assert "blendshape_parameters.initializationSkinParams" in SOURCE
+    assert "ReadDiffusionBlendshapeSolveExecutorBundle(" in SOURCE
+    assert "kDefaultIdentityIndex, true" in SOURCE
+    assert "target_mesh" not in SOURCE
+    assert "vertex_count" not in SOURCE
+
+
+def test_callbacks_follow_the_sdk_result_stream_contract() -> None:
+    restore = SOURCE.index("geometry->SetExecutionOption(execution_option)")
+    geometry_callback = SOURCE.index("SetExecutorGeometryResultsCallback(")
+    weights_callback = SOURCE.index("executor.SetResultsCallback(")
+    assert restore < geometry_callback < weights_callback
+    assert "results.eyesRotation, results.eyesCudaStream" in SOURCE
+    assert "results.weights, results.cudaStream" in SOURCE
+    assert "results.eyesCudaStream !=" not in SOURCE
+    assert "results.cudaStream !=" not in SOURCE
 
 
 def test_worker_configures_the_sdk_from_one_optional_preferred_snapshot() -> None:

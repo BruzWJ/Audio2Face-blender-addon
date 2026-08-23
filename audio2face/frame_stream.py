@@ -11,7 +11,7 @@ def sample_linear(
     weights: Sequence[Sequence[float]],
     sample_position: float,
 ) -> tuple[float, ...]:
-    """Sample a result-loader-validated frame matrix by its timestamp clock."""
+    """Sample a validated model-frame matrix by its timestamp clock."""
 
     if sample_position <= timestamps_samples[0]:
         return tuple(float(value) for value in weights[0])

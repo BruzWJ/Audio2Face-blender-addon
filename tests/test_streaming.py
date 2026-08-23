@@ -8,15 +8,15 @@ import pytest
 from audio2face import streaming
 
 
-@pytest.mark.parametrize("requirements", [None, (16_000, 60_000)])
+@pytest.mark.parametrize("requirements", [(16_000, None), (16_000, 60_000)])
 def test_public_pcm_requirements_use_explicit_scene(
     monkeypatch: pytest.MonkeyPatch,
-    requirements: tuple[int, int] | None,
+    requirements: tuple[int, int | None],
 ) -> None:
     scene = object()
     calls: list[object] = []
     controller = SimpleNamespace(
-        pcm_stream_requirements=lambda scene: calls.append(scene) or requirements
+        pcm_stream_requirements=lambda value: calls.append(value) or requirements
     )
     runtime = ModuleType("audio2face.runtime")
     runtime.get_controller = lambda: controller  # type: ignore[attr-defined]
@@ -24,43 +24,55 @@ def test_public_pcm_requirements_use_explicit_scene(
 
     assert streaming.get_pcm_stream_requirements(scene) == requirements
     assert calls == [scene]
-    assert "get_pcm_stream_requirements" in streaming.__all__
 
 
-def test_public_pcm_push_forwards_exact_bytes_and_operation_id(
+def test_first_public_pcm_push_needs_no_start_or_operation_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[tuple[bytes, str]] = []
     controller = SimpleNamespace(
-        push_stream_audio=lambda payload, *, operation_id: (
-            calls.append((payload, operation_id)) or "request-1"
+        queue_pcm_audio=lambda payload, *, scene_name: calls.append(
+            (payload, scene_name)
         )
     )
     runtime = ModuleType("audio2face.runtime")
     runtime.get_controller = lambda: controller  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, runtime.__name__, runtime)
 
-    payload = b"\x00\x00\x00\x00"
-    assert (
-        streaming.push_audio_f32le(payload, operation_id="stream-1")
-        == "request-1"
-    )
-    assert calls == [(payload, "stream-1")]
+    payload = bytes(4)
+    assert streaming.push_audio_f32le(payload, scene_name="Scene") is None
+    assert calls == [(payload, "Scene")]
+    assert "start_pcm_stream" not in streaming.__all__
 
 
 @pytest.mark.parametrize("payload", [bytearray(4), memoryview(bytes(4))])
 def test_public_pcm_push_rejects_bytes_aliases(payload: object) -> None:
     with pytest.raises(TypeError, match="exact bytes"):
-        streaming.push_audio_f32le(payload, operation_id="stream-1")
+        streaming.push_audio_f32le(payload, scene_name="Scene")
 
 
 @pytest.mark.parametrize(
-    ("operation_id", "error_type"),
-    [(b"stream-1", TypeError), ("", ValueError)],
+    ("scene_name", "error_type"),
+    [(b"Scene", TypeError), ("", ValueError)],
 )
-def test_public_pcm_push_requires_nonempty_exact_operation_id(
-    operation_id: object,
+def test_public_pcm_push_requires_nonempty_exact_scene_name(
+    scene_name: object,
     error_type: type[Exception],
 ) -> None:
     with pytest.raises(error_type):
-        streaming.push_audio_f32le(bytes(4), operation_id=operation_id)
+        streaming.push_audio_f32le(bytes(4), scene_name=scene_name)
+
+
+def test_end_marks_the_same_scene_input_complete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    controller = SimpleNamespace(
+        finish_pcm_audio=lambda *, scene_name: calls.append(scene_name)
+    )
+    runtime = ModuleType("audio2face.runtime")
+    runtime.get_controller = lambda: controller  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, runtime.__name__, runtime)
+
+    assert streaming.end_pcm_stream(scene_name="Scene") is None
+    assert calls == ["Scene"]

@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from typing import Any
 
 import bpy
 from bpy.props import (
@@ -18,17 +17,14 @@ from bpy.props import (
     StringProperty,
 )
 
-from .result_io import ResultValidationError, validate_output_channels
+from .shape_keys import ShapeKeyStreamError, validate_output_channels
 
 
 STATUS_ITEMS = (
     ("IDLE", "Idle", "No worker operation is active"),
     ("STARTING", "Starting", "Starting and handshaking with the worker"),
     ("LOADING_MODEL", "Loading Models", "Loading Audio2Face and Audio2Emotion"),
-    ("MODEL_READY", "Model Ready", "Model is ready for generation"),
-    ("GENERATING", "Generating", "Generating timestamped model channel values"),
-    ("CANCELLING", "Cancelling", "Cancellation has been requested"),
-    ("COMPLETED", "Completed", "A generated model channel stream is available"),
+    ("MODEL_READY", "Model Ready", "Model is ready for audio-driven inference"),
     ("STREAM_STARTING", "Starting Stream", "Preparing incremental PCM inference"),
     ("STREAMING", "Streaming", "Incremental PCM is driving model channel values"),
     ("STREAM_ENDING", "Ending Stream", "Draining the stream's final model frames"),
@@ -37,19 +33,13 @@ STATUS_ITEMS = (
 )
 
 
-def _mesh_object(_self: Any, obj: bpy.types.Object) -> bool:
-    return obj.type == "MESH"
-
-
 class A2FTargetMeshItem(bpy.types.PropertyGroup):
     """One mesh subscriber to the model-provided frame bus."""
 
-    enabled: BoolProperty(name="Enabled", default=True)
     object: PointerProperty(
         name="Face Mesh",
         description="Mesh whose Shape Keys receive model output values when available",
         type=bpy.types.Object,
-        poll=_mesh_object,
     )
 
 
@@ -75,16 +65,16 @@ class A2FEmotionValueItem(bpy.types.PropertyGroup):
 class A2FSceneSettings(bpy.types.PropertyGroup):
     input_mode: EnumProperty(
         name="Input Mode",
-        description="Process a complete selected WAV or infer from incremental PCM",
+        description="Play a selected WAV or receive incremental PCM",
         items=(
-            ("SELECTED", "Selected WAV", "Generate from a complete selected WAV file"),
+            ("SELECTED", "Selected WAV", "Play and infer from a selected WAV file"),
             ("STREAM", "Stream", "Drive Shape Keys from incremental mono float PCM"),
         ),
         default="SELECTED",
     )
     audio_path: StringProperty(
         name="Speech WAV",
-        description="WAV used by Selected mode or by the built-in streamed-WAV source",
+        description="WAV played and inferred in Selected mode",
         subtype="FILE_PATH",
     )
     auto_audio2emotion: BoolProperty(
@@ -121,7 +111,7 @@ class A2FSceneSettings(bpy.types.PropertyGroup):
     )
     a2e_live_blend_coef: FloatProperty(
         name="Smoothing",
-        description="Influence of the preceding generated emotion on the next result",
+        description="Influence of the preceding generated emotion on the next frame",
         default=0.7,
         min=0.0,
         max=1.0,
@@ -150,7 +140,7 @@ class A2FSceneSettings(bpy.types.PropertyGroup):
     target_meshes: CollectionProperty(type=A2FTargetMeshItem)
     target_mesh_index: IntProperty(default=0, min=0)
 
-    preview_loop: BoolProperty(
+    playback_loop: BoolProperty(
         name="Loop",
         description="Loop selected audio and its model-provided channel stream",
         default=False,
@@ -163,24 +153,24 @@ class A2FSceneSettings(bpy.types.PropertyGroup):
         max=1.0,
         unit="TIME",
     )
-    preview_state: EnumProperty(
+    playback_state: EnumProperty(
         items=(
-            ("IDLE", "Idle", "Preview is stopped"),
-            ("PLAYING", "Playing", "Preview audio and Shape Keys are playing"),
-            ("PAUSED", "Paused", "Preview is paused on its current values"),
+            ("IDLE", "Idle", "Selected audio is stopped"),
+            ("PLAYING", "Playing", "Selected audio and Shape Keys are playing"),
+            ("PAUSED", "Paused", "Selected audio is paused on its current values"),
         ),
         default="IDLE",
         options={"HIDDEN", "SKIP_SAVE"},
     )
-    preview_time: FloatProperty(
-        name="Preview Time", default=0.0, min=0.0, unit="TIME", options={"SKIP_SAVE"}
+    playback_time: FloatProperty(
+        name="Playback Time", default=0.0, min=0.0, unit="TIME", options={"SKIP_SAVE"}
     )
-    preview_duration: FloatProperty(
-        name="Preview Duration", default=0.0, min=0.0, unit="TIME", options={"SKIP_SAVE"}
+    playback_duration: FloatProperty(
+        name="Playback Duration", default=0.0, min=0.0, unit="TIME", options={"SKIP_SAVE"}
     )
-    preview_progress: FloatProperty(
+    playback_progress: FloatProperty(
         name="Playback Position",
-        description="Seek within the selected audio result",
+        description="Seek within the selected audio playback",
         default=0.0,
         min=0.0,
         max=1.0,
@@ -206,17 +196,6 @@ class A2FSceneSettings(bpy.types.PropertyGroup):
     )
     status_message: StringProperty(
         name="Message", default="Worker is stopped", options={"SKIP_SAVE"}
-    )
-    result_operation_id: StringProperty(options={"HIDDEN", "SKIP_SAVE"})
-    result_path: StringProperty(options={"HIDDEN", "SKIP_SAVE"})
-    result_audio_path: StringProperty(options={"HIDDEN", "SKIP_SAVE"})
-    progress: FloatProperty(
-        name="Progress",
-        default=0.0,
-        min=0.0,
-        max=1.0,
-        subtype="FACTOR",
-        options={"SKIP_SAVE"},
     )
 
 
@@ -379,7 +358,7 @@ def apply_model_schema(
         raise ValueError("worker returned a noncanonical model_schema object")
     try:
         channels = validate_output_channels(model_schema["channels"])
-    except ResultValidationError as exc:
+    except ShapeKeyStreamError as exc:
         raise ValueError(f"worker returned invalid output channels: {exc}") from exc
     emotions = _validated_emotion_descriptors(model_schema["emotion_channels"])
     signature = _schema_signature(model_signature, model_schema)

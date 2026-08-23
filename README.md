@@ -10,7 +10,7 @@ obtained separately.
 
 The extension produces 52-channel ARKit coefficients from a selected WAV or
 incremental mono float32 PCM. It drives existing Shape Key `value`
-properties on enabled mesh targets. It does not write vertices, bones,
+properties on listed mesh targets. It does not write vertices, bones,
 Actions, F-curves, or baked animation.
 
 ## Requirements
@@ -33,6 +33,21 @@ with PE executables and their DLLs together in `runtime/bin`, and one complete
 Linux x64 extension ZIP with ELF executables in `runtime/bin` and shared
 objects in `runtime/lib`. These native formats are not interchangeable. This
 CUDA backend requires NVIDIA hardware and has no macOS or ARM build.
+
+## Installation
+
+Install the downloaded platform ZIP into a **local** Blender extension
+repository. In **Preferences > Get Extensions**, open the Repositories menu.
+If **User Default** is missing, choose **Add Local Repository** and name it
+`User Default`; do not give it a remote URL. Then choose **Install from Disk**,
+expand **Extensions** in the file browser, set **Repository** to
+**User Default**, and select the ZIP.
+
+Do not install a downloaded ZIP into `extensions.blender.org`. That repository
+is the catalog of packages published by Blender, and Audio2Face is not in its
+index. Blender labels any locally installed package missing from that remote
+index as **Orphan**. If Audio2Face already has that label, uninstall that copy
+and repeat the installation into **User Default**.
 
 ## Model setup
 
@@ -95,13 +110,14 @@ driver caches.
 
 ## Workflow
 
-1. Install the extension ZIP for the current platform, enable Audio2Face, then
-   select and optimize both models in Add-on Preferences.
+1. Install the extension ZIP for the current platform into the local **User
+   Default** repository, enable Audio2Face, then select and optimize both models
+   in Add-on Preferences.
 2. In the Audio2Face sidebar, choose **Selected WAV** or **Stream**. The
-   **Audio Playback** controls appear immediately below this mode selector.
-3. Choose a WAV for complete generation or for the built-in streamed-WAV
-   source. A Blender integration can use Stream mode without a WAV by pushing
-   live mono f32le PCM through [`audio2face.streaming`](audio2face/streaming.py).
+   **Playback** controls appear immediately below this mode selector.
+3. In Selected WAV mode, choose a WAV. In Stream mode, a Blender integration
+   supplies live mono f32le PCM through
+   [`audio2face.streaming`](audio2face/streaming.py).
 4. Select any mesh objects and click **Add Selected Meshes**. Shape Keys are
    not required when a mesh is added.
 5. Click **Start Worker**. Blender launches the verified package-local worker,
@@ -111,23 +127,28 @@ driver caches.
    it to infer emotion from the same audio. **Load** under **Preferred Emotion**
    captures the current manual sliders for mixing with generated emotion;
    **Clear** removes that captured preference.
-7. In Selected WAV mode, click **Generate ARKit Values**, then use the single
-   **Play/Pause** control. In Stream mode, click **Start WAV Stream** or submit
-   live PCM through the integration API.
-8. **Stop Stream** ends only the active stream and keeps the loaded model
-   ready. **Stop Worker** exits the child process and releases its model and
-   CUDA resources.
+7. In Selected WAV mode, press **Play**. Playback automatically starts
+   incremental inference and drives matching Shape Keys as frames arrive.
+   **Pause** freezes both audio and source pacing; seek, rewind, and loop restart
+   the inference stream at the requested position without restarting the
+   worker.
+8. In Stream mode, the first `push_audio_f32le` call automatically starts the
+   inference stream. `end_pcm_stream` marks normal end-of-input after all
+   queued chunks. **Stop Worker** exits the child process and releases its
+   models and CUDA resources.
 
 Installing or enabling the extension does not start the worker. Loading the
-models does not start continuous inference. GPU inference runs only for an
-explicit generation operation or active PCM stream. A completed Selected WAV result
-can play after the worker has stopped.
+models does not start continuous inference. GPU inference runs only while
+Selected WAV playback or an external PCM stream is active. There is no manual
+generation step, cached animation result, or separate stream-start control.
+**Start Worker** and **Stop Worker** control the GPU/model process lifecycle;
+audio playback and PCM arrival control inference within that lifecycle.
 
 ## Mesh targets and channel delivery
 
-Every enabled target mesh subscribes to the model channel stream, with no
-Shape Key admission check. At each frame, Blender uses each exact
-model-provided channel name to look up a Shape Key on each target.
+Every mesh in the target list receives the model channel stream, with no Shape
+Key admission check. At each frame, Blender uses each exact model-provided
+channel name to look up a Shape Key on each listed target.
 If that key exists, its value is assigned; if it does not, that channel is
 skipped for that target. Names are never translated or remapped, and there is
 no per-target multiplier, bake step, or direct mesh deformation.
@@ -138,24 +159,37 @@ Shape Key datablock; delivery writes that shared datablock once per frame, so
 linked objects reflect the same values. Use single-user mesh data when objects
 need independent values.
 
+The selected Blender mesh does not need the Audio2Face reference topology.
+The default Audio2Face-3D v3.0 model repository carries its own
+identity-specific 24,002-vertex neutral basis and 52 pose bases. Inside the
+worker, NVIDIA's GPU blendshape solver converts the model's raw geometry output
+against that internal basis into 52 scalar coefficients. Only those named
+coefficients cross into Blender, where matching target Shape Keys receive the
+values and absent names are skipped. The model basis is never used to deform a
+Blender mesh directly.
+
 ## Audio modes and playback
 
-**Selected WAV** sends one complete RIFF/WAVE file to the worker. The worker
-decodes, downmixes, resamples, generates all frames, and atomically commits a
-strict result. **Audio Playback** uses Blender's audio-device clock to sample
-that result. It provides one stateful **Play/Pause** button, **Rewind**,
-**Loop**, a normalized scrub control mapped to the audio duration, an elapsed /
-duration timecode, and **Prediction Delay** from `-1.0` to `1.0` seconds. A
-positive delay samples facial output later in the result, advancing the face
-relative to audible playback; a negative value makes it lag. Playback volume,
-stop, and reset behavior are not exposed as separate controls.
+**Selected WAV** uses one stateful **Play/Pause** button. Pressing Play
+incrementally decodes, downmixes, and resamples the WAV, starts an internal
+`stream_start` / chunk / `stream_end` operation, and begins audible playback
+after the worker's required input lead is queued. ARKit frames are sampled
+against Blender's audio-device clock as they arrive. **Pause** freezes both
+audio and WAV pacing. **Rewind**, **Loop**, and the duration-based seek control
+restart that stream at the requested audio position while keeping the worker
+and models loaded. The elapsed / duration timecode and **Prediction Delay**
+from `-1.0` to `1.0` seconds remain playback controls. Positive delay advances
+facial motion relative to audible audio; negative delay makes it lag.
 
-**Stream** uses one `stream_start` / chunk / `stream_end` lifecycle. The
-built-in source incrementally decodes a selected WAV, resamples it to the model
-rate, and keeps a bounded lead over Blender audio playback. Integrations can
-instead call `start_pcm_stream`, poll `get_pcm_stream_requirements`, and submit
-model-rate mono f32le chunks. Those integrations own capture, resampling, and
-audible monitoring. No port or network listener is opened.
+**Stream** accepts external model-rate mono f32le chunks. Call
+`get_pcm_stream_requirements(scene)` to obtain `(sample_rate, None)` before
+input is accepted, then call `push_audio_f32le(payload, scene_name=...)`. The
+first chunk automatically creates the internal stream and is retained while
+the worker acknowledges it. Subsequent requirements return
+`(sample_rate, prebuffer_samples)`. Call
+`end_pcm_stream(scene_name=...)` to mark normal end-of-input after every queued
+chunk. The integration owns capture, resampling, and audible monitoring. No
+port or network listener is opened.
 
 The worker reports the initial model-rate `prebuffer_samples` requirement.
 With automatic emotion enabled, it covers both Audio2Face and Audio2Emotion
@@ -211,16 +245,13 @@ tensors are not controls.
 
 ## Output contract
 
-The worker reports the model's exact 52 unique channel names in
-model order. It resolves eye-look values into the corresponding
-model-provided channel slots without reordering the list. Raw geometry, jaw
-transforms, eye rotations, and other solver data are not serialized.
-
-Selected mode stores `a2f-animation/2` with exactly `schema`, `operation_id`,
-`sample_rate`, `channels`, `timestamps_samples`, and `weights`.
-Stream mode uses the same negotiated channel order for incremental frames and
-does not create a result file. Coefficients are finite and within `[0.0, 1.0]`;
-timestamps are integer audio-sample positions.
+The worker reports the default v3 model's exact 52 unique channel names in
+model order. It resolves eye-look values into the corresponding model-provided
+channel slots without reordering the list. Both modes receive incremental
+`stream_frame` records in that negotiated order. Coefficients are finite and
+within `[0.0, 1.0]`; timestamps are integer audio-sample positions. Raw
+geometry, jaw transforms, eye rotations, and internal solver meshes never
+leave the worker, and neither mode creates an animation result file.
 
 See [architecture](docs/architecture.md), [protocol](docs/protocol.md), and the
 [worker build guide](worker/README.md) for the full contracts.

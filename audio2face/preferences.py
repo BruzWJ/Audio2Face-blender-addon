@@ -12,8 +12,8 @@ class A2FAddonPreferences(bpy.types.AddonPreferences):
     bl_idname = __package__
 
     nvidia_terms_accepted: BoolProperty(
-        name="I accept the NVIDIA terms above",
-        description="Acknowledge the NVIDIA terms linked above",
+        name="I accept the NVIDIA terms",
+        description="Acknowledge the linked NVIDIA terms",
         default=False,
     )
     audio2face_model_directory: StringProperty(
@@ -45,17 +45,18 @@ class A2FAddonPreferences(bpy.types.AddonPreferences):
         engine_status = snapshot.engine_status
         can_optimize, blocked_reason = controller.optimization_eligibility(snapshot)
 
-        setup = layout.box()
+        setup = layout.column()
         setup.label(text="GPU Runtime & Models", icon="PREFERENCES")
 
-        terms = setup.operator("wm.url_open", text="NVIDIA Terms", icon="URL")
+        terms_row = setup.row(align=True)
+        terms = terms_row.operator("wm.url_open", text="NVIDIA Terms", icon="URL")
         terms.url = (
             "https://www.nvidia.com/en-us/agreements/enterprise-software/"
             "nvidia-open-model-license/"
         )
-        setup.prop(self, "nvidia_terms_accepted")
+        terms_row.prop(self, "nvidia_terms_accepted")
 
-        sources = setup.column(align=True)
+        sources = setup.row(align=True)
         for label, url in (
             ("Download Audio2Face", "https://huggingface.co/nvidia/Audio2Face-3D-v3.0"),
             (

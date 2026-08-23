@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 import bpy
 
-from .preview import get_preview_controller
+from .live_stream import get_live_stream_controller
 from .runtime import get_controller
 from .sidecar import Lifecycle
 from .ui_text import context_wrap_width, draw_wrapped_label
@@ -19,41 +19,34 @@ def _draw_audio_playback(
     layout: bpy.types.UILayout,
     settings: A2FSceneSettings,
 ) -> None:
-    """Draw the legacy player controls that apply to the current input mode."""
+    """Draw playback controls that apply to the current input mode."""
 
     if settings.input_mode == "SELECTED":
-        preview = get_preview_controller()
-        has_result = bool(
-            settings.result_path
-            and settings.result_operation_id
-            and settings.result_audio_path
-        )
+        playback = get_live_stream_controller()
         playback_box = layout.box()
         playback_box.label(text="Playback", icon="SPEAKER")
         playback_row = playback_box.row(align=True)
         play_button = playback_row.row(align=True)
-        play_button.enabled = has_result or preview.active
-        if settings.preview_state == "PLAYING":
+        if settings.playback_state == "PLAYING":
             play_button.operator(
-                "a2f.preview_play_pause", text="Pause", icon="PAUSE"
+                "a2f.play_pause", text="Pause", icon="PAUSE"
             )
-        elif settings.preview_state in {"IDLE", "PAUSED"}:
+        elif settings.playback_state in {"IDLE", "PAUSED"}:
             play_button.operator(
-                "a2f.preview_play_pause", text="Play", icon="PLAY"
+                "a2f.play_pause", text="Play", icon="PLAY"
             )
         else:
-            raise RuntimeError(f"invalid preview state {settings.preview_state!r}")
-        playback_row.operator("a2f.preview_rewind", text="", icon="REW")
-        playback_row.prop(settings, "preview_loop", text="Loop", toggle=True)
+            raise RuntimeError(f"invalid playback state {settings.playback_state!r}")
+        playback_row.operator("a2f.rewind", text="", icon="REW")
+        playback_row.prop(settings, "playback_loop", text="Loop", toggle=True)
 
-        if has_result or preview.active:
+        if playback.plays_audio:
             seek_row = playback_box.row()
-            seek_row.enabled = preview.active
-            seek_row.prop(settings, "preview_progress", text="", slider=True)
+            seek_row.prop(settings, "playback_progress", text="", slider=True)
             playback_box.label(
                 text=(
-                    f"{_timecode(settings.preview_time)} / "
-                    f"{_timecode(settings.preview_duration)}"
+                    f"{_timecode(settings.playback_time)} / "
+                    f"{_timecode(settings.playback_duration)}"
                 )
             )
         playback_box.prop(settings, "prediction_delay")
@@ -92,9 +85,11 @@ class A2F_UL_target_meshes(bpy.types.UIList):
         _index: int = 0,
         _flt_flag: int = 0,
     ) -> None:
-        row = layout.row(align=True)
-        row.prop(item, "enabled", text="")
-        row.prop(item, "object", text="")
+        target = item.object
+        layout.label(
+            text=target.name if target is not None else "Missing Mesh",
+            icon="OUTLINER_OB_MESH" if target is not None else "ERROR",
+        )
 
 
 class A2F_PT_main(bpy.types.Panel):
@@ -133,8 +128,6 @@ class A2F_PT_main(bpy.types.Panel):
         visible_statuses = {
             "STARTING",
             "LOADING_MODEL",
-            "GENERATING",
-            "CANCELLING",
             "STREAM_STARTING",
             "STREAM_ENDING",
             "STOPPING",
@@ -149,9 +142,6 @@ class A2F_PT_main(bpy.types.Panel):
                 width=text_width,
                 icon="ERROR" if settings.status == "ERROR" else "TIME",
             )
-        if settings.status in {"GENERATING", "CANCELLING"}:
-            status_box.prop(settings, "progress", text="Progress", slider=True)
-
         if controller.optimization_in_progress:
             runtime_box = layout.box()
             draw_wrapped_label(
@@ -170,6 +160,37 @@ class A2F_PT_main(bpy.types.Panel):
                 icon="ERROR",
             )
             runtime_box.label(text="Configure in Add-on Preferences", icon="PREFERENCES")
+
+        target_box = layout.box()
+        target_box.label(text="Target Meshes", icon="SHAPEKEY_DATA")
+        if not settings.target_meshes:
+            target_box.operator(
+                "a2f.add_selected_targets",
+                text="Add Selected Meshes",
+                icon="ADD",
+            )
+        else:
+            target_row = target_box.row()
+            target_row.template_list(
+                "A2F_UL_target_meshes",
+                "",
+                settings,
+                "target_meshes",
+                settings,
+                "target_mesh_index",
+                rows=3,
+            )
+            target_controls = target_row.column(align=True)
+            target_controls.operator(
+                "a2f.add_selected_targets",
+                text="",
+                icon="ADD",
+            )
+            target_controls.operator(
+                "a2f.remove_target",
+                text="",
+                icon="REMOVE",
+            )
 
         worker_row = layout.row(align=True)
         worker_state = controller.client.state
@@ -197,11 +218,12 @@ class A2F_PT_main(bpy.types.Panel):
         mode_row.enabled = (
             not controller.operation_in_progress
             and not settings.stream_operation_id
-            and settings.preview_state == "IDLE"
+            and settings.playback_state == "IDLE"
         )
         mode_row.prop(settings, "input_mode", expand=True)
         _draw_audio_playback(input_box, settings)
-        input_box.prop(settings, "audio_path")
+        if settings.input_mode == "SELECTED":
+            input_box.prop(settings, "audio_path")
 
         emotion_box = layout.box()
         emotion_box.label(text="Emotion", icon="DRIVER")
@@ -236,61 +258,5 @@ class A2F_PT_main(bpy.types.Panel):
                     text=emotion.name,
                     slider=True,
                 )
-
-        operation_ready = (
-            runtime_ready
-            and not controller.optimization_in_progress
-            and not controller.operation_in_progress
-            and controller.client.state == Lifecycle.RUNNING
-            and controller.negotiated
-        )
-        if settings.stream_operation_id:
-            stream_row = layout.row(align=True)
-            stream_row.scale_y = 1.3
-            stream_row.operator("a2f.stop_stream", text="Stop Stream", icon="CANCEL")
-        elif settings.status == "GENERATING":
-            cancel_row = layout.row(align=True)
-            cancel_row.scale_y = 1.3
-            cancel_row.operator("a2f.cancel", text="Cancel Generation", icon="CANCEL")
-        elif settings.status == "CANCELLING":
-            cancel_row = layout.row(align=True)
-            cancel_row.enabled = False
-            cancel_row.scale_y = 1.3
-            cancel_row.label(text="Cancellation requested", icon="TIME")
-        elif settings.input_mode == "SELECTED":
-            generate_row = layout.row(align=True)
-            generate_row.scale_y = 1.3
-            generate_button = generate_row.row(align=True)
-            generate_button.enabled = operation_ready
-            generate_button.operator("a2f.generate", icon="OUTLINER_OB_FORCE_FIELD")
-        elif settings.input_mode == "STREAM":
-            stream_row = layout.row(align=True)
-            stream_row.scale_y = 1.3
-            stream_start = stream_row.row(align=True)
-            stream_start.enabled = operation_ready
-            stream_start.operator(
-                "a2f.stream_wav",
-                text="Start WAV Stream",
-                icon="PLAY",
-            )
-        else:
-            raise RuntimeError(f"invalid input mode {settings.input_mode!r}")
-
-        target_box = layout.box()
-        target_box.label(text="Mesh Targets", icon="SHAPEKEY_DATA")
-        target_row = target_box.row(align=True)
-        target_row.operator("a2f.add_selected_targets", icon="ADD")
-        target_row.operator("a2f.remove_target", text="Remove", icon="REMOVE")
-        if settings.target_meshes:
-            target_box.template_list(
-                "A2F_UL_target_meshes",
-                "",
-                settings,
-                "target_meshes",
-                settings,
-                "target_mesh_index",
-                rows=3,
-            )
-
 
 CLASSES = (A2F_UL_target_meshes, A2F_PT_main)

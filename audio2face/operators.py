@@ -7,15 +7,13 @@ from typing import Callable
 import bpy
 
 from .live_stream import get_live_stream_controller
-from .preview import PreviewError, get_preview_controller
 from .properties import (
     A2FSceneSettings,
     clear_preferred_emotion,
     load_preferred_emotion,
 )
-from .result_io import AnimationResult, ResultValidationError, load_animation_result
 from .runtime import RuntimeController, get_controller
-from .sidecar import SidecarError
+from .sidecar import Lifecycle, SidecarError
 
 
 def _run_runtime(
@@ -28,25 +26,6 @@ def _run_runtime(
         operator.report({"ERROR"}, str(exc))
         return {"CANCELLED"}
     return {"FINISHED"}
-
-
-def _load_selected_result(settings: A2FSceneSettings) -> AnimationResult:
-    if (
-        not settings.result_path
-        or not settings.result_operation_id
-        or not settings.result_audio_path
-    ):
-        raise ResultValidationError("generate an animation result first")
-    result = load_animation_result(
-        settings.result_path,
-        allowed_directory=str(get_controller().result_directory()),
-    )
-    if result.operation_id != settings.result_operation_id:
-        raise ResultValidationError(
-            f"stale result operation {result.operation_id!r}; "
-            f"active result operation is {settings.result_operation_id!r}"
-        )
-    return result
 
 
 class A2F_OT_start_worker(bpy.types.Operator):
@@ -105,60 +84,6 @@ class A2F_OT_stop_worker(bpy.types.Operator):
         return _run_runtime(self, lambda controller: controller.stop(context.scene))
 
 
-class A2F_OT_generate(bpy.types.Operator):
-    bl_idname = "a2f.generate"
-    bl_label = "Generate ARKit Values"
-    bl_description = (
-        "Generate a timestamped ARKit-52 value stream through the GPU worker"
-    )
-
-    def execute(self, context: bpy.types.Context) -> set[str]:
-        return _run_runtime(self, lambda controller: controller.generate(context.scene))
-
-
-class A2F_OT_cancel(bpy.types.Operator):
-    bl_idname = "a2f.cancel"
-    bl_label = "Cancel Generation"
-    bl_description = "Request cancellation of the current generation operation"
-
-    @classmethod
-    def poll(cls, context: bpy.types.Context) -> bool:
-        return context.scene.audio2face.status == "GENERATING"
-
-    def execute(self, context: bpy.types.Context) -> set[str]:
-        return _run_runtime(self, lambda controller: controller.cancel(context.scene))
-
-
-class A2F_OT_stream_wav(bpy.types.Operator):
-    bl_idname = "a2f.stream_wav"
-    bl_label = "Start WAV Stream"
-    bl_description = (
-        "Decode the selected WAV incrementally and stream PCM through the "
-        "bundled GPU model"
-    )
-
-    def execute(self, context: bpy.types.Context) -> set[str]:
-        return _run_runtime(
-            self, lambda controller: controller.start_wav_stream(context.scene)
-        )
-
-
-class A2F_OT_stop_stream(bpy.types.Operator):
-    bl_idname = "a2f.stop_stream"
-    bl_label = "Stop Stream"
-    bl_description = "Stop the current PCM stream while keeping the GPU model ready"
-
-    @classmethod
-    def poll(cls, context: bpy.types.Context) -> bool:
-        return context.scene.audio2face.stream_operation_id != ""
-
-    def execute(self, context: bpy.types.Context) -> set[str]:
-        return _run_runtime(
-            self,
-            lambda controller: controller.stop_stream(context.scene),
-        )
-
-
 class A2F_OT_load_preferred_emotion(bpy.types.Operator):
     bl_idname = "a2f.load_preferred_emotion"
     bl_label = "Load Preferred Emotion"
@@ -193,8 +118,17 @@ class A2F_OT_clear_preferred_emotion(bpy.types.Operator):
 class A2F_OT_add_selected_targets(bpy.types.Operator):
     bl_idname = "a2f.add_selected_targets"
     bl_label = "Add Selected Meshes"
-    bl_description = "Add selected mesh objects as model-channel targets"
+    bl_description = "Add selected mesh objects to receive Audio2Face Shape Key values"
     bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context: bpy.types.Context) -> bool:
+        has_selected_mesh = any(
+            obj.type == "MESH" for obj in context.selected_objects
+        )
+        if not has_selected_mesh:
+            cls.poll_message_set("select at least one mesh object")
+        return has_selected_mesh
 
     def execute(self, context: bpy.types.Context) -> set[str]:
         settings = context.scene.audio2face
@@ -203,7 +137,7 @@ class A2F_OT_add_selected_targets(bpy.types.Operator):
             self.report({"ERROR"}, "select at least one mesh object")
             return {"CANCELLED"}
 
-        added = 0
+        last_added_index: int | None = None
         existing = {
             item.object.as_pointer()
             for item in settings.target_meshes
@@ -214,18 +148,20 @@ class A2F_OT_add_selected_targets(bpy.types.Operator):
                 continue
             item = settings.target_meshes.add()
             item.object = target
-            item.enabled = True
             existing.add(target.as_pointer())
-            added += 1
-        settings.target_mesh_index = max(0, len(settings.target_meshes) - 1)
-        self.report({"INFO"}, f"Added {added} mesh target(s)")
+            last_added_index = len(settings.target_meshes) - 1
+        if last_added_index is None:
+            self.report({"INFO"}, "Selected meshes are already targets")
+            return {"FINISHED"}
+        settings.target_mesh_index = last_added_index
+        self.report({"INFO"}, "Added selected meshes as targets")
         return {"FINISHED"}
 
 
 class A2F_OT_remove_target(bpy.types.Operator):
     bl_idname = "a2f.remove_target"
     bl_label = "Remove Target"
-    bl_description = "Remove the active mesh target"
+    bl_description = "Stop driving the active mesh by removing it from the target list"
     bl_options = {"REGISTER", "UNDO"}
 
     @classmethod
@@ -250,57 +186,52 @@ class A2F_OT_remove_target(bpy.types.Operator):
         return {"FINISHED"}
 
 
-class A2F_OT_preview_play_pause(bpy.types.Operator):
-    bl_idname = "a2f.preview_play_pause"
-    bl_label = "Play/Pause Audio and Animation"
-    bl_description = (
-        "Toggle generated audio and synchronized target Shape Key playback"
-    )
+class A2F_OT_play_pause(bpy.types.Operator):
+    bl_idname = "a2f.play_pause"
+    bl_label = "Play/Pause Audio2Face"
+    bl_description = "Play or pause selected audio and its live ARKit-52 stream"
 
     @classmethod
     def poll(cls, context: bpy.types.Context) -> bool:
         settings = context.scene.audio2face
-        controller = get_preview_controller()
-        if settings.stream_operation_id or get_live_stream_controller().active:
+        if settings.input_mode != "SELECTED":
             return False
-        if controller.active:
-            return settings.preview_state in {"PLAYING", "PAUSED"}
-        return (
-            settings.preview_state == "IDLE"
-            and settings.result_path != ""
-            and settings.result_operation_id != ""
-            and settings.result_audio_path != ""
+        live = get_live_stream_controller()
+        if live.plays_audio:
+            return settings.playback_state in {"PLAYING", "PAUSED"}
+        runtime = get_controller()
+        return bool(
+            settings.playback_state == "IDLE"
+            and not settings.stream_operation_id
+            and settings.audio_path
+            and runtime.client.state == Lifecycle.RUNNING
+            and runtime.negotiated
+            and not runtime.operation_in_progress
         )
 
     def execute(self, context: bpy.types.Context) -> set[str]:
         settings = context.scene.audio2face
-        controller = get_preview_controller()
-        try:
-            if settings.preview_state == "PLAYING":
-                controller.pause()
-            elif settings.preview_state == "PAUSED":
-                controller.resume()
-            elif settings.preview_state == "IDLE":
-                result = _load_selected_result(settings)
-                controller.start(
-                    context.scene,
-                    result,
-                    settings.result_audio_path,
-                )
-            else:
-                raise PreviewError(
-                    f"cannot toggle preview from state {settings.preview_state!r}"
-                )
-        except (PreviewError, ResultValidationError, OSError, ValueError) as exc:
-            settings.status = "ERROR"
-            settings.status_message = str(exc)
-            self.report({"ERROR"}, str(exc))
-            return {"CANCELLED"}
-        return {"FINISHED"}
+        if settings.playback_state == "PLAYING":
+            return _run_runtime(
+                self,
+                lambda controller: controller.pause_selected_audio(context.scene),
+            )
+        if settings.playback_state == "PAUSED":
+            return _run_runtime(
+                self,
+                lambda controller: controller.resume_selected_audio(context.scene),
+            )
+        if settings.playback_state == "IDLE":
+            return _run_runtime(
+                self,
+                lambda controller: controller.start_selected_audio(context.scene),
+            )
+        self.report({"ERROR"}, f"invalid playback state {settings.playback_state!r}")
+        return {"CANCELLED"}
 
 
-class A2F_OT_preview_rewind(bpy.types.Operator):
-    bl_idname = "a2f.preview_rewind"
+class A2F_OT_rewind(bpy.types.Operator):
+    bl_idname = "a2f.rewind"
     bl_label = "Rewind Audio and Animation"
     bl_description = (
         "Rewind audio and synchronized Shape Keys without changing playback state"
@@ -309,17 +240,21 @@ class A2F_OT_preview_rewind(bpy.types.Operator):
     @classmethod
     def poll(cls, context: bpy.types.Context) -> bool:
         return (
-            context.scene.audio2face.preview_state in {"PLAYING", "PAUSED"}
-            and get_preview_controller().active
+            context.scene.audio2face.input_mode == "SELECTED"
+            and context.scene.audio2face.playback_state in {"PLAYING", "PAUSED"}
+            and get_live_stream_controller().plays_audio
         )
 
     def execute(self, context: bpy.types.Context) -> set[str]:
-        try:
-            get_preview_controller().rewind()
-        except PreviewError as exc:
-            self.report({"ERROR"}, str(exc))
-            return {"CANCELLED"}
-        return {"FINISHED"}
+        paused = context.scene.audio2face.playback_state == "PAUSED"
+        return _run_runtime(
+            self,
+            lambda controller: controller.seek_selected_audio(
+                context.scene,
+                0.0,
+                paused=paused,
+            ),
+        )
 
 
 CLASSES = (
@@ -327,14 +262,10 @@ CLASSES = (
     A2F_OT_cancel_model_optimization,
     A2F_OT_start_worker,
     A2F_OT_stop_worker,
-    A2F_OT_generate,
-    A2F_OT_cancel,
-    A2F_OT_stream_wav,
-    A2F_OT_stop_stream,
     A2F_OT_load_preferred_emotion,
     A2F_OT_clear_preferred_emotion,
     A2F_OT_add_selected_targets,
     A2F_OT_remove_target,
-    A2F_OT_preview_play_pause,
-    A2F_OT_preview_rewind,
+    A2F_OT_play_pause,
+    A2F_OT_rewind,
 )

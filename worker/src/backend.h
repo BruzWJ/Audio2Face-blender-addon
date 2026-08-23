@@ -1,7 +1,5 @@
 #pragma once
 
-#include "result_file.h"
-
 #include <atomic>
 #include <cstdint>
 #include <functional>
@@ -33,13 +31,6 @@ struct ModelRequest {
   std::string audio2emotion_model_path;
 };
 
-struct GenerateRequest {
-  std::string operation_id;
-  std::string audio_path;
-  std::string result_path;
-  json settings;
-};
-
 struct StreamRequest {
   std::string operation_id;
   std::uint32_t sample_rate;
@@ -51,7 +42,6 @@ struct StreamFrame {
   std::vector<float> weights;
 };
 
-using ProgressCallback = std::function<void(double progress, const std::string& stage)>;
 using StreamFrameCallback = std::function<void(const StreamFrame& frame)>;
 
 class Backend final {
@@ -63,10 +53,6 @@ class Backend final {
   Backend& operator=(const Backend&) = delete;
 
   json load_model(const ModelRequest& request);
-  void generate(const GenerateRequest& request,
-                std::atomic_bool& canceled,
-                const ProgressCallback& progress,
-                const ResultPublicationGate& publication_gate);
   json stream_start(const StreamRequest& request);
   void stream_chunk(const std::string& operation_id,
                     const std::vector<float>& audio,

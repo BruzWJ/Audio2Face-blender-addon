@@ -86,7 +86,7 @@ class SidecarClient:
         if previous is not None:
             if previous.poll() is None:
                 raise SidecarError("worker is already running")
-            # Join the prior generation's queue threads before reusing queues.
+            # Join the prior process's queue threads before reusing queues.
             self.close(timeout=0.05)
 
         with self._state_lock:

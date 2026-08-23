@@ -58,8 +58,6 @@ add_executable(audio2face_worker
   src/main.cpp
   src/path_contract.cpp
   src/protocol.cpp
-  src/result_file.cpp
-  src/wav.cpp
 )
 
 target_compile_features(audio2face_worker PRIVATE cxx_std_17)

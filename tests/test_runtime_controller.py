@@ -41,15 +41,13 @@ class _Settings:
     def __init__(self) -> None:
         self.status = "IDLE"
         self.status_message = "before"
-        self.progress = 0.5
-        self.preview_state = "PLAYING"
-        self.preview_time = 1.0
-        self.preview_duration = 2.0
-        self.preview_progress = 0.5
+        self.input_mode = "SELECTED"
+        self.playback_loop = False
+        self.playback_state = "PLAYING"
+        self.playback_time = 1.0
+        self.playback_duration = 2.0
+        self.playback_progress = 0.5
         self.prediction_delay = 0.0
-        self.result_operation_id = ""
-        self.result_path = ""
-        self.result_audio_path = ""
         self.audio_path = ""
         self.stream_operation_id = ""
         self.stream_sample_rate = 0
@@ -196,11 +194,6 @@ def runtime_module(monkeypatch: pytest.MonkeyPatch) -> tuple[ModuleType, ModuleT
     properties.emotion_settings = lambda *_args, **_kwargs: _emotion_settings_payload()  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, properties.__name__, properties)
 
-    preview = ModuleType("audio2face.preview")
-    preview.get_preview_controller = lambda: SimpleNamespace(tick=lambda: False)  # type: ignore[attr-defined]
-    preview.unregister_preview = lambda: None  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, preview.__name__, preview)
-
     live_controller = _LiveController()
     live_stream = ModuleType("audio2face.live_stream")
     live_stream.LiveStreamError = ValueError  # type: ignore[attr-defined]
@@ -227,7 +220,7 @@ def _local_scene(bpy: ModuleType, name: str = "Scene") -> tuple[_Scene, _Setting
     return scene, settings
 
 
-def test_extension_data_directory_rejects_a_filesystem_alias(
+def test_log_directory_rejects_a_filesystem_alias(
     runtime_module: tuple[ModuleType, ModuleType],
     tmp_path: Path,
 ) -> None:
@@ -242,7 +235,7 @@ def test_extension_data_directory_rejects_a_filesystem_alias(
     bpy.utils.extension_path_user = lambda *_args, **_kwargs: str(alias)
 
     with pytest.raises(runtime.SidecarError, match="filesystem alias"):
-        runtime.RuntimeController.result_directory()
+        runtime.RuntimeController.log_directory()
 
 
 def test_selected_paths_reject_blender_relative_spelling(
@@ -288,8 +281,8 @@ def test_initial_poll_resets_only_editable_scenes(
     assert controller.reset_scene_state_on_poll is False
     assert local_settings.status == "IDLE"
     assert local_settings.status_message == "Worker is stopped"
-    assert local_settings.preview_state == "IDLE"
-    assert local_settings.preview_progress == 0.0
+    assert local_settings.playback_state == "IDLE"
+    assert local_settings.playback_progress == 0.0
 
 
 def test_optimization_progress_keeps_only_latest_snapshot(
@@ -780,52 +773,11 @@ def test_idless_worker_error_is_a_terminal_diagnostic(
     assert shutdown_timeouts == [runtime.SHUTDOWN_TIMEOUT_SECONDS]
 
 
-def test_result_event_uses_only_the_controller_path_for_its_active_operation(
-    runtime_module: tuple[ModuleType, ModuleType],
-    tmp_path: Path,
-) -> None:
-    runtime, bpy = runtime_module
-    scene, settings = _local_scene(bpy)
-    settings.result_operation_id = "operation-1"
-    controller = runtime.RuntimeController()
-    controller.generation_scene_names["operation-1"] = scene.name
-    controller.result_directory = lambda: tmp_path
-    (tmp_path / "operation-1.a2f.json").write_text("{}", encoding="utf-8")
-
-    controller._handle_event(
-        {
-            "event": "result",
-            "operation_id": "operation-1",
-            "data": {},
-        }
-    )
-
-    assert settings.status == "COMPLETED"
-    assert settings.progress == 1.0
-    assert settings.result_path.endswith("operation-1.a2f.json")
-    assert settings.result_operation_id == "operation-1"
-    assert controller.generation_scene_names == {}
-
-    settings.result_operation_id = "operation-2"
-    controller.generation_scene_names["operation-2"] = scene.name
-    controller._handle_event(
-        {
-            "event": "result",
-            "operation_id": "operation-2",
-            "data": {"unexpected": True},
-        }
-    )
-    assert settings.status == "ERROR"
-    assert settings.result_operation_id == ""
-    assert controller.generation_scene_names == {}
-
-
 def test_event_routing_rejects_an_unknown_operation_id(
     runtime_module: tuple[ModuleType, ModuleType],
 ) -> None:
     runtime, bpy = runtime_module
     scene, settings = _local_scene(bpy)
-    settings.result_operation_id = "operation-1"
     controller = runtime.RuntimeController()
     controller.startup_scene = scene.name
     shutdown_timeouts: list[float] = []
@@ -835,9 +787,12 @@ def test_event_routing_rejects_an_unknown_operation_id(
 
     controller._handle_event(
         {
-            "event": "progress",
+            "event": "stream_frame",
             "operation_id": "operation-1",
-            "data": {"progress": 0.75, "stage": "unsolicited"},
+            "data": {
+                "timestamp_sample": 0,
+                "weights": [0.0] * len(MODEL_CHANNELS),
+            },
         }
     )
 
@@ -845,42 +800,11 @@ def test_event_routing_rejects_an_unknown_operation_id(
     assert settings.status_message == (
         "worker returned an event for an unknown operation ID"
     )
-    assert settings.progress == 0.5
     assert controller.rejected_reason == settings.status_message
     assert shutdown_timeouts == [runtime.SHUTDOWN_TIMEOUT_SECONDS]
 
 
-def test_event_routing_rejects_an_operation_in_both_maps(
-    runtime_module: tuple[ModuleType, ModuleType],
-) -> None:
-    runtime, bpy = runtime_module
-    scene, settings = _local_scene(bpy)
-    controller = runtime.RuntimeController()
-    controller.startup_scene = scene.name
-    controller.generation_scene_names["operation-1"] = scene.name
-    controller.stream_scene_names["operation-1"] = scene.name
-    shutdown_timeouts: list[float] = []
-    controller.client.begin_shutdown = lambda *, timeout: shutdown_timeouts.append(
-        timeout
-    )
-
-    controller._handle_event(
-        {
-            "event": "progress",
-            "operation_id": "operation-1",
-            "data": {"progress": 0.75, "stage": "ambiguous"},
-        }
-    )
-
-    assert settings.status == "ERROR"
-    assert settings.status_message == (
-        "worker event operation ID belongs to both operation maps"
-    )
-    assert controller.rejected_reason == settings.status_message
-    assert shutdown_timeouts == [runtime.SHUTDOWN_TIMEOUT_SECONDS]
-
-
-def test_terminal_contract_rejection_clears_all_active_scene_operations(
+def test_terminal_contract_rejection_clears_the_active_stream_from_all_scenes(
     runtime_module: tuple[ModuleType, ModuleType],
 ) -> None:
     runtime, bpy = runtime_module
@@ -888,12 +812,10 @@ def test_terminal_contract_rejection_clears_all_active_scene_operations(
     second_settings = _Settings()
     second = _Scene("Second", editable=True, settings=second_settings)
     bpy.data.scenes.append(second)  # type: ignore[attr-defined]
-    first_settings.result_operation_id = "generation-1"
     second_settings.stream_operation_id = "stream-1"
     second_settings.stream_sample_rate = 16_000
     second_settings.stream_prebuffer_samples = 60_000
     controller = runtime.RuntimeController()
-    controller.generation_scene_names["generation-1"] = first.name
     controller.stream_scene_names["stream-1"] = second.name
     controller.stream_audio_paths["stream-1"] = Path("voice.wav")
     controller.stream_source_cancel = threading.Event()
@@ -906,15 +828,15 @@ def test_terminal_contract_rejection_clears_all_active_scene_operations(
 
     assert first_settings.status == "ERROR"
     assert second_settings.status == "ERROR"
-    assert first_settings.result_operation_id == ""
     assert second_settings.stream_operation_id == ""
     assert second_settings.stream_sample_rate == 0
     assert second_settings.stream_prebuffer_samples == 0
-    assert controller.generation_scene_names == {}
     assert controller.stream_scene_names == {}
     assert controller.stream_audio_paths == {}
     assert controller.stream_source_cancel is None
-    assert runtime._test_live_controller.stop_calls == [{"reset": False}]
+    assert runtime._test_live_controller.stop_calls == [
+        {"reset": False, "notify": False}
+    ]
     assert shutdown_timeouts == [runtime.SHUTDOWN_TIMEOUT_SECONDS]
 
 
@@ -926,21 +848,21 @@ def test_rejected_worker_controls_cannot_revive_scene_state(
     controller = runtime.RuntimeController()
     controller.client.begin_shutdown = lambda *, timeout: None
     controller._reject_worker_contract("terminal contract failure")
-    controller.generation_scene_names["operation-1"] = scene.name
-    settings.result_operation_id = "operation-1"
 
     controller._handle_control(
         {
             "type": "event",
-            "event": "progress",
+            "event": "stream_frame",
             "operation_id": "operation-1",
-            "data": {"progress": 0.5, "stage": "must be ignored"},
+            "data": {
+                "timestamp_sample": 0,
+                "weights": [0.0] * len(MODEL_CHANNELS),
+            },
         }
     )
 
     assert settings.status == "ERROR"
     assert settings.status_message == "terminal contract failure"
-    assert settings.progress == 0.5
 
 
 def test_rejected_worker_exit_preserves_error_on_every_editable_scene(
@@ -967,40 +889,46 @@ def test_rejected_worker_exit_preserves_error_on_every_editable_scene(
     assert second_settings.status_message == "terminal contract failure"
 
 
-def test_cancel_error_preserves_active_status(
+def test_cancel_error_terminates_the_matching_stream(
     runtime_module: tuple[ModuleType, ModuleType],
 ) -> None:
     runtime, bpy = runtime_module
     scene, settings = _local_scene(bpy)
-    settings.status = "CANCELLING"
-    settings.result_operation_id = "operation"
+    settings.status = "STREAM_ENDING"
+    settings.stream_operation_id = "stream-1"
+    settings.stream_sample_rate = 16_000
     controller = runtime.RuntimeController()
-    controller.pending["cancel"] = _plain_pending(runtime, "cancel", scene.name)
+    controller.stream_scene_names["stream-1"] = scene.name
+    controller.pending["cancel"] = _stream_pending(
+        runtime, "cancel", scene.name, "stream-1"
+    )
 
     controller._handle_error(
         {"id": "cancel", "error": {"code": "busy", "message": "try again"}}
     )
 
-    assert settings.status == "CANCELLING"
+    assert settings.status == "ERROR"
     assert settings.status_message == "busy: try again"
+    assert settings.stream_operation_id == ""
 
 
-@pytest.mark.parametrize("terminal_status", ["COMPLETED", "ERROR"])
-def test_late_cancel_response_does_not_erase_terminal_status(
-    runtime_module: tuple[ModuleType, ModuleType], terminal_status: str
+def test_late_cancel_response_does_not_erase_terminal_error(
+    runtime_module: tuple[ModuleType, ModuleType],
 ) -> None:
     runtime, bpy = runtime_module
     scene, settings = _local_scene(bpy)
-    settings.status = terminal_status
+    settings.status = "ERROR"
     settings.status_message = "terminal result"
     controller = runtime.RuntimeController()
-    controller.pending["cancel"] = _plain_pending(runtime, "cancel", scene.name)
+    controller.pending["cancel"] = _stream_pending(
+        runtime, "cancel", scene.name, "stream-1"
+    )
 
     controller._handle_response(
         {"id": "cancel", "result": {}}
     )
 
-    assert settings.status == terminal_status
+    assert settings.status == "ERROR"
     assert settings.status_message == "terminal result"
 
 
@@ -1040,7 +968,7 @@ def test_public_runtime_guard_rejects_linked_scene_without_rna_write(
         runtime.RuntimeController._require_editable_scene(linked)
 
 
-def test_generation_binds_result_to_exact_submitted_audio(
+def test_selected_wav_play_starts_streaming_inference_without_generation(
     runtime_module: tuple[ModuleType, ModuleType],
     tmp_path: Path,
 ) -> None:
@@ -1065,9 +993,9 @@ def test_generation_binds_result_to_exact_submitted_audio(
         str(spec.audio2emotion_model),
     )
     controller.loaded_signature = signature
+    controller.model_sample_rate = 16_000
     controller.model_schema = _model_schema()
     controller.schema_scenes.add(scene.as_pointer())
-    controller.result_directory = lambda: tmp_path
     requests: list[tuple[str, dict[str, object]]] = []
 
     def request(
@@ -1077,24 +1005,46 @@ def test_generation_binds_result_to_exact_submitted_audio(
         **_kwargs: object,
     ) -> str:
         requests.append((method, params))
-        return "generate-request"
+        return "stream-start-request"
 
     controller._request = request
-    controller.generate(scene)
+    operation_id = controller.start_selected_audio(scene)
 
-    assert requests[0][0] == "generate"
-    assert set(requests[0][1]) == {
-        "operation_id",
-        "audio_path",
-        "result_path",
-        "settings",
-    }
-    assert requests[0][1]["operation_id"] == settings.result_operation_id
-    assert requests[0][1]["audio_path"] == str(audio_path.resolve())
+    assert operation_id is not None
+    assert requests[0][0] == "stream_start"
+    assert set(requests[0][1]) == {"operation_id", "sample_rate", "settings"}
+    assert requests[0][1]["operation_id"] == operation_id
+    assert requests[0][1]["sample_rate"] == 16_000
     assert requests[0][1]["settings"] == _emotion_settings_payload()
-    assert settings.result_audio_path == str(audio_path.resolve())
-    settings.audio_path = str(tmp_path / "different.wav")
-    assert settings.result_audio_path == str(audio_path.resolve())
+    assert controller.stream_audio_paths[operation_id] == audio_path.resolve()
+    assert settings.stream_operation_id == operation_id
+    assert settings.status == "STREAM_STARTING"
+
+
+def test_selected_restart_waits_for_pending_model_load(
+    runtime_module: tuple[ModuleType, ModuleType],
+) -> None:
+    runtime, bpy = runtime_module
+    scene, _settings = _local_scene(bpy)
+    controller = runtime.RuntimeController()
+    restart = (scene.name, 1.25, True)
+    controller.selected_restart = restart
+    controller.pending["load"] = _model_pending(
+        runtime,
+        scene.name,
+        ("audio2face/model.json", "audio2emotion/model.json"),
+    )
+    starts: list[tuple[object, float, bool]] = []
+    controller.start_selected_audio = (
+        lambda target, *, position, paused: starts.append(
+            (target, position, paused)
+        )
+    )
+
+    controller._poll_selected_restart()
+
+    assert controller.selected_restart == restart
+    assert starts == []
 
 
 def test_stream_start_submits_the_same_complete_emotion_settings(
@@ -1107,7 +1057,6 @@ def test_stream_start_submits_the_same_complete_emotion_settings(
     controller.model_schema = _model_schema()
     controller.loaded_signature = ("face/model.json", "emotion/model.json")
     controller.schema_scenes.add(scene.as_pointer())
-    runtime.get_preview_controller = lambda: SimpleNamespace(stop=lambda **_kwargs: None)
     requests: list[tuple[str, dict[str, object], dict[str, object]]] = []
 
     def request(
@@ -1151,7 +1100,7 @@ def test_stream_audio_request_is_exact_base64_f32le(
     controller.client.request = request
     payload = struct.pack("<fff", -0.5, 0.0, 0.75)
 
-    request_id = controller.push_stream_audio(
+    request_id = controller._send_stream_audio(
         payload,
         operation_id="stream-1",
     )
@@ -1201,33 +1150,40 @@ def test_stream_audio_rejects_noncanonical_f32le(
     )
 
     with pytest.raises(runtime.SidecarError, match=message):
-        controller.push_stream_audio(payload, operation_id="stream-1")
+        controller._send_stream_audio(payload, operation_id="stream-1")
 
 
-def test_stream_audio_ingress_is_safe_from_a_source_thread(
+def test_first_live_pcm_chunk_auto_starts_and_flushes_from_main_thread(
     runtime_module: tuple[ModuleType, ModuleType],
 ) -> None:
     runtime, bpy = runtime_module
-    scene, _settings = _local_scene(bpy)
+    scene, settings = _local_scene(bpy)
+    settings.input_mode = "STREAM"
     controller = runtime.RuntimeController()
+    controller._require_worker_ready = lambda: None
     controller.model_sample_rate = 16_000
-    controller.stream_scene_names["stream-1"] = scene.name
-    runtime._test_live_controller.operation_id = "stream-1"
+    controller.model_schema = _model_schema()
+    spec = SimpleNamespace(
+        audio2face_model=Path("/models/audio2face/model.json"),
+        audio2emotion_model=Path("/models/audio2emotion/model.json"),
+    )
+    controller.loaded_signature = controller._model_signature(spec)
+    controller.schema_scenes.add(scene.as_pointer())
+    controller.setup_snapshot = lambda: SimpleNamespace(
+        require_inference_spec=lambda: spec
+    )
     calls: list[tuple[str, dict[str, object], threading.Thread]] = []
     failures: list[BaseException] = []
 
     def request(method: str, params: dict[str, object]) -> str:
         calls.append((method, params, threading.current_thread()))
-        return "thread-chunk"
+        return f"request-{len(calls)}"
 
     controller.client.request = request
 
     def push() -> None:
         try:
-            controller.push_stream_audio(
-                struct.pack("<f", 0.25),
-                operation_id="stream-1",
-            )
+            controller.queue_pcm_audio(struct.pack("<f", 0.25), scene_name=scene.name)
         except BaseException as exc:  # pragma: no cover - asserted on main thread
             failures.append(exc)
 
@@ -1237,11 +1193,36 @@ def test_stream_audio_ingress_is_safe_from_a_source_thread(
 
     assert not source_thread.is_alive()
     assert failures == []
+    assert calls == []
+    assert controller.pcm_ingress is not None
+    assert list(controller.pcm_ingress.chunks) == [struct.pack("<f", 0.25)]
+
+    controller._poll_pcm_ingress()
+
     assert len(calls) == 1
-    assert calls[0][0] == "stream_chunk"
-    assert calls[0][2] is source_thread
-    assert controller.pending["thread-chunk"] == _stream_pending(
-        runtime, "stream_chunk", scene.name, "stream-1"
+    assert calls[0][0] == "stream_start"
+    assert calls[0][2] is threading.current_thread()
+    operation_id = calls[0][1]["operation_id"]
+    assert isinstance(operation_id, str)
+    assert settings.stream_operation_id == operation_id
+
+    controller._handle_response(
+        {
+            "id": "request-1",
+            "result": {"sample_rate": 16_000, "prebuffer_samples": 32_000},
+        }
+    )
+    controller._poll_pcm_ingress()
+
+    assert [method for method, _params, _thread in calls] == [
+        "stream_start",
+        "stream_chunk",
+    ]
+    assert base64.b64decode(
+        calls[1][1]["audio_f32le_base64"], validate=True
+    ) == struct.pack("<f", 0.25)
+    assert controller.pending["request-2"] == _stream_pending(
+        runtime, "stream_chunk", scene.name, operation_id
     )
 
 
@@ -1266,10 +1247,7 @@ def test_stream_audio_ingress_has_bounded_pending_backpressure(
     )
 
     with pytest.raises(runtime.SidecarError, match="queue is full"):
-        controller.push_stream_audio(
-            struct.pack("<f", 0.0),
-            operation_id="stream-1",
-        )
+        controller.queue_pcm_audio(struct.pack("<f", 0.0), scene_name=scene.name)
 
 
 def test_exact_stream_start_response_marks_stream_ready(
@@ -1290,7 +1268,7 @@ def test_exact_stream_start_response_marks_stream_ready(
         "stream-1",
     )
 
-    assert controller.pcm_stream_requirements(scene) is None
+    assert controller.pcm_stream_requirements(scene) == (16_000, None)
 
     controller._handle_response(
         {
@@ -1305,13 +1283,13 @@ def test_exact_stream_start_response_marks_stream_ready(
     assert controller.pcm_stream_requirements(scene) == (16_000, 0)
 
 
-def test_pcm_stream_requirements_rejects_inactive_scene(
+def test_pcm_stream_requirements_need_a_loaded_worker_model(
     runtime_module: tuple[ModuleType, ModuleType],
 ) -> None:
     runtime, bpy = runtime_module
     scene, _settings = _local_scene(bpy)
 
-    with pytest.raises(runtime.SidecarError, match="no active PCM stream"):
+    with pytest.raises(runtime.SidecarError, match="start the Audio2Face worker"):
         runtime.RuntimeController().pcm_stream_requirements(scene)
 
 
@@ -1364,7 +1342,10 @@ def test_selected_wav_source_honors_worker_prebuffer_without_local_override(
     controller = runtime.RuntimeController()
     controller.model_sample_rate = 16_000
     controller.stream_audio_paths["stream-1"] = Path("voice.wav")
+    controller.stream_start_positions["stream-1"] = 0.0
     controller.stream_source_cancel = threading.Event()
+    controller.stream_source_playing = threading.Event()
+    controller.stream_source_playing.set()
 
     class PlaybackGate:
         def __init__(self) -> None:
@@ -1391,7 +1372,7 @@ def test_selected_wav_source_honors_worker_prebuffer_without_local_override(
     controller.stream_playback_started = playback_gate
     submitted: list[bytes] = []
     ended: list[str] = []
-    controller.push_stream_audio = (
+    controller._send_stream_audio = (
         lambda payload, *, operation_id: submitted.append(payload) or "chunk"
     )
     controller._queue_stream_end = lambda operation_id: ended.append(operation_id) or "end"
@@ -1433,7 +1414,9 @@ def test_stream_start_response_rejects_noninteger_sample_rate(
 
     assert settings.status == "ERROR"
     assert settings.stream_operation_id == ""
-    assert runtime._test_live_controller.stop_calls == [{"reset": False}]
+    assert runtime._test_live_controller.stop_calls == [
+        {"reset": False, "notify": False}
+    ]
 
 
 def test_exact_stream_frame_routes_negative_timestamp_and_arkit52(
@@ -1493,7 +1476,9 @@ def test_malformed_stream_frame_terminates_the_active_stream(
     assert controller.stream_source_cancel is None
     assert "stream-1" not in controller.stream_scene_names
     assert "stream-1" not in controller.stream_audio_paths
-    assert runtime._test_live_controller.stop_calls == [{"reset": False}]
+    assert runtime._test_live_controller.stop_calls == [
+        {"reset": False, "notify": False}
+    ]
     assert shutdown_timeouts == [runtime.SHUTDOWN_TIMEOUT_SECONDS]
 
 
@@ -1546,7 +1531,11 @@ def test_natural_stream_tail_keeps_ui_state_until_presentation_stops(
     assert controller.stream_audio_paths == {}
 
     runtime._test_live_controller.is_active = False
-    controller._finish_stream_presentation(scene.name, "stream-1")
+    controller._finish_stream_presentation(
+        scene.name,
+        "stream-1",
+        natural=True,
+    )
 
     assert settings.stream_operation_id == ""
     assert settings.stream_sample_rate == 0
@@ -1632,7 +1621,7 @@ def test_rejected_stream_cancel_cleans_local_state(
     assert controller.stream_scene_names == {}
 
 
-def test_explicit_stream_stop_ends_local_audio_instead_of_finishing_playback(
+def test_canceled_stream_ends_local_audio_instead_of_finishing_playback(
     runtime_module: tuple[ModuleType, ModuleType],
 ) -> None:
     runtime, bpy = runtime_module
@@ -1647,7 +1636,9 @@ def test_explicit_stream_stop_ends_local_audio_instead_of_finishing_playback(
         {"event": "stream_ended", "operation_id": "stream-1", "data": {}}
     )
 
-    assert runtime._test_live_controller.stop_calls == [{"reset": False}]
+    assert runtime._test_live_controller.stop_calls == [
+        {"reset": False, "notify": False}
+    ]
     assert runtime._test_live_controller.terminal_calls == []
     assert controller.stream_stop_requests == set()
     assert settings.stream_operation_id == ""
@@ -1677,7 +1668,9 @@ def test_malformed_stream_ended_still_cleans_the_terminal_stream(
     assert settings.stream_operation_id == ""
     assert controller.stream_source_cancel is None
     assert controller.stream_scene_names == {}
-    assert runtime._test_live_controller.stop_calls == [{"reset": False}]
+    assert runtime._test_live_controller.stop_calls == [
+        {"reset": False, "notify": False}
+    ]
 
 
 def test_malformed_error_event_cleans_its_active_stream(
@@ -1703,10 +1696,12 @@ def test_malformed_error_event_cleans_its_active_stream(
     assert settings.stream_operation_id == ""
     assert controller.stream_source_cancel is None
     assert controller.stream_scene_names == {}
-    assert runtime._test_live_controller.stop_calls == [{"reset": False}]
+    assert runtime._test_live_controller.stop_calls == [
+        {"reset": False, "notify": False}
+    ]
 
 
-def test_generation_event_cannot_be_routed_to_a_stream(
+def test_removed_generation_event_is_rejected_for_an_active_stream(
     runtime_module: tuple[ModuleType, ModuleType],
 ) -> None:
     runtime, bpy = runtime_module
@@ -1727,7 +1722,9 @@ def test_generation_event_cannot_be_routed_to_a_stream(
     assert settings.status == "ERROR"
     assert settings.stream_operation_id == ""
     assert controller.stream_scene_names == {}
-    assert runtime._test_live_controller.stop_calls == [{"reset": False}]
+    assert runtime._test_live_controller.stop_calls == [
+        {"reset": False, "notify": False}
+    ]
 
 
 def test_runtime_survives_blend_file_replacement_with_fresh_controller(
@@ -1747,17 +1744,6 @@ def test_runtime_survives_blend_file_replacement_with_fresh_controller(
             cleanup_order.append(f"close-{self.number}")
 
     monkeypatch.setattr(runtime, "RuntimeController", StubController)
-    monkeypatch.setattr(
-        runtime,
-        "unregister_preview",
-        lambda: cleanup_order.append("preview"),
-    )
-    monkeypatch.setattr(
-        runtime,
-        "unregister_live_stream",
-        lambda: cleanup_order.append("live"),
-    )
-
     runtime.register_runtime()
     runtime.register_runtime()
 
@@ -1772,7 +1758,7 @@ def test_runtime_survives_blend_file_replacement_with_fresh_controller(
     runtime._load_pre_handler(None)
 
     assert runtime._CONTROLLER is None
-    assert cleanup_order == ["close-1", "preview"]
+    assert cleanup_order == ["close-1"]
 
     runtime._load_post_handler(None)
 
@@ -1784,9 +1770,7 @@ def test_runtime_survives_blend_file_replacement_with_fresh_controller(
 
     assert cleanup_order == [
         "close-1",
-        "preview",
         "close-2",
-        "preview",
     ]
     assert runtime._CONTROLLER is None
     assert bpy.app.handlers.load_pre == []

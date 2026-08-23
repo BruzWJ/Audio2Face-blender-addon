@@ -24,7 +24,7 @@ import bpy  # noqa: E402  (available only inside Blender)
 
 import audio2face  # noqa: E402
 import audio2face.properties as properties_module  # noqa: E402
-from audio2face.preview import (  # noqa: E402
+from audio2face.shape_keys import (  # noqa: E402
     apply_shape_key_frame,
     build_subscriptions,
 )
@@ -33,6 +33,7 @@ from audio2face import runtime  # noqa: E402
 from audio2face.preferences import A2FAddonPreferences  # noqa: E402
 from audio2face.properties import (  # noqa: E402
     A2FSceneSettings,
+    A2FTargetMeshItem,
     apply_model_schema,
     emotion_settings,
 )
@@ -104,14 +105,18 @@ def main() -> None:
         operator_names = set(dir(bpy.ops.a2f))
         assert "uninstall" not in operator_names
         assert {
-            "preview_play_pause",
-            "preview_rewind",
+            "play_pause",
+            "rewind",
             "load_preferred_emotion",
             "clear_preferred_emotion",
         } <= operator_names
-        assert {"preview_play", "preview_pause", "preview_stop"}.isdisjoint(
-            operator_names
-        )
+        assert {
+            "generate",
+            "start_wav_stream",
+            "stop_stream",
+            "preview_play_pause",
+            "preview_rewind",
+        }.isdisjoint(operator_names)
         preference_names = set(A2FAddonPreferences.bl_rna.properties.keys())
         assert set(A2FAddonPreferences.__annotations__) == {
             "nvidia_terms_accepted",
@@ -138,6 +143,8 @@ def main() -> None:
             == "DIR_PATH"
         )
         scene_property_names = set(A2FSceneSettings.bl_rna.properties.keys())
+        assert set(A2FTargetMeshItem.__annotations__) == {"object"}
+        assert "enabled" not in A2FTargetMeshItem.bl_rna.properties
         assert not hasattr(properties_module, "A2FModelParameterItem")
         missing_scene_property_names = (
             set(A2FSceneSettings.__annotations__) - scene_property_names
@@ -148,7 +155,7 @@ def main() -> None:
         )
         assert {
             "prediction_delay",
-            "preview_progress",
+            "playback_progress",
             "auto_audio2emotion",
             "manual_emotions",
             "preferred_emotions",
@@ -163,6 +170,7 @@ def main() -> None:
             "preferred_emotions"
         ].is_skip_save
         assert {
+            "preview_progress",
             "preview_volume",
             "preview_reset_on_stop",
             "stream_reset_on_stop",
@@ -268,23 +276,27 @@ def main() -> None:
         # Every mesh remains subscribed without Shape Key inspection; shared
         # Key datablocks are deduplicated only when a frame is delivered.
         assert len(subscriptions) == 4
-        preview_frame = [0.0] * len(MODEL_CHANNELS)
-        preview_frame[MODEL_CHANNELS.index("jawOpen")] = 0.625
-        apply_shape_key_frame(subscriptions, tuple(MODEL_CHANNELS), tuple(preview_frame))
+        streamed_values = [0.0] * len(MODEL_CHANNELS)
+        streamed_values[MODEL_CHANNELS.index("jawOpen")] = 0.625
+        apply_shape_key_frame(
+            subscriptions,
+            tuple(MODEL_CHANNELS),
+            tuple(streamed_values),
+        )
         _assert_close(
             target.data.shape_keys.key_blocks["jawOpen"].value,
             0.625,
-            label="primary preview jawOpen",
+            label="primary streamed jawOpen",
         )
         _assert_close(
             extra_target.data.shape_keys.key_blocks["jawOpen"].value,
             0.625,
-            label="extra preview jawOpen",
+            label="extra streamed jawOpen",
         )
         _assert_close(
             linked_target.data.shape_keys.key_blocks["jawOpen"].value,
             0.625,
-            label="linked preview jawOpen",
+            label="linked streamed jawOpen",
         )
         apply_shape_key_frame(
             subscriptions,

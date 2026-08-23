@@ -1,8 +1,6 @@
 #include "backend.h"
 
 #include "path_contract.h"
-#include "result_file.h"
-#include "wav.h"
 
 #include <audio2emotion/audio2emotion.h>
 #include <audio2face/audio2face.h>
@@ -28,7 +26,6 @@ namespace {
 
 constexpr std::size_t kAudio2EmotionInputWindowSamples = 60000;
 constexpr std::size_t kAudio2EmotionInferencesToSkip = 30;
-constexpr std::size_t kMaximumResultScalars = 40000000;
 constexpr std::size_t kEyesRotationCount = 6;
 constexpr std::size_t kArkit52ChannelCount = 52;
 constexpr std::uint32_t kMaximumSupportedSampleRate = 384000;
@@ -340,6 +337,15 @@ class Backend::Impl final {
       if (geometry == nullptr) {
         throw WorkerError("sdk_error", "Geometry executor is null");
       }
+      // BlendshapeSolveExecutor::Init() in SDK 1.0.0 reapplies an execution
+      // option derived only from its skin/tongue solvers. Restore the eye
+      // output requested above before installing the callbacks.
+      sdk_check(geometry->SetExecutionOption(execution_option),
+                "Enabling skin and eye geometry outputs");
+      if (geometry->GetExecutionOption() != execution_option) {
+        throw WorkerError(
+            "sdk_error", "Geometry executor did not enable skin and eye outputs");
+      }
       if (geometry->GetEyesRotationSize() != kEyesRotationCount) {
         throw WorkerError("model_invalid", "Unsupported SDK eyes rotation size",
                           {{"reported", geometry->GetEyesRotationSize()},
@@ -444,75 +450,6 @@ class Backend::Impl final {
     }
   }
 
-  void generate(const GenerateRequest& request, std::atomic_bool& canceled,
-                const ProgressCallback& progress,
-                const ResultPublicationGate& publication_gate) {
-    if (canceled.load(std::memory_order_acquire)) {
-      throw WorkerError("canceled", "Generation was canceled");
-    }
-    progress(0.01, "loading_audio");
-    std::uint32_t sample_rate = 0;
-    {
-      std::lock_guard<std::mutex> lock(resource_mutex_);
-      require_model_locked();
-      sample_rate = sample_rate_;
-    }
-    const std::vector<float> audio =
-        read_wav_mono(request.audio_path, sample_rate);
-    if (canceled.load(std::memory_order_acquire)) {
-      throw WorkerError("canceled", "Generation was canceled");
-    }
-
-    begin_operation(request.settings);
-    OperationReset reset(*this);
-    json timestamps = json::array();
-    json weights = json::array();
-    auto& timestamp_rows = timestamps.get_ref<json::array_t&>();
-    auto& weight_rows = weights.get_ref<json::array_t&>();
-    const auto collect = [&](const StreamFrame& frame) {
-      if (weight_rows.size() >=
-          kMaximumResultScalars / output_channels_.size()) {
-        throw WorkerError("result_too_large",
-                          "Animation result exceeds the worker safety limit");
-      }
-      timestamp_rows.push_back(frame.timestamp_sample);
-      weight_rows.push_back(frame.weights);
-    };
-
-    progress(0.05, "generating");
-    for (std::size_t offset = 0; offset < audio.size();
-         offset += sample_rate) {
-      if (canceled.load(std::memory_order_acquire)) {
-        throw WorkerError("canceled", "Generation was canceled");
-      }
-      const std::size_t count =
-          std::min<std::size_t>(sample_rate, audio.size() - offset);
-      accumulate_audio(audio.data() + offset, count);
-      drain_ready(canceled, collect);
-      progress(0.05 + 0.85 * static_cast<double>(offset + count) /
-                          static_cast<double>(audio.size()),
-               "generating");
-    }
-    close_audio_and_drain(canceled, collect);
-    const std::size_t expected_frames = executor().GetTotalNbFrames(0);
-    if (weight_rows.empty() || weight_rows.size() != expected_frames) {
-      throw WorkerError("generation_failed",
-                        "SDK returned an incomplete frame set",
-                        {{"expected", expected_frames},
-                         {"received", weight_rows.size()}});
-    }
-
-    json document = {{"schema", "a2f-animation/2"},
-                     {"operation_id", request.operation_id},
-                     {"channels", output_channels_},
-                     {"sample_rate", sample_rate},
-                     {"timestamps_samples", std::move(timestamps)},
-                     {"weights", std::move(weights)}};
-    progress(0.97, "writing_result");
-    write_json_atomically(request.result_path, document, canceled,
-                          publication_gate);
-  }
-
   json stream_start(const StreamRequest& request) {
     {
       std::lock_guard<std::mutex> lock(resource_mutex_);
@@ -602,7 +539,6 @@ class Backend::Impl final {
 
   struct Capture {
     std::atomic_bool* canceled{nullptr};
-    cudaStream_t cuda_stream{nullptr};
     std::size_t weight_count{0};
     std::map<std::int64_t, PendingFrame> frames;
     const char* failure{nullptr};
@@ -610,7 +546,6 @@ class Backend::Impl final {
 
   struct EmotionCapture {
     std::atomic_bool* canceled{nullptr};
-    cudaStream_t cuda_stream{nullptr};
     nva2x::IEmotionAccumulator* accumulator{nullptr};
     std::size_t emotion_count{0};
     std::error_code accumulation_error;
@@ -627,10 +562,12 @@ class Backend::Impl final {
     if (owner.active_emotion_capture_ == nullptr) return false;
     auto& capture = *owner.active_emotion_capture_;
     if (capture.canceled->load(std::memory_order_acquire)) return false;
-    if (results.trackIndex != 0 ||
-        results.cudaStream != capture.cuda_stream ||
-        results.emotions.Size() != capture.emotion_count) {
-      capture.failure = "Audio2Emotion callback returned an invalid result";
+    if (results.trackIndex != 0) {
+      capture.failure = "Audio2Emotion callback returned an unexpected track";
+      return false;
+    }
+    if (results.emotions.Size() != capture.emotion_count) {
+      capture.failure = "Audio2Emotion callback returned an unexpected value count";
       return false;
     }
     const std::error_code error = capture.accumulator->Accumulate(
@@ -650,10 +587,13 @@ class Backend::Impl final {
     auto& capture = *owner.active_capture_;
     if (capture.canceled->load(std::memory_order_acquire)) return false;
     try {
-      if (results.trackIndex != 0 ||
-          results.eyesRotation.Size() != kEyesRotationCount ||
-          results.eyesCudaStream != capture.cuda_stream) {
-        fail_capture(capture, "Geometry callback returned an invalid result");
+      if (results.trackIndex != 0) {
+        fail_capture(capture, "Geometry callback returned an unexpected track");
+        return false;
+      }
+      if (results.eyesRotation.Size() != kEyesRotationCount) {
+        fail_capture(capture,
+                     "Geometry callback returned an unexpected eye rotation count");
         return false;
       }
       auto& frame = capture.frames[results.timeStampCurrentFrame];
@@ -690,11 +630,13 @@ class Backend::Impl final {
     auto& capture = *owner.active_capture_;
     if (capture.canceled->load(std::memory_order_acquire)) return false;
     try {
-      if (results.trackIndex != 0 ||
-          results.weights.Size() != capture.weight_count ||
-          results.cudaStream != capture.cuda_stream) {
+      if (results.trackIndex != 0) {
+        fail_capture(capture, "Blendshape callback returned an unexpected track");
+        return false;
+      }
+      if (results.weights.Size() != capture.weight_count) {
         fail_capture(capture,
-                     "Blendshape callback returned an invalid result");
+                     "Blendshape callback returned an unexpected value count");
         return false;
       }
       auto& frame = capture.frames[results.timeStampCurrentFrame];
@@ -797,7 +739,7 @@ class Backend::Impl final {
     if (auto_audio2emotion_active_) {
       if (emotion_executor_->GetNbAvailableExecutions(0) != 0) {
         throw WorkerError(
-            "generation_failed",
+            "inference_failed",
             "Audio2Emotion did not consume all available audio");
       }
       sdk_check(bundle_->GetEmotionAccumulator(0).Close(),
@@ -842,7 +784,6 @@ class Backend::Impl final {
     }
     EmotionCapture capture;
     capture.canceled = &canceled;
-    capture.cuda_stream = bundle_->GetCudaStream().Data();
     capture.accumulator = &bundle_->GetEmotionAccumulator(0);
     capture.emotion_count = emotion_channels_.size();
     active_emotion_capture_ = &capture;
@@ -863,10 +804,10 @@ class Backend::Impl final {
         details = {{"sdk_error", capture.accumulation_error.message()},
                    {"sdk_error_value", capture.accumulation_error.value()}};
       }
-      throw WorkerError("generation_failed", capture.failure,
+      throw WorkerError("inference_failed", capture.failure,
                         std::move(details));
     }
-    sdk_check(execute_error, "Executing Audio2Emotion", "generation_failed");
+    sdk_check(execute_error, "Executing Audio2Emotion", "inference_failed");
   }
 
   void execute_face_once(std::atomic_bool& canceled,
@@ -876,7 +817,6 @@ class Backend::Impl final {
     }
     Capture capture;
     capture.canceled = &canceled;
-    capture.cuda_stream = bundle_->GetCudaStream().Data();
     capture.weight_count = executor().GetWeightCount();
     active_capture_ = &capture;
     std::error_code execute_error;
@@ -893,19 +833,19 @@ class Backend::Impl final {
       throw WorkerError("canceled", "Operation was stopped");
     }
     if (capture.failure != nullptr) {
-      throw WorkerError("generation_failed", capture.failure);
+      throw WorkerError("inference_failed", capture.failure);
     }
-    sdk_check(execute_error, "Executing Audio2Face", "generation_failed");
+    sdk_check(execute_error, "Executing Audio2Face", "inference_failed");
 
     for (const auto& [timestamp, pending] : capture.frames) {
       if (!pending.weights || !pending.eyes) {
-        throw WorkerError("generation_failed",
+        throw WorkerError("inference_failed",
                           "SDK callbacks returned an incomplete frame",
                           {{"timestamp", timestamp}});
       }
       if (previous_timestamp_.has_value() &&
           timestamp <= *previous_timestamp_) {
-        throw WorkerError("generation_failed",
+        throw WorkerError("inference_failed",
                           "SDK frame timestamps are not strictly increasing",
                           {{"timestamp", timestamp},
                            {"previous", *previous_timestamp_}});
@@ -916,7 +856,7 @@ class Backend::Impl final {
         const float value = pending.weights->Data()[channel];
         if (!std::isfinite(value)) {
           throw WorkerError(
-              "generation_failed",
+              "inference_failed",
               "SDK produced a non-finite blendshape weight",
               {{"timestamp", timestamp}, {"channel", channel}});
         }
@@ -924,7 +864,7 @@ class Backend::Impl final {
       }
       for (std::size_t index = 0; index < pending.eyes->Size(); ++index) {
         if (!std::isfinite(pending.eyes->Data()[index])) {
-          throw WorkerError("generation_failed",
+          throw WorkerError("inference_failed",
                             "SDK produced a non-finite eye rotation",
                             {{"timestamp", timestamp}, {"component", index}});
         }
@@ -932,7 +872,7 @@ class Backend::Impl final {
       resolve_arkit_eye_look(arkit, pending.eyes->Data(), eye_look_indices_);
       for (float& value : arkit) {
         if (!std::isfinite(value)) {
-          throw WorkerError("generation_failed",
+          throw WorkerError("inference_failed",
                             "ARKit resolver produced a non-finite weight",
                             {{"timestamp", timestamp}});
         }
@@ -1166,13 +1106,6 @@ Backend::~Backend() = default;
 
 json Backend::load_model(const ModelRequest& request) {
   return impl_->load_model(request);
-}
-
-void Backend::generate(const GenerateRequest& request,
-                       std::atomic_bool& canceled,
-                       const ProgressCallback& progress,
-                       const ResultPublicationGate& publication_gate) {
-  impl_->generate(request, canceled, progress, publication_gate);
 }
 
 json Backend::stream_start(const StreamRequest& request) {

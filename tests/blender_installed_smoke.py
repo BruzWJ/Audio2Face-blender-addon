@@ -32,14 +32,18 @@ def main() -> None:
     operator_names = set(dir(bpy.ops.a2f))
     assert "uninstall" not in operator_names
     assert {
-        "preview_play_pause",
-        "preview_rewind",
+        "play_pause",
+        "rewind",
         "load_preferred_emotion",
         "clear_preferred_emotion",
     } <= operator_names
-    assert {"preview_play", "preview_pause", "preview_stop"}.isdisjoint(
-        operator_names
-    )
+    assert {
+        "generate",
+        "start_wav_stream",
+        "stop_stream",
+        "preview_play_pause",
+        "preview_rewind",
+    }.isdisjoint(operator_names)
     runtime.get_controller().poll()
     assert bpy.context.scene.audio2face.status == "IDLE"
 
@@ -69,6 +73,8 @@ def main() -> None:
         == "DIR_PATH"
     )
     scene_property_names = set(properties.A2FSceneSettings.bl_rna.properties.keys())
+    assert set(properties.A2FTargetMeshItem.__annotations__) == {"object"}
+    assert "enabled" not in properties.A2FTargetMeshItem.bl_rna.properties
     assert not hasattr(properties, "A2FModelParameterItem")
     missing_scene_property_names = (
         set(properties.A2FSceneSettings.__annotations__) - scene_property_names
@@ -87,7 +93,7 @@ def main() -> None:
     }
     assert {
         "prediction_delay",
-        "preview_progress",
+        "playback_progress",
         "auto_audio2emotion",
         "manual_emotions",
         "preferred_emotions",
@@ -99,6 +105,7 @@ def main() -> None:
         "preferred_emotions"
     ].is_skip_save
     assert {
+        "preview_progress",
         "preview_volume",
         "preview_reset_on_stop",
         "stream_reset_on_stop",

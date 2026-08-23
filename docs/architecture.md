@@ -2,313 +2,146 @@
 
 ## System boundary
 
-Audio2Face has two audio modes on one GPU inference backend:
+Audio2Face has two audio sources and one incremental GPU inference path:
 
 ```text
-selected WAV ---------------- complete generation ------------ a2f-animation/2
-     |
-     +-- incremental WAV decoder --+
-live mono f32le PCM --------------+-- stream_start/chunk/end
-                                      |
-Blender 5.2 extension
-    |  private audio2face/3 JSONL over stdin/stdout
-package-local native worker on CUDA device 0
-    |
-shared audio accumulator --------+------------------------------+
-                                 |                              |
-                         Audio2Emotion v3.0             Audio2Face-3D v3.0
-                            (Auto on)                            ^
-                                 | generated                     |
-manual operation snapshot -------+-> SDK preferred mixer --+     |
-                         (Auto on, optional)               |     |
-manual operation snapshot ------------ direct (Auto off) --+     |
-                                                            |     |
-                                           emotion accumulator ---+
-                                                                  |
-                                            model-ordered ARKit coefficients
-                                                                  |
-Blender main thread -> per-frame Shape Key lookup on enabled mesh targets
+Selected WAV -- Play/Pause/seek/loop -- WAV decoder/resampler --+
+                                                               |
+external mono f32le PCM -- first chunk auto-starts ------------+-- stream
+                                                                   |
+Blender 5.2 extension -- private audio2face/4 JSONL -- native worker
+                                                                   |
+                             +-------------------------------------+------+
+                             |                                            |
+                    Audio2Emotion v3.0                         Audio2Face-3D v3.0
+                             |                                            |
+                    emotion accumulator                    raw face geometry
+                             |                                            |
+                             +------ default-model GPU ARKit solver ------+
+                                                   |
+                                  52 named scalar coefficient frames
+                                                   |
+                       Blender main-thread Shape Key delivery to targets
 ```
 
-The worker is a local child owned by Blender. It opens no port, and CUDA,
-TensorRT, Audio2X, and the model executors remain outside Blender's process.
-Installing or enabling the extension does not start the worker. Loading both
-models allocates their resources but does not run continuous inference. Only a
-generation operation or active PCM stream executes the models.
+Blender owns the package-local worker as a child process. The worker opens no
+port, and CUDA, TensorRT, Audio2X, model metadata, and inference executors stay
+outside Blender's process. **Start Worker** launches the child and loads the two
+models. **Stop Worker** exits it and releases model and CUDA resources.
+Installing or enabling the extension does not start the worker. Loading the
+models does not execute audio inference continuously.
 
-The only animation output is timestamped coefficient frames. The extension
-does not write geometry, vertices, bones, Actions, F-curves, or baked
-animation. Selected WAV buffers a complete result. Stream delivers frames
-incrementally and creates no result file.
+Both audio modes use the same `stream_start` / `stream_chunk` / `stream_end`
+worker operation. There is no complete-file generation method, animation
+result document, bake path, or separate user-facing stream-start command. The
+only animation output is timestamped ARKit coefficient frames.
 
 ## Blender extension
 
 The extension owns:
 
-- Add-on Preferences for one NVIDIA terms acceptance, model-source links, two
-  persistent external repository-root selections, model optimization,
-  cancellation, and progress;
-- compact, actionable sidebar status for setup gaps, active work, and errors,
-  plus worker and inference controls;
-- worker launch, handshake, model load, generation, streaming, cancellation,
-  and shutdown;
-- WAV, mode, and target selection;
-- emotion controls materialized from the worker's `model_schema`;
-- strict control-message, output-schema, result, and stream-frame validation;
-  and
-- bounded PCM sourcing, audio synchronization, and Shape Key value delivery.
+- Add-on Preferences for NVIDIA terms, model-source links, two persistent
+  external model-root selections, model optimization, cancellation, and logs;
+- worker launch, handshake, model loading, streaming, cancellation, and
+  shutdown;
+- Selected WAV playback, seeking, looping, and external PCM ingress;
+- emotion controls and the registered target-mesh list;
+- strict protocol, model-schema, and stream-frame validation; and
+- audio-clocked delivery of coefficient values to Shape Keys on Blender's main
+  thread.
 
-The **Audio Playback** section is drawn immediately after the Selected WAV /
-Stream selector. In Selected WAV mode it controls the completed result and its
-audio with one stateful Play/Pause button, Rewind, Loop, normalized scrubbing,
-timecode, and Prediction Delay. In Stream mode it reports the active stream
-clock and sample rate. There are no separate playback volume, stop, or reset
-controls.
+Worker I/O and WAV decoding run on standard-library threads. Those threads
+enqueue validated data and never mutate `bpy`. A registered Blender timer
+drains the queues and performs RNA and Shape Key updates on the main thread.
 
-### Mesh subscriptions
+### Mesh targets
 
-**Add Selected Meshes** accepts every selected mesh object. It does not inspect
-Shape Keys or require a particular channel set. At delivery time, Blender
-iterates the negotiated channel list and requests a Shape Key with that exact
-model-provided name from each enabled target's current Shape Key
-datablock. Existing keys receive the frame values and absent keys are skipped.
-There is no admission filter, stored name table, remapping, or bake path.
+**Add Selected Meshes** accepts any selected mesh object. It does not require
+Shape Keys and does not inspect topology. At delivery time, Blender iterates
+the model's negotiated channel list and requests a Shape Key with each exact
+model-provided name from every listed target. Existing keys receive the frame
+values; absent keys are skipped. There is no admission filter, stored target
+name table, alias, remapping, multiplier, direct vertex deformation, or bake.
+
+List membership is the complete delivery state: adding a mesh registers it for
+delivery, and removing it stops delivery.
 
 Objects sharing one Shape Key datablock are deduplicated for each frame. Every
 linked object using that datablock reflects the assigned values; independent
 motion requires single-user mesh data.
 
-Worker I/O runs on standard-library threads. Those threads enqueue validated
-messages and never mutate `bpy`. A registered Blender timer drains the queues
-and performs all RNA and Shape Key updates on Blender's main thread.
+## Geometry-to-ARKit solve
 
-## Package-local worker
+The Blender target does not need to share the Audio2Face reference mesh's
+topology. The default Audio2Face-3D v3.0 repository contains the solver's own
+identity-specific 24,002-vertex neutral basis and 52 pose bases. At model load,
+the worker selects the default identity at SDK index `0` and creates NVIDIA's
+GPU device-blendshape solver from that model-owned data.
 
-The native worker owns:
+During inference, Audio2Face produces raw geometry for its internal identity.
+The worker passes that geometry directly to the model-owned blendshape solver,
+which returns 52 scalar weights in the model's pose-name order. Six SDK eye
+rotation components are resolved into the eight corresponding eye-look
+channels in that same list. Only timestamped scalar weights cross the JSONL
+boundary. Raw geometry, the 24,002-vertex basis, jaw transforms, and eye
+rotations never enter Blender.
 
-- CUDA device 0 and one shared CUDA stream;
-- one Audio2Face-3D v3.0 diffusion/device-blendshape executor;
-- one Audio2Emotion v3.0 classifier executor;
-- selected WAV decoding, downmixing, and resampling;
-- shared audio and emotion accumulators;
-- direct manual-emotion accumulation or Audio2Emotion post-processing with
-  optional SDK preferred-emotion mixing;
-- in-place eye-look resolution into the model's output slots;
-- atomic Selected WAV result publication; and
-- incremental stream-frame publication.
+Consequently, a target mesh may have different vertex count and topology and
+may contain all, some, or none of the reported Shape Keys. Topology affects
+only how the artist authored those local Shape Keys; it is not an input to the
+Audio2Face-to-ARKit solve.
 
-stdin and stdout carry only UTF-8 JSON Lines using `audio2face/3`. Diagnostics
-use stderr. Selected generation writes a complete result to the absolute
-add-on-owned path submitted by Blender, then emits `result {}`. Stream requests send
-bounded audio chunks and receive one timestamped weight row per `stream_frame`
-event. Channel names are negotiated once in `load_model`; they are not repeated
-in each live event.
+## Audio lifecycles
 
-## Bundled runtime and model optimization
+### Selected WAV
 
-Setup is extension-level state, so it appears only in Audio2Face's Add-on
-Preferences. The page links to the NVIDIA Audio2Face-3D v3.0 and gated
-Audio2Emotion v3.0 repositories. Users download and extract both complete
-repositories, then use two persistent Blender `DIR_PATH` properties to select
-their exact clone or download roots anywhere on disk. For each selected root,
-the add-on removes the terminal separator emitted by `DIR_PATH` before applying
-strict canonical-path and filesystem-alias checks, then derives only
-`<root>/model.json`. It does not authenticate with a model host and never
-downloads, copies, relocates, or deletes either model root.
+Pressing **Play** is the inference trigger. Blender validates the WAV, creates
+an internal stream operation, incrementally decodes/downmixes/resamples the
+file to the model rate, and sends bounded mono f32le chunks. The worker reports
+`prebuffer_samples`; the source queues that input lead before audible playback
+begins. Returned frames are buffered and sampled against Blender's audio-device
+position rather than scene FPS.
 
-NVIDIA provides the Audio2Face-3D SDK source and ONNX-based model inputs. It
-does not provide the native Blender child described by this architecture. A
-release therefore consists of two self-contained Blender extension ZIPs:
+The one stateful control changes between **Play** and **Pause**. Pause freezes
+both audible audio and WAV source pacing. The duration-based seek control and
+**Rewind** cancel the current stream and restart at the requested audio
+position while retaining the loaded worker. **Loop** performs the same restart
+at zero after natural end. **Prediction Delay** offsets frame sampling relative
+to the audible clock; it does not delay audio or keep inference running while
+paused.
 
-- Windows x64, containing the project worker, Audio2X, the exact Windows
-  CUDA/TensorRT user-mode dependency closure, TensorRT's pinned `trtexec`, and
-  required notices; and
-- Linux x64, containing the corresponding ELF executables, shared objects,
-  and required notices.
+### External PCM
 
-Each extension contains its one native runtime directly at
-`audio2face/runtime/`. The runtime is package-local content, not a separately
-installed component. On Linux, Blender's ZIP installer drops executable mode
-bits, so the resolver validates the two exact ELF files and restores only
-their owner execute bit before launch. It contains no model files or serialized
-TensorRT engines. Windows PE files and Linux ELF files are not
-interchangeable, so there is no single cross-platform extension ZIP. The
-CUDA-only backend requires NVIDIA hardware and has no macOS or ARM package.
+Code already running in Blender uses
+[`audio2face.streaming`](../audio2face/streaming.py):
 
-The Windows runtime places every DLL beside both executables in `runtime/bin`,
-which makes the application directory the one package-local DLL source before
-Windows system resolution. Its package has no `runtime/lib` directory. The
-Linux runtime keeps executables in `runtime/bin`, shared objects in
-`runtime/lib`, and the worker receives only that directory in its child-only
-`LD_LIBRARY_PATH`. Neither platform carries duplicate native files in a second
-directory.
+1. `get_pcm_stream_requirements(scene)` reports the loaded model rate and
+   `None` before a stream has been accepted.
+2. The first `push_audio_f32le(payload, scene_name=...)` queues the exact bytes
+   and automatically submits the internal `stream_start` request on Blender's
+   main-thread poll.
+3. Once accepted, requirements report `(sample_rate, prebuffer_samples)` and
+   queued chunks are flushed in order.
+4. `end_pcm_stream(scene_name=...)` marks normal end-of-input after every
+   previously queued chunk.
 
-A clean native release job uses
-[`tools/build_runtime.py`](../tools/build_runtime.py) with an explicit platform
-and [`worker/runtime-lock.json`](../worker/runtime-lock.json). The dispatcher
-loads the dedicated
-[`build_windows_runtime.py`](../tools/build_windows_runtime.py) or
-[`build_linux_runtime.py`](../tools/build_linux_runtime.py) implementation. The
-selected implementation acquires the exact Audio2Face SDK revision, CUDA 12.9
-components, TensorRT 10.13 inputs, and CMake distribution for that platform.
-The Windows builder also acquires the locked CRT input. Each builds the worker
-and packages the `trtexec` shipped in the exact TensorRT binary input without
-consulting a workstation or runner CUDA or TensorRT installation. CUDA compiler files,
-headers, import/static libraries, and driver stubs are build inputs only. The
-NVIDIA display driver is the one required host component.
+The ingress FIFO and pending request count are bounded. External integrations
+own capture, resampling, and audible monitoring. They do not start or stop the
+worker and no network listener is created.
 
-The Windows producer is pinned to VCToolsVersion 14.43.34808, `cl` 19.43.34810,
-and Windows SDK 10.0.22621.0. The Linux producer is pinned to the Rocky Linux
-8.9 amd64 image digest in `runtime-lock.json`, glibc 2.28, GCC Toolset 11.2.1,
-the old libstdc++ ABI, and generic x86-64 code generation. Its runtime contains
-the exact locked Rocky BaseOS `libstdc++.so.6` and `libgcc_s.so.1` files rather
-than resolving either file from the user's host. The pipeline does not claim
-bit-for-bit reproducible native binaries.
+## Model schema and emotion settings
 
-The native CMake build writes `audio2face_worker` and `audio2x` directly into
-the temporary runtime package. Python adds the exact contract-defined runtime
-files after the native build command returns to host Python; there is no custom
-CMake staging target. The native builder publishes exactly
-`build/runtime/<platform>`. Then
-[`tools/build_extension.py`](../tools/build_extension.py) accepts that one
-handoff plus an absolute Blender 5.2 executable, creates the complete temporary
-extension source directory required by Blender, pins its manifest to one
-platform, writes one standard ZIP-LZMA archive, invokes Blender's extension
-validator on both the source directory and finished archive, and verifies the
-ZIP layout and bytes. The only outputs are
-`dist/audio2face-<version>-windows-x64.zip` and
-`dist/audio2face-<version>-linux-x64.zip`. Native compilation never occurs inside
-Blender's extension command.
+`load_model` receives only the two validated absolute top-level `model.json`
+paths. It returns a positive sample rate and one exact `model_schema`:
 
-`trtexec` comes from the matching locked TensorRT binary input. Windows uses
-the official ZIP; Linux streams six pinned NVIDIA RHEL8 RPMs one at a time and
-keeps only the required headers, regular runtime libraries, and `trtexec`. This
-preserves the model-defined `trt_info.json` command
-contract used by NVIDIA's Audio2Face SDK without inventing a second option
-schema. TensorRT engines are generated later on the user's GPU because a
-serialized engine is not a generally portable model artifact.
+- `channels`: 52 unique non-empty model-provided names in model order;
+- `emotion_channels`: ordered model-provided `{name, default}` records.
 
-At startup and before model optimization, the add-on resolves exactly
-`audio2face/runtime/` inside its own installed package. It requires the
-platform in `bundle.json` to match the host, checks the native executable
-format, confines every declared executable, library directory, and notice to
-that runtime tree, and constructs a child environment from only those
-package-local executable and library directories plus the operating-system
-directory required on Windows. It does not inspect `PATH`, `LD_LIBRARY_PATH`,
-an installed CUDA Toolkit, an installed TensorRT SDK, or another Audio2Face
-installation. It performs no online request.
+Blender has no independent output-channel list, identity selector, model
+variant selector, graph-node controls, or tensor controls. It builds the manual
+emotion collection and target delivery from the loaded default model schema.
 
-**Optimize Models**:
-
-1. validates each selection as a directory with a non-empty, valid top-level
-   `model.json` whose `networkPath` is exactly `network.trt`, non-empty
-   top-level `network.onnx` and `trt_info.json`, and every other descriptor
-   path resolved as a canonical relative, non-empty regular file confined to
-   that root; Git LFS pointers are rejected;
-2. validates the fixed bundled runtime payload;
-3. runs the bundled `trtexec` on CUDA device 0 for each selected model,
-   fixing NVIDIA's batch placeholders to the worker's one-track contract while
-   retaining every model-provided buffer range and other build parameter, and
-   builds each completed engine as a temporary sibling candidate;
-4. honors cancellation while each native build is running; and
-5. atomically replaces both `<selected-root>/network.trt` engines as one
-   transaction after both candidates succeed.
-
-Both external model roots must be writable. Re-running the action rebuilds
-both engines for the current GPU. A failed build or activation restores the
-previous pair and never exposes a partial `network.trt`. The selected roots
-remain exactly where the user placed them. Only those two external model roots
-are selected by the user; the executable, runtime libraries, SDK, engine
-builder, working directory, and CUDA device are fixed by the extension.
-
-A missing, damaged, or wrong-platform runtime invalidates the installed
-extension. The supported resolution is to install the correct complete
-platform ZIP. Preferences do not mutate or replace package runtime files.
-Release validation must exercise the supported model pair and confirm that
-Audio2Emotion's post-processed vector order agrees with Audio2Face's emotion
-order; SDK 1.0.0 reports the vector width but does not expose names for those
-output positions.
-
-Blender owns installation and removal. Its **Get Extensions** item menu invokes
-the native extension uninstaller, whose disable phase runs Audio2Face's normal
-process, stream, playback, timer, and handler cleanup before its package phase
-removes the installed extension and bundled worker/runtime libraries. The two
-selected model repository roots and their generated `network.trt` engines are
-external user data. Uninstall never deletes them. User-selected audio,
-`.blend` data, and shared GPU caches also remain outside this ownership
-boundary.
-
-## Lifecycle
-
-```text
-IDLE --Start Worker--> STARTING --hello--> LOADING_MODEL --> MODEL_READY
-                                                            |
-                              +-----------------------------+----------------+
-                              |                                              |
-                     Generate Selected WAV                              Start Stream
-                              |                                              |
-                         GENERATING                                     STREAMING
-                         /    |    \                                   /   |    \
-                    result canceled error                            end stop error
-                       |      |      |                               |   |    |
-                  COMPLETED READY  ERROR                           READY READY ERROR
-
-Any live worker --Stop Worker--> STOPPING --> IDLE
-Unexpected exit or rejected contract --> ERROR
-```
-
-**Start Worker** launches only the validated package-local child, sends
-`hello {}`, and loads the two selected Audio2Face and Audio2Emotion models.
-The controller retains the exact validated runtime/model specification across
-that handshake; it does not read changed Preferences between process launch
-and `load_model`. One worker accepts at most one generation or stream
-operation.
-
-**Generate ARKit Values** freezes the current model-described emotion settings
-and submits a complete WAV. **Cancel Generation** interrupts active execution
-and prevents a partial result commit.
-
-**Start WAV Stream** freezes the same settings and target subscriptions,
-incrementally decodes and resamples the selected WAV, and sends bounded mono
-f32le chunks. `stream_start` returns the exact model sample rate and
-`prebuffer_samples`. The built-in source satisfies that lead before starting
-audible playback, then samples frames against the audio-device clock.
-
-The public [`audio2face.streaming`](../audio2face/streaming.py) API lets code
-already running in Blender provide live model-rate mono f32le PCM. After
-`start_pcm_stream(scene)`, the source polls
-`get_pcm_stream_requirements(scene)` until it receives
-`(sample_rate, prebuffer_samples)`, queues that exact initial lead as immutable
-`bytes`, and owns audible monitoring. No socket is opened.
-
-Generation and stream submissions record exact `operation_id`-to-scene
-mappings. Asynchronous events route only through those controller-owned maps;
-RNA values are checked after lookup but are never scanned as a routing path.
-
-**Stop Stream** cancels the active stream and keeps the models ready. **Stop
-Worker** requests bounded shutdown and escalates to process termination if the
-child misses its deadlines. Destruction releases executors, model metadata,
-accumulators, and the CUDA stream in dependency order.
-
-## Model schema and settings
-
-The UI persists two model roots, but the extension derives their exact
-top-level `model.json` paths before protocol submission. `load_model` accepts
-only those two validated absolute descriptor paths. The worker selects the
-Audio2Face model's default identity at SDK index `0` internally. The protocol
-has no identity input or state. The response contains a positive `sample_rate`
-and one `model_schema` with exactly:
-
-- `channels`: the exact 52 unique model-provided names in model order;
-- `emotion_channels`: ordered `{name, default}` records from Audio2Face.
-
-Blender owns no identity selector or state and no independent emotion or
-output-channel list. It validates the schema and materializes RNA collections
-from it. Audio2Emotion post-process controls are operation settings rather
-than schema fields. Internal nodes, tensors, and other SDK parameter structures
-do not enter the schema.
-
-Every generation and stream-start request contains exactly:
+Every stream freezes one complete settings snapshot:
 
 ```json
 {
@@ -326,84 +159,85 @@ Every generation and stream-start request contains exactly:
 }
 ```
 
-The worker rejects missing or extra keys, missing or extra emotion names,
-out-of-range controls, and non-finite values. Settings, including the manual
-slider snapshot, remain frozen until the generation or stream ends.
+With `auto_audio2emotion` false, the manual values form a constant emotion
+driver. With it true, Audio2Emotion analyzes the same PCM and NVIDIA's
+post-processor applies strength, contrast, retained-emotion count, temporal
+blend, transition smoothing, and optional preferred-emotion mixing.
+**Preferred Emotion > Load** copies the current manual values into a distinct
+snapshot; later manual edits do not mutate it. **Clear** restores `null`. Auto
+Audio2Emotion and the preferred snapshot are independent controls. Selected
+WAV and external PCM use the same settings contract.
 
-With `auto_audio2emotion` false, the ordered manual values form one constant
-emotion vector for the operation. With it true, the Audio2Emotion executor
-analyzes the same audio. Its SDK post-processor applies overall strength,
-contrast, maximum retained emotions, temporal blending, and transition time.
-`preferred_emotion` is either `null` or a distinct snapshot containing every
-model-provided emotion name. Blender's **Load** action copies the current
-manual values into that snapshot; later manual edits do not mutate it, and
-**Clear** restores `null`. Blender saves the loaded snapshot with the scene.
-When the snapshot is present, for preferred strength
-`p` the SDK mixes `p * preferred + (1 - p) * generated`, then applies
-`emotion_strength`. When it is `null`, the generated vector is used without a
-preferred mix. Auto Audio2Emotion is independent of loading or clearing the
-snapshot. The rule is identical for Selected WAV and Stream.
+## Runtime and model ownership
 
-## ARKit output and playback
+Each release is one complete platform extension ZIP:
 
-The output preserves the model's reported 52-channel ARKit order. No Python
-channel list or reorder table defines it. The worker validates a unique
-52-name skin output and locates the eight eye-look semantics by name so six SDK
-eye-rotation components can update those slots in place. Raw geometry, jaw
-transforms, eye rotations, and other solver outputs do not leave the worker.
+- Windows x64: PE worker and `trtexec` plus DLLs in `runtime/bin`;
+- Linux x64: ELF worker and `trtexec` in `runtime/bin`, with shared objects in
+  `runtime/lib`.
 
-Every Selected WAV `a2f-animation/2` document has exactly six fields:
+The CUDA backend requires a supported NVIDIA GPU and driver. Native formats
+are not interchangeable; there is no macOS or ARM package. The add-on validates
+`runtime/bundle.json`, native formats, package confinement, and runtime files
+before launch. It never searches the host for another worker, CUDA Toolkit,
+TensorRT SDK, Audio2Face installation, or executable.
 
-- `schema`
-- `operation_id`
-- `sample_rate`
-- `channels`
-- `timestamps_samples`
-- `weights`
+The runtime contains no model files or TensorRT engines. Users select the exact
+roots of complete Audio2Face-3D v3.0 and Audio2Emotion v3.0 repositories in
+Add-on Preferences. **Optimize Models** validates each root and uses the
+bundled `trtexec` to create its GPU-specific `network.trt`. Those external roots
+and engines remain user-owned and are not removed when Blender uninstalls the
+extension.
 
-The channel array is the negotiated model order. Every row has exactly 52
-finite values in `[0.0, 1.0]`. Timestamps are non-empty, strictly increasing
-signed 64-bit audio-sample positions, and row count equals timestamp count.
-Live frames use the same negotiated channel order.
+Release builds use the pinned inputs in
+[`worker/runtime-lock.json`](../worker/runtime-lock.json). The native builder
+writes `build/runtime/<platform>`; the extension builder validates that
+handoff, embeds it in the temporary Blender package root, pins the manifest to
+one platform, validates the source and archive with Blender 5.2, and writes the
+platform ZIP. See the [worker build guide](../worker/README.md) for the native
+runtime contract.
 
-Selected playback verifies the add-on-owned result and submitted WAV source,
-linearly samples frames against Blender audio position, and delivers values to
-current target Shape Keys. Its single Play/Pause control changes with playback
-state; Rewind and Loop are Blender-local and do not invoke inference. A
-normalized scrub value maps exactly onto the audio duration and is accompanied
-by elapsed / duration timecode. Prediction Delay is bounded to `[-1.0, 1.0]`
-seconds and offsets only result sampling: positive values advance facial motion
-relative to the audible audio and negative values make it lag.
+## Lifecycle
 
-The streamed-WAV path uses a bounded frame buffer and Blender audio position.
-A live PCM source uses a monotonic presentation clock anchored to the first
-returned timestamp. `stream_end` and explicit stream stop never create a
-result file.
+```text
+IDLE --Start Worker--> STARTING --hello--> LOADING_MODEL --> MODEL_READY
+                                                            |
+                      +-------------------------------------+----------------+
+                      |                                                      |
+             Selected WAV Play                                  first external PCM
+                      |                                                      |
+                      +--------------------> STREAMING <---------------------+
+                                                |
+                         natural end / cancel / seek / loop / error
+                                                |
+                                  MODEL_READY or ERROR
+
+Any live worker --Stop Worker--> STOPPING --> IDLE
+Unexpected exit or rejected contract --> ERROR
+```
+
+One worker accepts at most one stream. Selected seek, rewind, and loop use
+cancel/restart inside the same worker lifecycle. A normal external end drains
+tail frames. Cancel stops queued execution without draining. **Stop Worker**
+requests bounded shutdown and escalates to process termination if the child
+misses its deadlines.
 
 ## Failure boundaries
 
-The extension accepts only the exact worker profile
-`nvidia-a2f3-a2e3-gpu-arkit52/3` and a non-empty worker version. Control records
+The extension accepts only protocol `audio2face/4`, worker profile
+`nvidia-a2f3-a2e3-gpu-arkit52/4`, and a non-empty worker version. Envelopes
 reject missing or unknown fields, duplicate JSON keys, non-finite numbers,
 invalid IDs, unknown methods or events, malformed UTF-8, and payloads over
-1 MiB. A malformed method response, malformed or misrouted event, unknown
-response/error ID, or id-less worker diagnostic is a terminal contract
-violation: Blender clears every active operation, stops live presentation,
-and shuts down that worker before another control message can mutate scene
-state.
+1 MiB. Malformed or misrouted output is a terminal contract violation: Blender
+clears active stream presentation and closes that worker before later messages
+can mutate scene state.
 
-PCM chunks contain non-empty finite little-endian float32 samples, cover at
-most one model-rate second, and are limited to 256 KiB before base64 encoding.
-Blender permits at most 64 pending chunk acknowledgements, providing bounded
-backpressure. Operation IDs, timestamps, sample rates, and all coefficient rows
-are validated before Blender state changes.
+Each PCM chunk is non-empty, finite little-endian float32 mono at the model
+rate and covers at most one second. The worker bounds its queued PCM to four
+seconds, and Blender also bounds pending acknowledgements and pre-start ingress.
+Operation IDs, timestamps, sample rates, channel layouts, and every coefficient
+row are validated before Blender state changes.
 
-Result files stay inside the add-on-owned results directory, are limited to
-512 MiB, and are committed atomically without replacing an existing file.
-Runtime validation, model optimization, and worker failures appear in Blender
-status. Unexpected child exit clears model and stream state and reports the
-latest worker diagnostic.
-
-Unregistering the extension stops result and live playback, cancels its WAV
-source and model optimization, unregisters the timer, and closes the worker
-before removing Blender classes and scene RNA.
+Unregistering the extension stops audio presentation, cancels WAV sourcing and
+model optimization, unregisters its timer, and closes the worker before
+removing Blender classes and scene RNA.

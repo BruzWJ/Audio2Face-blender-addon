@@ -38,7 +38,7 @@ def test_windows_native_transport_uses_binary_stdio() -> None:
 
 
 def test_native_worker_mirrors_the_python_wire_identity() -> None:
-    assert WORKER_PROFILE.rpartition("/")[2] == "3"
+    assert WORKER_PROFILE.rpartition("/")[2] == "4"
     assert f'constexpr const char* kProtocol = "{PROTOCOL_VERSION}";' in (
         WORKER_PROTOCOL_SOURCE
     )
@@ -71,12 +71,12 @@ def test_request_round_trip_is_compact_utf8_and_one_record() -> None:
     "line",
     [
         "{}\n",
-        '{"protocol":"audio2face/3","type":"response","id":"1","result":{}}',
+        '{"protocol":"audio2face/4","type":"response","id":"1","result":{}}',
         '{"protocol":"audio2face/999","type":"response","id":"1","result":{}}\n',
-        '{"protocol":"audio2face/3","type":"response","id":"1","result":{}}\n{}\n',
-        '{"protocol":"audio2face/3","type":"response","id":"1","result":{}}\n\n',
+        '{"protocol":"audio2face/4","type":"response","id":"1","result":{}}\n{}\n',
+        '{"protocol":"audio2face/4","type":"response","id":"1","result":{}}\n\n',
         b"\xff\n",
-        '{"protocol":"audio2face/3","type":"response","id":"1","id":"2","result":{}}\n',
+        '{"protocol":"audio2face/4","type":"response","id":"1","id":"2","result":{}}\n',
     ],
 )
 def test_decode_rejects_malformed_noncanonical_records(line: str | bytes) -> None:
@@ -103,7 +103,7 @@ def test_decode_rejects_malformed_noncanonical_records(line: str | bytes) -> Non
         {
             "protocol": PROTOCOL_VERSION,
             "type": "event",
-            "event": "progress",
+            "event": "stream_frame",
             "operation_id": 7,
             "data": {},
         },
@@ -137,11 +137,11 @@ def test_request_rejects_empty_id_unknown_method_and_extra_fields() -> None:
         encode_message(message)
 
 
-def test_canonical_result_event_requires_operation_id_and_exact_fields() -> None:
+def test_canonical_stream_event_requires_operation_id_and_exact_fields() -> None:
     event = {
         "protocol": PROTOCOL_VERSION,
         "type": "event",
-        "event": "result",
+        "event": "stream_frame",
         "operation_id": "operation-1",
         "data": {},
     }
@@ -176,6 +176,9 @@ def test_stream_methods_and_events_are_canonical_protocol_members() -> None:
         }
         assert decode_message(encode_message(event)) == event
 
+    with pytest.raises(ProtocolError, match="unsupported request method"):
+        encode_message(make_request("generate", {}))
+
 
 def test_error_requires_one_exact_shape() -> None:
     error = {
@@ -201,7 +204,7 @@ def test_error_requires_one_exact_shape() -> None:
 @pytest.mark.parametrize("bad_value", [math.nan, math.inf, -math.inf])
 def test_encode_rejects_non_json_numbers(bad_value: float) -> None:
     message = make_request(
-        "generate",
+        "stream_start",
         {
             "settings": {
                 "audio2emotion": {"emotion_strength": bad_value},
@@ -249,7 +252,7 @@ def test_protocol_normalizes_non_utf8_text_errors() -> None:
         encode_message(message)
 
     line = (
-        '{"protocol":"audio2face/3","type":"response","id":"1",'
+        '{"protocol":"audio2face/4","type":"response","id":"1",'
         '"result":{"value":"\ud800"}}\n'
     )
     with pytest.raises(ProtocolError, match="UTF-8"):

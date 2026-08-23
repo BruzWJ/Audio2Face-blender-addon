@@ -15,6 +15,13 @@ AppliedFrame = tuple[tuple[str, ...], tuple[float, ...]]
 @dataclass
 class _Settings:
     stream_time: float = 7.0
+    prediction_delay: float = 0.0
+    playback_state: str = "IDLE"
+    playback_time: float = 0.0
+    playback_duration: float = 0.0
+    playback_progress: float = 0.0
+    status: str = "MODEL_READY"
+    status_message: str = ""
 
 
 @dataclass
@@ -41,9 +48,17 @@ def live_module(
     monkeypatch.setitem(sys.modules, "bpy", bpy)
 
     applied: list[AppliedFrame] = []
-    preview = ModuleType("audio2face.preview")
-    preview.PreviewError = RuntimeError  # type: ignore[attr-defined]
-    preview.build_subscriptions = lambda _settings: (object(),)  # type: ignore[attr-defined]
+    shape_keys = ModuleType("audio2face.shape_keys")
+    shape_keys.ShapeKeyStreamError = ValueError  # type: ignore[attr-defined]
+    def validate_output_channels(channels: object) -> tuple[str, ...]:
+        if type(channels) is not list:
+            raise ValueError("channels must be a JSON array")
+        if len(channels) != 52:
+            raise ValueError("channels must contain exactly 52 names")
+        return tuple(channels)
+
+    shape_keys.validate_output_channels = validate_output_channels  # type: ignore[attr-defined]
+    shape_keys.build_subscriptions = lambda _settings: (object(),)  # type: ignore[attr-defined]
 
     def apply_shape_key_frame(
         _subscriptions: object,
@@ -54,8 +69,8 @@ def live_module(
         assert type(weights) is tuple
         applied.append((channels, weights))
 
-    preview.apply_shape_key_frame = apply_shape_key_frame  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, preview.__name__, preview)
+    shape_keys.apply_shape_key_frame = apply_shape_key_frame  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, shape_keys.__name__, shape_keys)
 
     module_name = "audio2face._live_stream_test"
     source = Path(__file__).resolve().parents[1] / "audio2face" / "live_stream.py"
@@ -96,7 +111,7 @@ def test_source_free_stream_applies_negative_timestamp_frame_immediately(
     assert controller.operation_id == "stream-1"
 
 
-def test_prepare_reports_only_the_missing_enabled_mesh_requirement(
+def test_prepare_reports_only_the_missing_target_mesh_requirement(
     live_module: tuple[ModuleType, _Scene, list[AppliedFrame]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -105,7 +120,7 @@ def test_prepare_reports_only_the_missing_enabled_mesh_requirement(
 
     with pytest.raises(
         live.LiveStreamError,
-        match="^no enabled target mesh is selected$",
+        match="^no target mesh is selected$",
     ):
         live.LiveStreamController().prepare(
             scene,
@@ -249,7 +264,9 @@ def test_terminal_event_cleans_external_stream_and_holds_final_values(
         MODEL_CHANNELS.copy(),
         audio_path=None,
         playback_started=None,
-        playback_stopped=lambda: stopped.append("stream-1"),
+        playback_stopped=lambda natural: stopped.append(
+            f"stream-1:{natural}"
+        ),
     )
     weights = [0.5] * len(MODEL_CHANNELS)
     controller.receive("stream-1", 1600, weights)
@@ -260,4 +277,83 @@ def test_terminal_event_cleans_external_stream_and_holds_final_values(
     assert controller.active is False
     assert controller.operation_id is None
     assert scene.audio2face.stream_time == 0.0
-    assert stopped == ["stream-1"]
+    assert stopped == ["stream-1:True"]
+
+
+def test_selected_audio_waits_for_worker_terminal_after_device_stops(
+    live_module: tuple[ModuleType, _Scene, list[AppliedFrame]],
+    tmp_path: Path,
+) -> None:
+    live, scene, _applied = live_module
+    audio_path = tmp_path / "voice.wav"
+    audio_path.write_bytes(b"RIFF")
+    stopped: list[bool] = []
+    controller = live.LiveStreamController()
+    controller.prepare(
+        scene,
+        "stream-1",
+        16_000,
+        MODEL_CHANNELS.copy(),
+        audio_path=audio_path,
+        playback_started=None,
+        playback_stopped=stopped.append,
+    )
+
+    class Handle:
+        status = "stopped"
+        position = 2.0
+        stop_calls = 0
+
+        def stop(self) -> None:
+            self.stop_calls += 1
+
+    handle = Handle()
+    controller._aud = SimpleNamespace(
+        STATUS_STOPPED="stopped",
+        STATUS_PLAYING="playing",
+        STATUS_PAUSED="paused",
+    )
+    controller._handle = handle
+    controller._duration = 2.0
+    scene.audio2face.playback_duration = 2.0
+
+    assert controller.tick() is True
+    assert controller.active is True
+    assert scene.audio2face.playback_time == pytest.approx(2.0)
+    assert stopped == []
+
+    controller.mark_terminal("stream-1")
+
+    assert controller.active is True
+    assert controller.tick() is False
+    assert controller.active is False
+    assert handle.stop_calls == 1
+    assert stopped == [True]
+
+
+def test_selected_audio_seek_endpoint_resolves_to_final_model_sample(
+    live_module: tuple[ModuleType, _Scene, list[AppliedFrame]],
+    tmp_path: Path,
+) -> None:
+    live, scene, _applied = live_module
+    audio_path = tmp_path / "voice.wav"
+    audio_path.write_bytes(b"RIFF")
+    seeks: list[tuple[float, bool]] = []
+    controller = live.LiveStreamController()
+    controller.prepare(
+        scene,
+        "stream-1",
+        16_000,
+        MODEL_CHANNELS.copy(),
+        audio_path=audio_path,
+        playback_started=None,
+        playback_seeked=lambda position, paused: seeks.append((position, paused)),
+        playback_stopped=None,
+    )
+    controller._handle = SimpleNamespace()
+    controller._duration = 2.0
+    scene.audio2face.playback_state = "PAUSED"
+
+    controller.request_seek(2.0)
+
+    assert seeks == [(pytest.approx(2.0 - (1.0 / 16_000)), True)]

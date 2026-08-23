@@ -1,8 +1,7 @@
 """Blender 5.2 extension entry point for Audio2Face.
 
-The protocol, result parsing, and process-client modules intentionally avoid
-importing :mod:`bpy`, which keeps their contracts testable by ordinary Python
-test runners.
+The protocol and process-client modules keep their non-Blender contracts
+testable by ordinary Python test runners.
 """
 
 from __future__ import annotations
