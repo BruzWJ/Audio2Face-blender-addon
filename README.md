@@ -9,9 +9,9 @@ only the exact root folders of the two complete NVIDIA model repositories they
 obtained separately.
 
 The extension produces 52-channel ARKit coefficients from a selected WAV or
-incremental mono float32 PCM. It drives existing Shape Key `value`
-properties on listed mesh targets. It does not write vertices, bones,
-Actions, F-curves, or baked animation.
+incremental mono float32 PCM and drives existing Shape Key `value` properties
+on listed mesh targets. Inference starts automatically with WAV playback or
+incoming PCM.
 
 ## Requirements
 
@@ -118,18 +118,17 @@ driver caches.
 3. In Selected WAV mode, choose a WAV. In Stream mode, a Blender integration
    supplies live mono f32le PCM through
    [`audio2face.streaming`](audio2face/streaming.py).
-4. Select any mesh objects and click **Add Selected Meshes**. Shape Keys are
-   not required when a mesh is added.
+4. Optionally select mesh objects and click **Add Selected Meshes**.
 5. Click **Start Worker**. Blender launches the verified package-local worker,
    negotiates the protocol, and loads both selected models.
 6. The manual emotion sliders remain available in both modes. Leave **Auto
-   Audio2Emotion** off to apply their operation-start values directly. Enable
+   Audio2Emotion** off to apply the current manual emotion vector directly. Enable
    it to infer emotion from the same audio. **Load** under **Preferred Emotion**
    captures the current manual sliders for mixing with generated emotion;
    **Clear** removes that captured preference.
 7. In Selected WAV mode, press **Play**. Playback automatically starts
    incremental inference and drives matching Shape Keys as frames arrive.
-   **Pause** freezes both audio and source pacing; seek, rewind, and loop restart
+   **Pause** freezes both audio and source pacing; seek and loop restart
    the inference stream at the requested position without restarting the
    worker.
 8. In Stream mode, the first `push_audio_f32le` call automatically starts the
@@ -139,19 +138,22 @@ driver caches.
 
 Installing or enabling the extension does not start the worker. Loading the
 models does not start continuous inference. GPU inference runs only while
-Selected WAV playback or an external PCM stream is active. There is no manual
-generation step, cached animation result, or separate stream-start control.
-**Start Worker** and **Stop Worker** control the GPU/model process lifecycle;
-audio playback and PCM arrival control inference within that lifecycle.
+Selected WAV playback or an external PCM stream is active. **Start Worker** and
+**Stop Worker** control the GPU/model process lifecycle; audio playback and PCM
+arrival control inference within that lifecycle.
 
 ## Mesh targets and channel delivery
 
 Every mesh in the target list receives the model channel stream, with no Shape
 Key admission check. At each frame, Blender uses each exact model-provided
 channel name to look up a Shape Key on each listed target.
+The target collection is resolved again for every delivered frame, so adding
+or removing a mesh takes effect on the next frame without restarting playback
+or inference. An empty list simply suppresses Blender writes; it does not stop
+the audio or worker stream.
 If that key exists, its value is assigned; if it does not, that channel is
 skipped for that target. Names are never translated or remapped, and there is
-no per-target multiplier, bake step, or direct mesh deformation.
+no per-target multiplier.
 
 The loaded model supplies the exact ordered 52-channel list. A target can
 contain all, some, or none of those Shape Keys. Several objects may share one
@@ -175,7 +177,7 @@ incrementally decodes, downmixes, and resamples the WAV, starts an internal
 `stream_start` / chunk / `stream_end` operation, and begins audible playback
 after the worker's required input lead is queued. ARKit frames are sampled
 against Blender's audio-device clock as they arrive. **Pause** freezes both
-audio and WAV pacing. **Rewind**, **Loop**, and the duration-based seek control
+audio and WAV pacing. **Loop** and the duration-based seek control
 restart that stream at the requested audio position while keeping the worker
 and models loaded. The elapsed / duration timecode and **Prediction Delay**
 from `-1.0` to `1.0` seconds remain playback controls. Positive delay advances
@@ -191,42 +193,41 @@ the worker acknowledges it. Subsequent requirements return
 chunk. The integration owns capture, resampling, and audible monitoring. No
 port or network listener is opened.
 
-The worker reports the initial model-rate `prebuffer_samples` requirement.
-With automatic emotion enabled, it covers both Audio2Face and Audio2Emotion
-readiness. Streamed frames are buffered and sampled against the local audio or
-presentation clock; scene FPS is not used for synchronization.
+The worker reports an initial model-rate `prebuffer_samples` requirement that
+covers both Audio2Face and Audio2Emotion readiness, so automatic emotion can be
+toggled during an active stream. Streamed frames are buffered and sampled
+against the local audio or presentation clock; scene FPS is not used for
+synchronization.
 
 ## Model-driven emotion
 
-`load_model` returns a self-describing `model_schema` with exactly
-`channels` and `emotion_channels`. Blender builds target-channel delivery and
-manual emotion controls from those values. It does not define an independent
-list of names. The worker uses the Audio2Face model's default identity at SDK
-index `0` internally; Blender has no identity selector or identity state.
+`load_model` returns a self-describing `model_schema` with exactly `channels`,
+`emotion_channels`, and `audio2face_defaults`. Blender builds target-channel
+delivery and manual emotion controls from the first two values and seeds its
+fixed Audio2Face controls from the model-reported defaults. It does not define
+an independent output or emotion name list. The worker uses the Audio2Face
+model's default identity at SDK index `0` internally; Blender has no identity
+selector or identity state.
 
-Audio2Emotion post-process controls are operation settings, not model-schema
-fields. The sidebar keeps them available for configuration regardless of the
-**Auto Audio2Emotion** toggle, and the model-described manual sliders also
-remain visible in both modes. Both input modes submit one exact emotion
-settings object; these are its defaults:
+`stream_start` installs one exact initial settings snapshot containing the fixed
+18-field `audio2face` object, `auto_audio2emotion`, all model-described
+`manual_emotions`, and the `audio2emotion` object. Audio2Emotion controls remain
+available regardless of the **Auto Audio2Emotion** toggle, and the manual
+sliders remain visible in both modes. These are the Audio2Emotion defaults:
 
 ```json
 {
-  "auto_audio2emotion": false,
-  "manual_emotions": {"<model emotion name>": 0.0},
-  "audio2emotion": {
-    "emotion_strength": 0.6,
-    "emotion_contrast": 1.0,
-    "max_emotions": 6,
-    "live_blend_coef": 0.7,
-    "transition_smoothing": 0.5,
-    "preferred_emotion": null,
-    "preferred_emotion_strength": 0.5
-  }
+  "emotion_strength": 0.6,
+  "emotion_contrast": 1.0,
+  "max_emotions": 6,
+  "live_blend_coef": 0.7,
+  "transition_smoothing": 0.5,
+  "preferred_emotion": null,
+  "preferred_emotion_strength": 0.5
 }
 ```
 
-With automatic emotion off, the operation-start manual snapshot is the direct,
+With automatic emotion off, the current manual snapshot is the direct,
 constant emotion driver. With it on, Audio2Emotion generates timestamped
 values and applies strength, contrast, retained-emotion count, temporal blend,
 and transition controls through NVIDIA's SDK post-processor. **Load** copies
@@ -238,10 +239,15 @@ computes `p * preferred + (1 - p) * generated`, then applies the overall
 emotion strength. Auto Audio2Emotion and the Preferred Emotion snapshot are
 independent controls.
 
-The same complete settings snapshot and behavior apply to Selected WAV and
-Stream. Changing a control does not alter an operation already in progress; a
-stream must be restarted to use the new values. Internal graph nodes and
-tensors are not controls.
+The same complete settings contract applies to Selected WAV and Stream. A
+control edit queues one complete replacement snapshot on the active operation.
+The worker resets only its inference state, replays a bounded recent PCM
+context, and publishes replacement ARKit frames on the same timeline. The
+operation ID, audible playback, play/pause state, external PCM ingress, loaded
+models, and worker process remain unchanged. The exact fields, types, ranges,
+and replay boundary are defined in
+[`docs/protocol.md`](docs/protocol.md#settings-document). Internal graph nodes
+and tensors are not controls.
 
 ## Output contract
 
@@ -251,7 +257,7 @@ channel slots without reordering the list. Both modes receive incremental
 `stream_frame` records in that negotiated order. Coefficients are finite and
 within `[0.0, 1.0]`; timestamps are integer audio-sample positions. Raw
 geometry, jaw transforms, eye rotations, and internal solver meshes never
-leave the worker, and neither mode creates an animation result file.
+leave the worker.
 
 See [architecture](docs/architecture.md), [protocol](docs/protocol.md), and the
 [worker build guide](worker/README.md) for the full contracts.

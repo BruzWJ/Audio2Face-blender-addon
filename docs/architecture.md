@@ -9,7 +9,7 @@ Selected WAV -- Play/Pause/seek/loop -- WAV decoder/resampler --+
                                                                |
 external mono f32le PCM -- first chunk auto-starts ------------+-- stream
                                                                    |
-Blender 5.2 extension -- private audio2face/4 JSONL -- native worker
+Blender 5.2 extension -- private audio2face/5 JSONL -- native worker
                                                                    |
                              +-------------------------------------+------+
                              |                                            |
@@ -31,10 +31,9 @@ models. **Stop Worker** exits it and releases model and CUDA resources.
 Installing or enabling the extension does not start the worker. Loading the
 models does not execute audio inference continuously.
 
-Both audio modes use the same `stream_start` / `stream_chunk` / `stream_end`
-worker operation. There is no complete-file generation method, animation
-result document, bake path, or separate user-facing stream-start command. The
-only animation output is timestamped ARKit coefficient frames.
+Both audio modes use the same `stream_start` / `stream_chunk` /
+`stream_settings` / `stream_end` worker operation and receive timestamped ARKit
+coefficient frames.
 
 ## Blender extension
 
@@ -45,7 +44,7 @@ The extension owns:
 - worker launch, handshake, model loading, streaming, cancellation, and
   shutdown;
 - Selected WAV playback, seeking, looping, and external PCM ingress;
-- emotion controls and the registered target-mesh list;
+- Audio2Face and emotion controls and the registered target-mesh list;
 - strict protocol, model-schema, and stream-frame validation; and
 - audio-clocked delivery of coefficient values to Shape Keys on Blender's main
   thread.
@@ -56,15 +55,17 @@ drains the queues and performs RNA and Shape Key updates on the main thread.
 
 ### Mesh targets
 
-**Add Selected Meshes** accepts any selected mesh object. It does not require
-Shape Keys and does not inspect topology. At delivery time, Blender iterates
-the model's negotiated channel list and requests a Shape Key with each exact
-model-provided name from every listed target. Existing keys receive the frame
-values; absent keys are skipped. There is no admission filter, stored target
-name table, alias, remapping, multiplier, direct vertex deformation, or bake.
+**Add Selected Meshes** accepts any selected mesh object without inspecting
+Shape Keys or topology. At delivery time, Blender iterates the model's
+negotiated channel list and requests a Shape Key with each exact model-provided
+name from every listed target. Existing keys receive the frame values and
+absent keys are skipped.
 
-List membership is the complete delivery state: adding a mesh registers it for
-delivery, and removing it stops delivery.
+List membership is the complete delivery state and is resolved again for every
+delivered frame; target subscriptions are not cached. Adding or removing a mesh
+during playback therefore affects the next delivered frame. An empty list is a
+valid no-subscriber state: inference and audio continue, and a later-added mesh
+receives the next frame.
 
 Objects sharing one Shape Key datablock are deduplicated for each frame. Every
 linked object using that datablock reflects the assigned values; independent
@@ -103,12 +104,11 @@ begins. Returned frames are buffered and sampled against Blender's audio-device
 position rather than scene FPS.
 
 The one stateful control changes between **Play** and **Pause**. Pause freezes
-both audible audio and WAV source pacing. The duration-based seek control and
-**Rewind** cancel the current stream and restart at the requested audio
-position while retaining the loaded worker. **Loop** performs the same restart
-at zero after natural end. **Prediction Delay** offsets frame sampling relative
-to the audible clock; it does not delay audio or keep inference running while
-paused.
+both audible audio and WAV source pacing. The duration-based seek control
+cancels the current stream and restarts at the requested audio position while
+retaining the loaded worker. **Loop** performs the same restart at zero after
+natural end. **Prediction Delay** offsets frame sampling relative to the
+audible clock; it does not delay audio or keep inference running while paused.
 
 ### External PCM
 
@@ -129,35 +129,27 @@ The ingress FIFO and pending request count are bounded. External integrations
 own capture, resampling, and audible monitoring. They do not start or stop the
 worker and no network listener is created.
 
-## Model schema and emotion settings
+## Model schema and inference settings
 
 `load_model` receives only the two validated absolute top-level `model.json`
 paths. It returns a positive sample rate and one exact `model_schema`:
 
 - `channels`: 52 unique non-empty model-provided names in model order;
-- `emotion_channels`: ordered model-provided `{name, default}` records.
+- `emotion_channels`: ordered model-provided `{name, default}` records; and
+- `audio2face_defaults`: the exact model-reported 18-field Audio2Face settings
+  object.
 
 Blender has no independent output-channel list, identity selector, model
 variant selector, graph-node controls, or tensor controls. It builds the manual
-emotion collection and target delivery from the loaded default model schema.
+emotion collection and target delivery from the loaded default model schema,
+and seeds all Audio2Face controls from the returned defaults.
 
-Every stream freezes one complete settings snapshot:
-
-```json
-{
-  "auto_audio2emotion": false,
-  "manual_emotions": {"<every advertised emotion name>": 0.0},
-  "audio2emotion": {
-    "emotion_strength": 0.6,
-    "emotion_contrast": 1.0,
-    "max_emotions": 6,
-    "live_blend_coef": 0.7,
-    "transition_smoothing": 0.5,
-    "preferred_emotion": null,
-    "preferred_emotion_strength": 0.5
-  }
-}
-```
+Every `stream_start` installs one complete settings snapshot containing the
+exact 18-field `audio2face` object, `auto_audio2emotion`, every advertised
+`manual_emotions` value, and the seven-field `audio2emotion` object. The field
+names, types, and ranges are defined by the
+[protocol](protocol.md#settings-document). `stream_settings` replaces that
+whole snapshot at an ordered boundary; partial setting updates do not exist.
 
 With `auto_audio2emotion` false, the manual values form a constant emotion
 driver. With it true, Audio2Emotion analyzes the same PCM and NVIDIA's
@@ -165,8 +157,10 @@ post-processor applies strength, contrast, retained-emotion count, temporal
 blend, transition smoothing, and optional preferred-emotion mixing.
 **Preferred Emotion > Load** copies the current manual values into a distinct
 snapshot; later manual edits do not mutate it. **Clear** restores `null`. Auto
-Audio2Emotion and the preferred snapshot are independent controls. Selected
-WAV and external PCM use the same settings contract.
+Audio2Emotion and the preferred snapshot are independent controls. Both
+Selected WAV and external PCM apply control edits to their current operation by
+resetting the two executors and accumulators and replaying a bounded PCM
+context; audio transport is not restarted or discarded.
 
 ## Runtime and model ownership
 
@@ -216,7 +210,7 @@ Any live worker --Stop Worker--> STOPPING --> IDLE
 Unexpected exit or rejected contract --> ERROR
 ```
 
-One worker accepts at most one stream. Selected seek, rewind, and loop use
+One worker accepts at most one stream. Selected seek and loop use
 cancel/restart inside the same worker lifecycle. A normal external end drains
 tail frames. Cancel stops queued execution without draining. **Stop Worker**
 requests bounded shutdown and escalates to process termination if the child
@@ -224,8 +218,8 @@ misses its deadlines.
 
 ## Failure boundaries
 
-The extension accepts only protocol `audio2face/4`, worker profile
-`nvidia-a2f3-a2e3-gpu-arkit52/4`, and a non-empty worker version. Envelopes
+The extension accepts only protocol `audio2face/5`, worker profile
+`nvidia-a2f3-a2e3-gpu-arkit52/5`, and a non-empty worker version. Envelopes
 reject missing or unknown fields, duplicate JSON keys, non-finite numbers,
 invalid IDs, unknown methods or events, malformed UTF-8, and payloads over
 1 MiB. Malformed or misrouted output is a terminal contract violation: Blender

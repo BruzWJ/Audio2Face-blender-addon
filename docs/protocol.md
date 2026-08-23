@@ -1,4 +1,4 @@
-# Worker protocol `audio2face/4`
+# Worker protocol `audio2face/5`
 
 ## Transport and envelopes
 
@@ -15,46 +15,46 @@ rejected.
 A request contains exactly:
 
 ```json
-{"protocol":"audio2face/4","type":"request","id":"1","method":"hello","params":{}}
+{"protocol":"audio2face/5","type":"request","id":"1","method":"hello","params":{}}
 ```
 
 `id` is a non-empty string of at most 128 characters. A successful response
 repeats it and contains an object `result`:
 
 ```json
-{"protocol":"audio2face/4","type":"response","id":"1","result":{}}
+{"protocol":"audio2face/5","type":"response","id":"1","result":{}}
 ```
 
 A request error contains exact `code`, `message`, and `details` fields. `id` is
 included only when it could be recovered safely:
 
 ```json
-{"protocol":"audio2face/4","type":"error","id":"1","error":{"code":"invalid_params","message":"invalid request","details":{}}}
+{"protocol":"audio2face/5","type":"error","id":"1","error":{"code":"invalid_params","message":"invalid request","details":{}}}
 ```
 
 An asynchronous event contains exact `event`, `operation_id`, and object `data`
 fields in addition to `protocol` and `type`:
 
 ```json
-{"protocol":"audio2face/4","type":"event","event":"stream_ended","operation_id":"stream-1","data":{}}
+{"protocol":"audio2face/5","type":"event","event":"stream_ended","operation_id":"stream-1","data":{}}
 ```
 
 The only request methods are `hello`, `load_model`, `stream_start`,
-`stream_chunk`, `stream_end`, `cancel`, and `shutdown`. The only events are
-`stream_frame`, `stream_ended`, and `error`. The worker accepts one active
-stream. A request response is emitted before any event unlocked by that
-request.
+`stream_chunk`, `stream_settings`, `stream_end`, `cancel`, and `shutdown`. The
+only events are `stream_frame`, `stream_reset`, `stream_ended`, and `error`.
+The worker accepts one active stream. A request response is emitted before any
+event unlocked by that request.
 
 Selected WAV playback and external PCM use this same stream contract. Play and
 first-chunk auto-start are Blender controller behavior, not additional worker
-methods. There is no `generate` method or result-file protocol.
+methods.
 
 ## `hello`
 
 Parameters are exactly `{}`. The result is exactly:
 
 ```json
-{"worker_profile":"nvidia-a2f3-a2e3-gpu-arkit52/4","worker_version":"0.1.0"}
+{"worker_profile":"nvidia-a2f3-a2e3-gpu-arkit52/5","worker_version":"0.1.0"}
 ```
 
 Blender requires that exact profile and a non-empty worker version. `hello`
@@ -77,30 +77,17 @@ from each. Setup has already validated the repositories and their optimized
 `network.trt` engines. The worker selects the default Audio2Face identity at
 SDK index `0`; identity is not a protocol input or schema field.
 
-Loading creates the device-0 Audio2Face diffusion/geometry executor, the
-model-owned GPU blendshape solver, the Audio2Emotion classifier executor, and
-shared accumulators. The selected default v3 model's solver data contains its
-internal 24,002-vertex neutral basis and 52 pose bases. That data is used only
-inside the worker to translate raw model geometry into scalar weights; Blender
-target geometry is never a protocol input. Loading allocates resources but
-does not execute audio inference.
+Loading allocates the device-0 Audio2Face, blendshape-solver, and Audio2Emotion
+resources but does not execute audio inference.
 
-The response contains exactly `sample_rate` and `model_schema`:
-
-```json
-{
-  "sample_rate": 16000,
-  "model_schema": {
-    "channels": ["<52 exact model-provided names in model order>"],
-    "emotion_channels": [{"name": "<model emotion>", "default": 0.0}]
-  }
-}
-```
-
-`channels` contains 52 unique non-empty strings in the model's order.
-`emotion_channels` is an ordered array of exact `{name, default}` objects with
-unique names and finite defaults in `[0.0, 1.0]`. Internal graph nodes, tensors,
-geometry, identities, and parameter structures are outside the schema.
+The response contains exactly `sample_rate` and `model_schema`. `sample_rate`
+is a positive integer. `model_schema` contains exactly `channels`,
+`emotion_channels`, and `audio2face_defaults`: `channels` is 52 unique non-empty
+strings in model order; `emotion_channels` is an ordered array of exact
+`{name, default}` objects with unique names and finite defaults in `[0.0, 1.0]`;
+and `audio2face_defaults` is the exact 18-field `audio2face` object defined below,
+populated from the loaded executor. Internal graph nodes, tensors, geometry,
+identities, and parameter structures are outside the schema.
 
 ## Settings document
 
@@ -108,6 +95,26 @@ Every `stream_start` request includes a `settings` object with exactly:
 
 ```json
 {
+  "audio2face": {
+    "input_strength": 1.0,
+    "lower_face_smoothing": 0.006,
+    "upper_face_smoothing": 0.001,
+    "lower_face_strength": 1.0,
+    "upper_face_strength": 1.0,
+    "face_mask_level": 0.6,
+    "face_mask_softness": 0.0085,
+    "skin_strength": 1.0,
+    "blink_strength": 1.0,
+    "eyelid_open_offset": 0.0,
+    "lip_open_offset": 0.0,
+    "eyeballs_strength": 1.0,
+    "saccade_strength": 0.6,
+    "right_eye_rot_x_offset": 0.0,
+    "right_eye_rot_y_offset": 0.0,
+    "left_eye_rot_x_offset": 0.0,
+    "left_eye_rot_y_offset": 0.0,
+    "eye_saccade_seed": 0
+  },
   "auto_audio2emotion": false,
   "manual_emotions": {
     "<every model_schema emotion name>": 0.0
@@ -123,6 +130,18 @@ Every `stream_start` request includes a `settings` object with exactly:
   }
 }
 ```
+
+`audio2face` contains exactly the 18 keys shown. All fields except
+`eye_saccade_seed` are finite JSON floats. Their inclusive ranges are:
+
+- `input_strength`: `[0.0, 3.0]`;
+- `lower_face_smoothing`, `upper_face_smoothing`: `[0.0, 0.1]`;
+- `lower_face_strength`, `upper_face_strength`, `skin_strength`,
+  `blink_strength`, `eyeballs_strength`, `saccade_strength`: `[0.0, 2.0]`;
+- `face_mask_level`: `[0.0, 1.0]` and `face_mask_softness`: `[0.001, 0.5]`;
+- `eyelid_open_offset`: `[-1.0, 1.0]` and `lip_open_offset`: `[-0.2, 0.2]`;
+- the four `*_eye_rot_*_offset` fields: `[-10.0, 10.0]`; and
+- `eye_saccade_seed`: JSON integer in `[0, 4999]`.
 
 `manual_emotions` contains every advertised emotion name exactly once and no
 other key. Values are finite in `[0.0, 1.0]`. The `audio2emotion` object has
@@ -141,45 +160,26 @@ Partial documents and unknown keys are rejected. With
 driver. With it true, Audio2Emotion analyzes the same stream and NVIDIA's
 post-processor applies the nested controls. A non-null preferred snapshot is
 mixed as `p * preferred + (1 - p) * generated`, followed by overall emotion
-strength. The settings remain frozen until the stream ends or is canceled.
+strength. `stream_start` installs the initial complete snapshot and
+`stream_settings` replaces it at one ordered replay boundary. Partial setting
+updates do not exist.
 
 ## `stream_start`
 
-Parameters contain exactly:
-
-```json
-{
-  "operation_id": "stream-1",
-  "sample_rate": 16000,
-  "settings": {
-    "auto_audio2emotion": true,
-    "manual_emotions": {"<model emotion>": 0.0},
-    "audio2emotion": {
-      "emotion_strength": 0.6,
-      "emotion_contrast": 1.0,
-      "max_emotions": 6,
-      "live_blend_coef": 0.7,
-      "transition_smoothing": 0.5,
-      "preferred_emotion": null,
-      "preferred_emotion_strength": 0.5
-    }
-  }
-}
-```
-
-`operation_id` is non-empty and at most 128 characters. `sample_rate` must
-equal the rate returned by `load_model`; Blender's source adapters own WAV
-conversion and external integrations own their resampling. The worker freezes
-settings, resets incremental executors and accumulators, then returns exactly:
+Parameters contain exactly `operation_id`, `sample_rate`, and `settings`.
+`operation_id` is non-empty and at most 128 characters, `sample_rate` equals the
+rate returned by `load_model`, and `settings` is the complete object defined
+under **Settings document**. Blender's source adapters own WAV conversion and
+external integrations own their resampling. The worker applies the snapshot,
+resets incremental executors and accumulators, then returns exactly:
 
 ```json
 {"sample_rate":16000,"prebuffer_samples":60000}
 ```
 
-`prebuffer_samples` is a non-negative integer at the model rate. It is the
-Audio2Face input lead required before a coefficient frame becomes available.
-When automatic emotion is active, it is the greater of the Audio2Face lead and
-Audio2Emotion readiness window.
+`prebuffer_samples` is a non-negative integer at the model rate and is always
+the greater of the Audio2Face input lead and Audio2Emotion readiness window.
+It does not change when automatic emotion is toggled.
 
 ## `stream_chunk`
 
@@ -200,7 +200,7 @@ frame event has exact data fields `timestamp_sample` and `weights`:
 
 ```json
 {
-  "protocol": "audio2face/4",
+  "protocol": "audio2face/5",
   "type": "event",
   "event": "stream_frame",
   "operation_id": "stream-1",
@@ -210,13 +210,46 @@ frame event has exact data fields `timestamp_sample` and `weights`:
 
 The abbreviated `weights` array contains exactly 52 finite values in
 `[0.0, 1.0]`, ordered by `model_schema.channels`. `timestamp_sample` is a
-strictly increasing signed 64-bit position at the model sample rate. Events do
-not repeat channel names.
+signed 64-bit position at the model sample rate. It is strictly increasing
+from `stream_start`, and strictly increasing again after every `stream_reset`.
+Events do not repeat channel names.
 
-The worker obtains these values by running the raw Audio2Face geometry through
-the default v3 model's internal GPU blendshape basis and resolving eye
-rotations into model-named eye-look slots. Raw geometry and solver bases are
-never serialized.
+## `stream_settings`
+
+Parameters contain exactly `operation_id` and `settings`. The `settings` value
+is one complete object with the exact four top-level fields and nested shapes
+defined under **Settings document**; partial objects and unknown keys remain
+invalid.
+
+The command occupies one position in the same queue as `stream_chunk` and
+`stream_end`. All chunks queued before it are processed with the prior
+snapshot, and all chunks queued after it are processed with the new snapshot.
+The operation ID and audio transport remain active. The response is exactly
+`{}`.
+
+For live reevaluation, the worker retains a bounded host copy of the most
+recent PCM: the greater of the Audio2Face and Audio2Emotion input windows plus
+one model-rate second. At the ordered boundary it resets the Audio2Face
+executor, Audio2Emotion executor, audio accumulator, and emotion accumulator;
+applies the complete new snapshot; and replays that retained PCM. This is the
+required reset-before-set lifecycle for the SDK's Audio2Face input, skin, and
+eye parameters. Switching between automatic and manual emotion therefore also
+starts from reset emotion state.
+
+Before any replayed frame, the worker emits exactly:
+
+```json
+{"protocol":"audio2face/5","type":"event","event":"stream_reset","operation_id":"stream-1","data":{}}
+```
+
+`stream_reset {}` means Blender must discard its entire buffered frame timeline
+for that operation and reset its frame-order check. Clearing the whole buffer
+is deliberate: diffusion can emit lead-in frames with negative SDK-local
+timestamps, so a cutoff inferred only from the retained PCM start would be
+unsafe. Replayed frame timestamps are still absolute: the worker adds the
+retained history's operation-relative start sample to each SDK-local timestamp.
+They are strictly increasing after the reset event. PCM commands already queued
+after `stream_settings` are neither canceled nor discarded.
 
 ## `stream_end`
 
@@ -225,11 +258,11 @@ closes input, drains padded tail frames, waits for scheduled GPU work, and then
 emits:
 
 ```json
-{"protocol":"audio2face/4","type":"event","event":"stream_ended","operation_id":"stream-1","data":{}}
+{"protocol":"audio2face/5","type":"event","event":"stream_ended","operation_id":"stream-1","data":{}}
 ```
 
 Every final `stream_frame` precedes `stream_ended`. Both models remain loaded,
-ready for another stream. No animation file is created.
+ready for another stream.
 
 ## `cancel`
 
@@ -238,8 +271,8 @@ stream receives an immediate `{}` response. Queued input and execution stop
 without draining, followed by `stream_ended {}`. An unknown, inactive, or
 already terminal ID returns `operation_not_found`.
 
-Blender uses cancellation internally for seek, rewind, loop restart, playback
-cleanup, and failure recovery. It is not a separate result-management path.
+Blender uses cancellation internally for seek, loop restart, playback
+cleanup, and failure recovery.
 
 ## `shutdown`
 
@@ -255,7 +288,7 @@ An asynchronous inference failure uses an `error` event with exact `code` and
 `message` data:
 
 ```json
-{"protocol":"audio2face/4","type":"event","event":"error","operation_id":"stream-1","data":{"code":"inference_failed","message":"operation failed"}}
+{"protocol":"audio2face/5","type":"event","event":"error","operation_id":"stream-1","data":{"code":"inference_failed","message":"operation failed"}}
 ```
 
 Request validation failures use the request error envelope. Worker error codes
