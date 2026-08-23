@@ -19,6 +19,9 @@ from audio2face.protocol import (
 WORKER_PROTOCOL_SOURCE = (
     Path(__file__).resolve().parents[1] / "worker" / "src" / "protocol.cpp"
 ).read_text(encoding="utf-8")
+WORKER_MAIN_SOURCE = (
+    Path(__file__).resolve().parents[1] / "worker" / "src" / "main.cpp"
+).read_text(encoding="utf-8")
 
 
 def test_native_transport_requires_lf_and_rejects_cr() -> None:
@@ -26,6 +29,12 @@ def test_native_transport_requires_lf_and_rejects_cr() -> None:
     assert '"JSONL request must end with LF"' in WORKER_PROTOCOL_SOURCE
     assert "line.find('\\r')" in WORKER_PROTOCOL_SOURCE
     assert '"JSONL request must not contain CR"' in WORKER_PROTOCOL_SOURCE
+
+
+def test_windows_native_transport_uses_binary_stdio() -> None:
+    assert "#ifdef _WIN32" in WORKER_MAIN_SOURCE
+    assert "_setmode(_fileno(stdin), _O_BINARY)" in WORKER_MAIN_SOURCE
+    assert "_setmode(_fileno(stdout), _O_BINARY)" in WORKER_MAIN_SOURCE
 
 
 def test_native_worker_mirrors_the_python_wire_identity() -> None:

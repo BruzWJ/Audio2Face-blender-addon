@@ -5,10 +5,7 @@ from __future__ import annotations
 import bpy
 from bpy.props import BoolProperty, StringProperty
 
-from .ui_text import draw_wrapped_label
-
-
-PREFERENCES_TEXT_WIDTH = 88
+from .ui_text import context_wrap_width, draw_wrapped_label
 
 
 class A2FAddonPreferences(bpy.types.AddonPreferences):
@@ -42,6 +39,7 @@ class A2FAddonPreferences(bpy.types.AddonPreferences):
         from .runtime import get_controller
 
         layout = self.layout
+        text_width = context_wrap_width(_context)
         controller = get_controller()
         snapshot = controller.setup_snapshot()
         runtime_status = snapshot.runtime_status
@@ -60,7 +58,7 @@ class A2FAddonPreferences(bpy.types.AddonPreferences):
         draw_wrapped_label(
             runtime_row,
             runtime_status.message,
-            width=PREFERENCES_TEXT_WIDTH,
+            width=text_width,
             icon="CHECKMARK" if runtime_status.ready else "ERROR",
         )
 
@@ -91,7 +89,7 @@ class A2FAddonPreferences(bpy.types.AddonPreferences):
         draw_wrapped_label(
             model_row,
             model_status.message,
-            width=PREFERENCES_TEXT_WIDTH,
+            width=text_width,
             icon="CHECKMARK" if model_status.ready else "ERROR",
         )
 
@@ -99,7 +97,7 @@ class A2FAddonPreferences(bpy.types.AddonPreferences):
             draw_wrapped_label(
                 setup,
                 controller.optimization_message,
-                width=PREFERENCES_TEXT_WIDTH,
+                width=text_width,
                 icon="TIME",
             )
             setup.progress(
@@ -119,7 +117,7 @@ class A2FAddonPreferences(bpy.types.AddonPreferences):
             draw_wrapped_label(
                 optimized_status,
                 engine_status.message,
-                width=PREFERENCES_TEXT_WIDTH,
+                width=text_width,
                 icon="CHECKMARK" if engine_status.ready else "INFO",
             )
 
@@ -137,7 +135,7 @@ class A2FAddonPreferences(bpy.types.AddonPreferences):
             draw_wrapped_label(
                 reason,
                 blocked_reason,
-                width=PREFERENCES_TEXT_WIDTH,
+                width=text_width,
                 icon="ERROR",
             )
         elif controller.optimization_message:
@@ -146,7 +144,7 @@ class A2FAddonPreferences(bpy.types.AddonPreferences):
             draw_wrapped_label(
                 message,
                 controller.optimization_message,
-                width=PREFERENCES_TEXT_WIDTH,
+                width=text_width,
                 icon="ERROR" if controller.optimization_failed else "INFO",
             )
             if controller.optimization_failed:

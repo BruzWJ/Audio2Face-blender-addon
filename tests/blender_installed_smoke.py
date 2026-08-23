@@ -71,9 +71,15 @@ def main() -> None:
     assert bundle.executable.is_file()
     assert bundle.trtexec.is_file()
     layout = Mock()
+    draw_context = SimpleNamespace(
+        region=SimpleNamespace(width=800),
+        preferences=SimpleNamespace(
+            system=SimpleNamespace(ui_scale=1.0),
+        ),
+    )
     preferences.A2FAddonPreferences.draw(
         SimpleNamespace(layout=layout),
-        bpy.context,
+        draw_context,
     )
     setup = runtime.get_controller().setup_snapshot()
     assert setup.model_spec is None

@@ -99,7 +99,7 @@ def main() -> None:
         notice_calls = notice_layout.label.call_args_list
         assert len(notice_calls) > 1
         assert notice_calls[0].kwargs["icon"] == "INFO"
-        assert all(call.kwargs["icon"] == "NONE" for call in notice_calls[1:])
+        assert all(call.kwargs["icon"] == "BLANK1" for call in notice_calls[1:])
         assert "uninstall" not in dir(bpy.ops.a2f)
         preference_names = set(A2FAddonPreferences.bl_rna.properties.keys())
         assert set(A2FAddonPreferences.__annotations__) == {
