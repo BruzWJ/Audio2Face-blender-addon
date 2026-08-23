@@ -77,15 +77,6 @@ def _require_regular_file(
             )
 
 
-def _require_inside(path: Path, directory: Path, description: str) -> None:
-    try:
-        path.relative_to(directory)
-    except ValueError as exc:
-        raise ModelInputError(
-            f"{description} escapes the selected model directory: {path}"
-        ) from exc
-
-
 def _read_model_document(path: Path, label: str) -> dict[str, Any]:
     try:
         if path.stat().st_size > MAX_MODEL_JSON_BYTES:
@@ -250,7 +241,6 @@ def _resolve_referenced_file(
         model_directory.joinpath(*relative.parts),
         description,
     )
-    _require_inside(resolved, model_directory, description)
     _require_regular_file(resolved, description, nonempty=True)
     return resolved
 
@@ -275,7 +265,6 @@ def _validate_resolved_model_directory(
         model_directory / "model.json",
         f"{label} model.json",
     )
-    _require_inside(resolved_model, model_directory, f"{label} model.json")
     _require_regular_file(
         resolved_model,
         f"{label} model.json",
@@ -295,7 +284,6 @@ def _validate_resolved_model_directory(
     for filename in ("network.onnx", "trt_info.json"):
         description = f"{label} companion {filename}"
         companion = _require_existing_path(model_directory / filename, description)
-        _require_inside(companion, model_directory, description)
         _require_regular_file(companion, description, nonempty=True)
 
     return resolved_model

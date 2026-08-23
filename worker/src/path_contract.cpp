@@ -109,48 +109,4 @@ fs::path require_canonical_regular_file(const std::string& value,
   return path;
 }
 
-fs::path require_canonical_new_file(const std::string& value,
-                                    const char* invalid_code,
-                                    const char* exists_code,
-                                    const char* label) {
-  const fs::path path = require_canonical_absolute(value, invalid_code, label);
-  const fs::path directory = path.parent_path();
-  require_unaliased_components(directory, invalid_code, label);
-
-  std::error_code directory_error;
-  if (!fs::is_directory(directory, directory_error) || directory_error) {
-    throw WorkerError(
-        invalid_code, std::string(label) + " directory must exist",
-        {{"path", display_path(directory)},
-         {"error", directory_error.message()}});
-  }
-
-  std::error_code target_error;
-  const fs::file_status target_status = fs::symlink_status(path, target_error);
-  const bool target_missing =
-      target_error == std::errc::no_such_file_or_directory ||
-      (!target_error && target_status.type() == fs::file_type::not_found);
-  if (target_missing) return path;
-  if (target_error) {
-    throw WorkerError(
-        invalid_code, std::string("Could not inspect ") + label,
-        {{"path", display_path(path)}, {"error", target_error.message()}});
-  }
-  std::error_code reparse_error;
-  const bool reparse = is_reparse_point(path, reparse_error);
-  if (reparse_error) {
-    throw WorkerError(
-        invalid_code, std::string("Could not inspect ") + label,
-        {{"path", display_path(path)}, {"error", reparse_error.message()}});
-  }
-  if (fs::is_symlink(target_status) || reparse) {
-    throw WorkerError(
-        invalid_code,
-        std::string(label) + " target must not be a filesystem alias",
-        {{"path", display_path(path)}});
-  }
-  throw WorkerError(exists_code, std::string(label) + " already exists",
-                    {{"path", display_path(path)}});
-}
-
 }  // namespace a2f_worker

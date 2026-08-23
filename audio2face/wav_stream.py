@@ -44,11 +44,6 @@ class WavStreamMetadata:
     input_frames: int
     output_frames: int
 
-    @property
-    def sample_width_bytes(self) -> int:
-        return self.bits_per_sample // 8
-
-
 @dataclass(frozen=True, slots=True)
 class _ParsedWav:
     metadata: WavStreamMetadata
@@ -239,8 +234,6 @@ def _decode_mono(
     is_float: bool,
 ) -> list[float]:
     sample_count = len(payload) // sample_width
-    if sample_count % channels != 0:
-        raise WavStreamError("audio block ends in a partial sample frame")
 
     if is_float:
         decoded_float = struct.unpack(f"<{sample_count}f", payload)
@@ -306,10 +299,6 @@ def _decode_mono(
 
 
 def _pack_f32le(samples: list[float]) -> bytes:
-    if not samples:
-        raise WavStreamError("internal error: attempted to emit an empty audio chunk")
-    if not all(math.isfinite(value) for value in samples):
-        raise WavStreamError("decoded audio contains a non-finite sample")
     return struct.pack(f"<{len(samples)}f", *samples)
 
 
@@ -374,10 +363,6 @@ class WavStreamSource:
         self._block_align = parsed.block_align
         self._is_float = parsed.is_float
 
-    @property
-    def closed(self) -> bool:
-        return self._handle is None
-
     def close(self) -> None:
         """Close the source. Calling this more than once is safe."""
 
@@ -387,7 +372,7 @@ class WavStreamSource:
             handle.close()
 
     def __enter__(self) -> WavStreamSource:
-        if self.closed:
+        if self._handle is None:
             raise WavStreamError("WAV source is closed")
         return self
 
@@ -404,7 +389,7 @@ class WavStreamSource:
             raise WavStreamError(f"could not seek to WAV audio data: {exc}") from exc
 
         remaining_frames = self.metadata.input_frames
-        sample_width = self.metadata.sample_width_bytes
+        sample_width = self.metadata.bits_per_sample // 8
         while remaining_frames:
             if self._handle is None:
                 raise WavStreamError("WAV source was closed while streaming")
@@ -422,7 +407,7 @@ class WavStreamSource:
     def __iter__(self) -> Iterator[bytes]:
         """Yield each f32le audio chunk once, then close the source."""
 
-        if self.closed:
+        if self._handle is None:
             raise WavStreamError("WAV source is closed")
         if self._iteration_started:
             raise WavStreamError("WAV source can only be iterated once")

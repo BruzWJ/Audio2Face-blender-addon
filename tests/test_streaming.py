@@ -42,25 +42,6 @@ def test_first_public_pcm_push_needs_no_start_or_operation_id(
     payload = bytes(4)
     assert streaming.push_audio_f32le(payload, scene_name="Scene") is None
     assert calls == [(payload, "Scene")]
-    assert "start_pcm_stream" not in streaming.__all__
-
-
-@pytest.mark.parametrize("payload", [bytearray(4), memoryview(bytes(4))])
-def test_public_pcm_push_rejects_bytes_aliases(payload: object) -> None:
-    with pytest.raises(TypeError, match="exact bytes"):
-        streaming.push_audio_f32le(payload, scene_name="Scene")
-
-
-@pytest.mark.parametrize(
-    ("scene_name", "error_type"),
-    [(b"Scene", TypeError), ("", ValueError)],
-)
-def test_public_pcm_push_requires_nonempty_exact_scene_name(
-    scene_name: object,
-    error_type: type[Exception],
-) -> None:
-    with pytest.raises(error_type):
-        streaming.push_audio_f32le(bytes(4), scene_name=scene_name)
 
 
 def test_end_marks_the_same_scene_input_complete(

@@ -49,13 +49,6 @@ class _EngineCandidate:
     destination: Path
 
 
-def _emit(callback: ProgressCallback, progress: float, message: str) -> None:
-    value = float(progress)
-    if not math.isfinite(value) or value < 0.0 or value > 1.0:
-        raise ModelOptimizationError("optimization progress is outside [0, 1]")
-    callback(OptimizationProgress(value, message))
-
-
 def _check_cancelled(canceled: threading.Event) -> None:
     if canceled.is_set():
         raise ModelOptimizationCancelled("model optimization was canceled")
@@ -217,32 +210,9 @@ def _trt_build_plan(
         )
     message = (
         f"Optimizing the {model_label} model for CUDA device 0 "
-        f"(NVIDIA estimate: about {int(round(estimate))} seconds)"
+        f"(NVIDIA estimate: about {round(estimate)} seconds)"
     )
     return command, message
-
-
-def _trtexec_failure_message(
-    model_label: str,
-    returncode: int,
-    log_path: Path,
-    *,
-    output_ready: bool,
-) -> str:
-    """Point Blender at the complete log without exposing raw process bytes."""
-
-    if returncode != 0:
-        summary = (
-            f"TensorRT {model_label} optimization failed "
-            f"(exit code {returncode})."
-        )
-    elif not output_ready:
-        summary = (
-            f"TensorRT {model_label} optimization did not produce a usable engine."
-        )
-    else:
-        summary = f"TensorRT {model_label} optimization failed."
-    return f"{summary}\nComplete TensorRT log: {log_path.name}"
 
 
 def _windows_staging_directory(system_root: str) -> Path:
@@ -308,7 +278,7 @@ def _build_engine(
             onnx_path=command_onnx,
             output_path=command_output,
         )
-        _emit(progress, progress_value, message)
+        progress(OptimizationProgress(progress_value, message))
         child_environment = dict(spec.runtime.env)
         if windows_staging_directory is not None:
             child_environment["TEMP"] = str(windows_staging_directory)
@@ -339,13 +309,17 @@ def _build_engine(
             command_output.is_file() and command_output.stat().st_size > 0
         )
         if returncode != 0 or not output_ready:
-            raise ModelOptimizationError(
-                _trtexec_failure_message(
-                    model_label,
-                    returncode,
-                    log_path,
-                    output_ready=output_ready,
+            summary = (
+                f"TensorRT {model_label} optimization failed "
+                f"(exit code {returncode})."
+                if returncode != 0
+                else (
+                    f"TensorRT {model_label} optimization did not produce "
+                    "a usable engine."
                 )
+            )
+            raise ModelOptimizationError(
+                f"{summary}\nComplete TensorRT log: {log_path.name}"
             )
         if command_output != candidate:
             shutil.copyfile(command_output, candidate)
@@ -451,11 +425,6 @@ def _activate_engines(candidates: tuple[_EngineCandidate, _EngineCandidate]) -> 
         backup.unlink(missing_ok=True)
 
 
-def _cleanup_candidates(candidates: tuple[_EngineCandidate, ...]) -> None:
-    for candidate in candidates:
-        candidate.temporary.unlink(missing_ok=True)
-
-
 def optimize_models(
     spec: RuntimeModelSpec,
     *,
@@ -489,27 +458,25 @@ def optimize_models(
             canceled=canceled,
             log_directory=logs,
         )
-        try:
-            emotion = _build_engine(
-                spec,
-                spec.audio2emotion_model,
-                "audio2emotion",
-                "Audio2Emotion",
-                progress_value=0.5,
-                progress=progress,
-                canceled=canceled,
-                log_directory=logs,
-            )
-        except Exception:
-            _cleanup_candidates((face,))
-            raise
+        candidates = (face,)
+        emotion = _build_engine(
+            spec,
+            spec.audio2emotion_model,
+            "audio2emotion",
+            "Audio2Emotion",
+            progress_value=0.5,
+            progress=progress,
+            canceled=canceled,
+            log_directory=logs,
+        )
         candidates = (face, emotion)
-        _emit(progress, 0.99, "Activating both optimized models")
+        progress(OptimizationProgress(0.99, "Activating both optimized models"))
         with commit_lock:
             _check_cancelled(canceled)
             _activate_engines((face, emotion))
-        _emit(progress, 1.0, "Both NVIDIA models are optimized")
+        progress(OptimizationProgress(1.0, "Both NVIDIA models are optimized"))
     except OSError as exc:
         raise ModelOptimizationError(f"model optimization failed: {exc}") from exc
     finally:
-        _cleanup_candidates(candidates)
+        for candidate in candidates:
+            candidate.temporary.unlink(missing_ok=True)

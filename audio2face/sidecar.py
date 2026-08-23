@@ -66,12 +66,6 @@ class SidecarClient:
         with self._state_lock:
             return self._state
 
-    @property
-    def pid(self) -> int | None:
-        with self._state_lock:
-            process = self._process
-            return process.pid if process is not None and process.poll() is None else None
-
     def start(
         self,
         executable: Path,

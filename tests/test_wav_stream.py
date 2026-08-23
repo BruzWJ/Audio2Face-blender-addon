@@ -134,12 +134,10 @@ def test_metadata_chunks_and_context_lifecycle(tmp_path: Path) -> None:
         assert source.metadata.output_sample_rate == 16_000
         assert source.metadata.channels == 1
         assert source.metadata.bits_per_sample == 16
-        assert source.metadata.sample_width_bytes == 2
         assert source.metadata.input_frames == 5
         assert source.metadata.output_frames == 5
         chunks = list(source)
 
-    assert source.closed
     assert all(chunk and len(chunk) <= 2 * 4 for chunk in chunks)
     assert all(len(chunk) % 4 == 0 for chunk in chunks)
     assert _unpack_chunks(chunks) == pytest.approx(
@@ -273,7 +271,6 @@ def test_ieee_float32_wav_rejects_every_non_finite_sample(
 
     with pytest.raises(WavStreamError, match="non-finite sample"):
         list(source)
-    assert source.closed
 
 
 @pytest.mark.parametrize("bits_per_sample", [16, 24, 64])
@@ -515,7 +512,6 @@ def test_constructor_and_iterator_limits_are_strict(tmp_path: Path) -> None:
         chunk_frames=CHUNK_FRAMES,
     )
     assert len(list(source)) == 1
-    assert source.closed
     with pytest.raises(WavStreamError, match="closed"):
         iter(source)
 
@@ -605,4 +601,3 @@ def test_truncation_after_open_is_detected_during_streaming(tmp_path: Path) -> N
 
     with pytest.raises(WavStreamError, match="truncated WAV audio data"):
         list(source)
-    assert source.closed

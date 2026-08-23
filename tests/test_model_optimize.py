@@ -151,26 +151,6 @@ def test_audio2emotion_profile_keeps_buffers_and_limits_batch_to_one(
     ]
 
 
-def test_trtexec_failure_message_references_the_complete_text_log(
-    tmp_path: Path,
-) -> None:
-    log = tmp_path / "trtexec-audio2emotion.log"
-    log.write_bytes(b"arbitrary TensorRT output\xff\r\n")
-
-    message = model_optimize._trtexec_failure_message(
-        "Audio2Emotion",
-        1,
-        log,
-        output_ready=False,
-    )
-
-    assert message == (
-        "TensorRT Audio2Emotion optimization failed (exit code 1).\n"
-        "Complete TensorRT log: trtexec-audio2emotion.log"
-    )
-    assert "b'" not in message
-
-
 @pytest.mark.parametrize(
     "owned",
     ["--onnx=x", "--saveEngine=x", "--DEVICE=1", "--skipInference"],
@@ -274,7 +254,6 @@ def test_build_engine_uses_bundled_trtexec_environment_and_writable_log(
     assert calls[0][1]["cwd"] == str(spec.runtime.root)
     assert calls[0][1]["env"] == dict(spec.runtime.env)
     assert (logs / "trtexec-audio2face.log").read_text() == "complete\n"
-    model_optimize._cleanup_candidates((candidate,))
 
 
 def test_windows_build_engine_always_uses_the_system_staging_directory(
@@ -344,7 +323,6 @@ def test_windows_build_engine_always_uses_the_system_staging_directory(
             "TMP": str(onnx.parent),
         }
     ]
-    model_optimize._cleanup_candidates((candidate,))
 
 
 def test_build_engine_cancellation_terminates_trtexec(
