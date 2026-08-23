@@ -5,7 +5,7 @@ from __future__ import annotations
 import importlib
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, call
+from unittest.mock import Mock
 
 import bpy
 
@@ -20,7 +20,6 @@ def main() -> None:
     assert len(addon_names) == 1, f"expected one enabled Audio2Face extension, got {addon_names}"
     package = importlib.import_module(addon_names[0])
     runtime = importlib.import_module(f"{addon_names[0]}.runtime")
-    operators = importlib.import_module(f"{addon_names[0]}.operators")
     preferences = importlib.import_module(f"{addon_names[0]}.preferences")
     properties = importlib.import_module(f"{addon_names[0]}.properties")
 
@@ -28,7 +27,7 @@ def main() -> None:
     assert bpy.app.timers.is_registered(runtime._timer_callback)
     assert runtime._load_pre_handler in bpy.app.handlers.load_pre
     assert runtime._load_post_handler in bpy.app.handlers.load_post
-    assert bpy.ops.a2f.uninstall.poll()
+    assert "uninstall" not in dir(bpy.ops.a2f)
     runtime.get_controller().poll()
     assert bpy.context.scene.audio2face.status == "IDLE"
 
@@ -71,44 +70,10 @@ def main() -> None:
     assert bundle.root == package_directory / "runtime"
     assert bundle.executable.is_file()
     assert bundle.trtexec.is_file()
-    repo_directory, package_id = preferences._uninstall_target(bpy.context)
-    assert package_id == "audio2face"
-    assert Path(repo_directory).is_dir()
     layout = Mock()
     preferences.A2FAddonPreferences.draw(
         SimpleNamespace(layout=layout),
         bpy.context,
-    )
-    layout.row.assert_called_once_with()
-    removal = layout.row.return_value
-    assert removal.alignment == "RIGHT"
-    removal.operator.assert_called_once_with("a2f.uninstall", text="Uninstall")
-    layout.separator.assert_called_once_with(type="LINE")
-
-    dialog_layout = Mock()
-    operators.A2F_OT_uninstall.draw(
-        SimpleNamespace(layout=dialog_layout),
-        bpy.context,
-    )
-    assert dialog_layout.label.call_args_list == [
-        call(text="Remove Add-on: 'Audio2Face'?", translate=False),
-        call(
-            text=f"Path: {str(Path(repo_directory, package_id))!r}",
-            translate=False,
-        ),
-    ]
-    window_manager = Mock()
-    window_manager.invoke_props_dialog.return_value = {"RUNNING_MODAL"}
-    dialog_operator = SimpleNamespace()
-    result = operators.A2F_OT_uninstall.invoke(
-        dialog_operator,
-        SimpleNamespace(window_manager=window_manager),
-        SimpleNamespace(),
-    )
-    assert result == {"RUNNING_MODAL"}
-    window_manager.invoke_props_dialog.assert_called_once_with(
-        dialog_operator,
-        width=600,
     )
     setup = runtime.get_controller().setup_snapshot()
     assert setup.model_spec is None

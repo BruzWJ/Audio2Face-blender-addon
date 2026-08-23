@@ -85,14 +85,13 @@ libraries](https://docs.nvidia.com/cuda/archive/12.9.0/cuda-c-best-practices-gui
 and provides [per-component CUDA archives for package maintainers and
 CI](https://docs.nvidia.com/cuda/archive/12.9.1/cuda-installation-guide-linux/index.html#tarball-and-zip-archive-deliverables).
 
-The top of Add-on Preferences includes a right-aligned **Uninstall** action. It
-opens Blender's familiar two-line **Remove Add-on** confirmation with the
-Audio2Face name and installed package path, then delegates removal to Blender's
-extension uninstaller. Disabling the extension stops its worker, streams, and
-playback before the package and its bundled runtime are removed. The selected
-external model repositories and their `network.trt` engines remain in place,
-as do selected WAV files, `.blend` files, meshes, and shared NVIDIA driver
-caches.
+Blender owns the extension lifecycle. To remove Audio2Face, open **Preferences →
+Get Extensions**, find Audio2Face, open the down-arrow menu on its card, and
+choose **Uninstall**. Blender disables the add-on before removing its package
+and bundled runtime, so normal worker, stream, and playback cleanup runs. The
+selected external model repositories and their `network.trt` engines remain in
+place, as do selected WAV files, `.blend` files, meshes, and shared NVIDIA
+driver caches.
 
 ## Workflow
 

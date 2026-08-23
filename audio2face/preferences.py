@@ -11,23 +11,6 @@ from .ui_text import draw_wrapped_label
 PREFERENCES_TEXT_WIDTH = 88
 
 
-def _uninstall_target(context: bpy.types.Context) -> tuple[str, str] | None:
-    """Return the installed extension repository and package identifier."""
-
-    parts = __package__.split(".")
-    if len(parts) != 3 or parts[0] != "bl_ext":
-        return None
-    repo_module, package_id = parts[1:]
-    for repository in context.preferences.extensions.repos:
-        if (
-            repository.enabled
-            and repository.module == repo_module
-            and repository.source == "USER"
-        ):
-            return repository.directory, package_id
-    return None
-
-
 class A2FAddonPreferences(bpy.types.AddonPreferences):
     bl_idname = __package__
 
@@ -59,15 +42,6 @@ class A2FAddonPreferences(bpy.types.AddonPreferences):
         from .runtime import get_controller
 
         layout = self.layout
-        if _uninstall_target(_context) is not None:
-            removal = layout.row()
-            removal.alignment = "RIGHT"
-            removal.operator(
-                "a2f.uninstall",
-                text="Uninstall",
-            )
-            layout.separator(type="LINE")
-
         controller = get_controller()
         snapshot = controller.setup_snapshot()
         runtime_status = snapshot.runtime_status

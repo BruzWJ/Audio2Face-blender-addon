@@ -38,8 +38,9 @@ and every descriptor-referenced file, setup builds or rebuilds separate
 Audio2Face and Audio2Emotion `network.trt` files on CUDA device 0. Both engine
 candidates must succeed before they atomically replace the current pair. Each
 engine ends at `<selected-root>/network.trt`. These external engines are not
-part of the extension package, and uninstall does not delete them. The NVIDIA
-display driver is not downloaded or redistributed by this project.
+part of the extension package, and Blender's extension uninstaller does not
+delete them. The NVIDIA display driver is not downloaded or redistributed by
+this project.
 
 The Audio2Emotion integration is experimental, and Audio2Emotion v3.0 is gated
 by NVIDIA on Hugging Face. This project does not embed access credentials or

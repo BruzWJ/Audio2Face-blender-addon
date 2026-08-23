@@ -222,17 +222,13 @@ Audio2Emotion's post-processed vector order agrees with Audio2Face's emotion
 order; SDK 1.0.0 reports the vector width but does not expose names for those
 output positions.
 
-The top of Add-on Preferences presents a right-aligned **Uninstall** action
-with Blender's familiar two-line add-on-name/package-path confirmation. The
-confirming Audio2Face operator returns before a one-shot main-thread timer
-delegates to Blender 5.2's native
-extension uninstaller, preventing the operator from unregistering its own
-class while it is executing. The native disable phase runs Audio2Face's normal
-process, stream, playback, timer, and handler cleanup; its package phase
-removes the installed extension and its bundled worker and runtime libraries.
-The two selected model repository roots and their generated `network.trt`
-engines are external user data. Uninstall never deletes them. User-selected
-audio, `.blend` data, and shared GPU caches also remain outside this ownership
+Blender owns installation and removal. Its **Get Extensions** item menu invokes
+the native extension uninstaller, whose disable phase runs Audio2Face's normal
+process, stream, playback, timer, and handler cleanup before its package phase
+removes the installed extension and bundled worker/runtime libraries. The two
+selected model repository roots and their generated `network.trt` engines are
+external user data. Uninstall never deletes them. User-selected audio,
+`.blend` data, and shared GPU caches also remain outside this ownership
 boundary.
 
 ## Lifecycle
