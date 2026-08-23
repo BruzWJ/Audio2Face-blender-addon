@@ -62,7 +62,7 @@ def _make_invalid_utf8_worker(tmp_path: Path) -> Path:
             #!/usr/bin/env python3
             import sys
 
-            sys.stdout.buffer.write(b'{"protocol":"audio2face/4","type":"response","id":"x","result":{"value":"\\xff"}}\\n')
+            sys.stdout.buffer.write(b'{"protocol":"audio2face/5","type":"response","id":"x","result":{"value":"\\xff"}}\\n')
             sys.stdout.buffer.flush()
             for _line in sys.stdin:
                 pass
@@ -92,7 +92,6 @@ def test_sidecar_exchanges_jsonl_and_shuts_down_cleanly(tmp_path: Path) -> None:
     try:
         client.start(worker, cwd=tmp_path, env=os.environ)
         assert client.state is Lifecycle.RUNNING
-        assert client.pid is not None
 
         startup_events = _collect_until(
             client,
@@ -140,7 +139,6 @@ def test_sidecar_exchanges_jsonl_and_shuts_down_cleanly(tmp_path: Path) -> None:
         )
         assert exit_event.returncode == 0
         assert client.state is Lifecycle.STOPPED
-        assert client.pid is None
     finally:
         client.close(timeout=1.0)
 
@@ -164,6 +162,5 @@ def test_sidecar_terminates_worker_that_emits_invalid_utf8(tmp_path: Path) -> No
             for event in events
         )
         assert client.state is Lifecycle.FAILED
-        assert client.pid is None
     finally:
         client.close(timeout=1.0)

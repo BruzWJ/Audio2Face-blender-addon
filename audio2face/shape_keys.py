@@ -43,10 +43,10 @@ def validate_output_channels(channels: Any) -> tuple[str, ...]:
     return tuple(validated)
 
 
-def build_subscriptions(
+def resolve_target_meshes(
     settings: A2FSceneSettings,
 ) -> tuple[bpy.types.Object, ...]:
-    """Freeze each listed target mesh without inspecting its Shape Keys."""
+    """Resolve the meshes currently listed as live frame targets."""
 
     targets: list[bpy.types.Object] = []
     seen: set[int] = set()
@@ -71,17 +71,6 @@ def apply_shape_key_frame(
     weights: tuple[float, ...],
 ) -> None:
     """Assign one model-described frame to matching Shape Keys when present."""
-
-    if type(targets) is not tuple:
-        raise ShapeKeyStreamError("shape-key targets must be a frozen tuple")
-    if type(channels) is not tuple:
-        raise ShapeKeyStreamError("shape-key channels must be a frozen tuple")
-    if type(weights) is not tuple:
-        raise ShapeKeyStreamError("shape-key weights must be a frozen frame tuple")
-    if len(weights) != len(channels):
-        raise ShapeKeyStreamError(
-            f"shape-key frame has {len(weights)} values; expected {len(channels)}"
-        )
 
     seen_shape_keys: set[int] = set()
     for target in targets:

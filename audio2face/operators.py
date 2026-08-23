@@ -8,7 +8,6 @@ import bpy
 
 from .live_stream import get_live_stream_controller
 from .properties import (
-    A2FSceneSettings,
     clear_preferred_emotion,
     load_preferred_emotion,
 )
@@ -102,6 +101,7 @@ class A2F_OT_load_preferred_emotion(bpy.types.Operator):
         except ValueError as exc:
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
+        get_controller().refresh_inference_settings(context.scene)
         return {"FINISHED"}
 
 
@@ -112,6 +112,7 @@ class A2F_OT_clear_preferred_emotion(bpy.types.Operator):
 
     def execute(self, context: bpy.types.Context) -> set[str]:
         clear_preferred_emotion(context.scene.audio2face)
+        get_controller().refresh_inference_settings(context.scene)
         return {"FINISHED"}
 
 
@@ -197,12 +198,11 @@ class A2F_OT_play_pause(bpy.types.Operator):
         if settings.input_mode != "SELECTED":
             return False
         live = get_live_stream_controller()
-        if live.plays_audio:
+        if live.can_seek:
             return settings.playback_state in {"PLAYING", "PAUSED"}
         runtime = get_controller()
         return bool(
             settings.playback_state == "IDLE"
-            and not settings.stream_operation_id
             and settings.audio_path
             and runtime.client.state == Lifecycle.RUNNING
             and runtime.negotiated
@@ -230,33 +230,6 @@ class A2F_OT_play_pause(bpy.types.Operator):
         return {"CANCELLED"}
 
 
-class A2F_OT_rewind(bpy.types.Operator):
-    bl_idname = "a2f.rewind"
-    bl_label = "Rewind Audio and Animation"
-    bl_description = (
-        "Rewind audio and synchronized Shape Keys without changing playback state"
-    )
-
-    @classmethod
-    def poll(cls, context: bpy.types.Context) -> bool:
-        return (
-            context.scene.audio2face.input_mode == "SELECTED"
-            and context.scene.audio2face.playback_state in {"PLAYING", "PAUSED"}
-            and get_live_stream_controller().plays_audio
-        )
-
-    def execute(self, context: bpy.types.Context) -> set[str]:
-        paused = context.scene.audio2face.playback_state == "PAUSED"
-        return _run_runtime(
-            self,
-            lambda controller: controller.seek_selected_audio(
-                context.scene,
-                0.0,
-                paused=paused,
-            ),
-        )
-
-
 CLASSES = (
     A2F_OT_optimize_models,
     A2F_OT_cancel_model_optimization,
@@ -267,5 +240,4 @@ CLASSES = (
     A2F_OT_add_selected_targets,
     A2F_OT_remove_target,
     A2F_OT_play_pause,
-    A2F_OT_rewind,
 )

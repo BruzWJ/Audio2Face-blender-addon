@@ -7,7 +7,8 @@ from typing import TYPE_CHECKING
 import bpy
 
 from .live_stream import get_live_stream_controller
-from .runtime import get_controller
+from .properties import AUDIO2FACE_SETTING_GROUPS
+from .runtime import RuntimeController, get_controller
 from .sidecar import Lifecycle
 from .ui_text import context_wrap_width, draw_wrapped_label
 
@@ -18,6 +19,8 @@ if TYPE_CHECKING:
 def _draw_audio_playback(
     layout: bpy.types.UILayout,
     settings: A2FSceneSettings,
+    controller: RuntimeController,
+    scene_name: str,
 ) -> None:
     """Draw playback controls that apply to the current input mode."""
 
@@ -37,15 +40,15 @@ def _draw_audio_playback(
             )
         else:
             raise RuntimeError(f"invalid playback state {settings.playback_state!r}")
-        playback_row.operator("a2f.rewind", text="", icon="REW")
         playback_row.prop(settings, "playback_loop", text="Loop", toggle=True)
 
-        if playback.plays_audio:
+        if settings.playback_duration > 0.0:
             seek_row = playback_box.row()
+            seek_row.enabled = playback.can_seek
             seek_row.prop(settings, "playback_progress", text="", slider=True)
             playback_box.label(
                 text=(
-                    f"{_timecode(settings.playback_time)} / "
+                    f"{_timecode(settings.playback_progress * settings.playback_duration)} / "
                     f"{_timecode(settings.playback_duration)}"
                 )
             )
@@ -54,11 +57,12 @@ def _draw_audio_playback(
 
     if settings.input_mode != "STREAM":
         raise RuntimeError(f"invalid input mode {settings.input_mode!r}")
-    if not settings.stream_operation_id:
+    stream = controller.active_stream
+    if stream is None or stream.scene_name != scene_name:
         return
     playback_box = layout.box()
     playback_box.label(text="Stream", icon="SPEAKER")
-    rate = settings.stream_sample_rate
+    rate = controller.model_sample_rate
     if rate > 0:
         playback_box.label(
             text=f"{_timecode(settings.stream_time)}  |  {rate} Hz mono PCM"
@@ -70,6 +74,24 @@ def _timecode(seconds: float) -> str:
     minutes, remainder = divmod(centiseconds, 6000)
     whole_seconds, fraction = divmod(remainder, 100)
     return f"{minutes}:{whole_seconds:02d}.{fraction:02d}"
+
+
+def _draw_model_tuning(
+    layout: bpy.types.UILayout,
+    settings: A2FSceneSettings,
+) -> None:
+    tuning_box = layout.box()
+    tuning_box.label(text="Model Tuning", icon="MODIFIER")
+    tuning_box.use_property_split = True
+    tuning_box.use_property_decorate = False
+
+    for index, (label, fields) in enumerate(AUDIO2FACE_SETTING_GROUPS):
+        if index:
+            tuning_box.separator()
+        tuning_box.label(text=label)
+        controls = tuning_box.column(align=True)
+        for name, slider in fields:
+            controls.prop(settings, name, slider=slider)
 
 
 class A2F_UL_target_meshes(bpy.types.UIList):
@@ -115,15 +137,13 @@ class A2F_PT_main(bpy.types.Panel):
             return
         controller = get_controller()
         setup = controller.setup_snapshot()
-        runtime_ready = setup.model_spec is not None and setup.engine_status.ready
+        runtime_ready = setup.engine_status.ready
         if not setup.runtime_status.ready:
             runtime_message = setup.runtime_status.message
         elif not setup.model_status.ready:
             runtime_message = setup.model_status.message
         elif not setup.engine_status.ready:
             runtime_message = setup.engine_status.message
-        elif not runtime_ready:
-            raise RuntimeError("invalid Audio2Face setup snapshot")
 
         visible_statuses = {
             "STARTING",
@@ -217,18 +237,18 @@ class A2F_PT_main(bpy.types.Panel):
         mode_row = input_box.row()
         mode_row.enabled = (
             not controller.operation_in_progress
-            and not settings.stream_operation_id
             and settings.playback_state == "IDLE"
         )
         mode_row.prop(settings, "input_mode", expand=True)
-        _draw_audio_playback(input_box, settings)
+        _draw_audio_playback(input_box, settings, controller, context.scene.name)
         if settings.input_mode == "SELECTED":
             input_box.prop(settings, "audio_path")
+
+        _draw_model_tuning(layout, settings)
 
         emotion_box = layout.box()
         emotion_box.label(text="Emotion", icon="DRIVER")
         emotion_controls = emotion_box.column(align=True)
-        emotion_controls.enabled = not controller.operation_in_progress
         emotion_controls.prop(settings, "auto_audio2emotion")
         auto_controls = emotion_controls.column(align=True)
         auto_controls.prop(settings, "a2e_emotion_strength")

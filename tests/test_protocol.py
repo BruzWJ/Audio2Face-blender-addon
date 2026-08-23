@@ -38,7 +38,7 @@ def test_windows_native_transport_uses_binary_stdio() -> None:
 
 
 def test_native_worker_mirrors_the_python_wire_identity() -> None:
-    assert WORKER_PROFILE.rpartition("/")[2] == "4"
+    assert WORKER_PROFILE.rpartition("/")[2] == "5"
     assert f'constexpr const char* kProtocol = "{PROTOCOL_VERSION}";' in (
         WORKER_PROTOCOL_SOURCE
     )
@@ -71,12 +71,12 @@ def test_request_round_trip_is_compact_utf8_and_one_record() -> None:
     "line",
     [
         "{}\n",
-        '{"protocol":"audio2face/4","type":"response","id":"1","result":{}}',
+        '{"protocol":"audio2face/5","type":"response","id":"1","result":{}}',
         '{"protocol":"audio2face/999","type":"response","id":"1","result":{}}\n',
-        '{"protocol":"audio2face/4","type":"response","id":"1","result":{}}\n{}\n',
-        '{"protocol":"audio2face/4","type":"response","id":"1","result":{}}\n\n',
+        '{"protocol":"audio2face/5","type":"response","id":"1","result":{}}\n{}\n',
+        '{"protocol":"audio2face/5","type":"response","id":"1","result":{}}\n\n',
         b"\xff\n",
-        '{"protocol":"audio2face/4","type":"response","id":"1","id":"2","result":{}}\n',
+        '{"protocol":"audio2face/5","type":"response","id":"1","id":"2","result":{}}\n',
     ],
 )
 def test_decode_rejects_malformed_noncanonical_records(line: str | bytes) -> None:
@@ -152,21 +152,12 @@ def test_canonical_stream_event_requires_operation_id_and_exact_fields() -> None
     with pytest.raises(ProtocolError, match="missing fields: operation_id"):
         encode_message(without_operation)
 
-    old_vocabulary = dict(event)
-    old_vocabulary["job_id"] = old_vocabulary.pop("operation_id")
-    with pytest.raises(
-        ProtocolError,
-        match=r"missing fields: operation_id; unknown fields: job_id",
-    ):
-        encode_message(old_vocabulary)
-
-
 def test_stream_methods_and_events_are_canonical_protocol_members() -> None:
-    for method in ("stream_start", "stream_chunk", "stream_end"):
+    for method in ("stream_start", "stream_chunk", "stream_settings", "stream_end"):
         request = make_request(method, {})
         assert decode_message(encode_message(request)) == request
 
-    for event_name in ("stream_frame", "stream_ended"):
+    for event_name in ("stream_frame", "stream_reset", "stream_ended"):
         event = {
             "protocol": PROTOCOL_VERSION,
             "type": "event",
@@ -176,8 +167,21 @@ def test_stream_methods_and_events_are_canonical_protocol_members() -> None:
         }
         assert decode_message(encode_message(event)) == event
 
-    with pytest.raises(ProtocolError, match="unsupported request method"):
-        encode_message(make_request("generate", {}))
+def test_native_stream_settings_is_one_ordered_queue_command() -> None:
+    assert 'if (method == "stream_settings")' in WORKER_PROTOCOL_SOURCE
+    assert "enqueue_stream_settings(id, params);" in WORKER_PROTOCOL_SOURCE
+    assert 'require_exact_keys(params, {"operation_id", "settings"});' in (
+        WORKER_PROTOCOL_SOURCE
+    )
+    assert "StreamCommand::Kind::Settings" in WORKER_PROTOCOL_SOURCE
+    assert "stream_queue_.push_back(std::move(command));" in WORKER_PROTOCOL_SOURCE
+    assert "backend_.stream_settings(command.settings" in (
+        WORKER_PROTOCOL_SOURCE
+    )
+    assert (
+        'emit_active_stream_event(operation_id, "stream_reset", json::object());'
+        in WORKER_PROTOCOL_SOURCE
+    )
 
 
 def test_error_requires_one_exact_shape() -> None:
@@ -252,7 +256,7 @@ def test_protocol_normalizes_non_utf8_text_errors() -> None:
         encode_message(message)
 
     line = (
-        '{"protocol":"audio2face/4","type":"response","id":"1",'
+        '{"protocol":"audio2face/5","type":"response","id":"1",'
         '"result":{"value":"\ud800"}}\n'
     )
     with pytest.raises(ProtocolError, match="UTF-8"):

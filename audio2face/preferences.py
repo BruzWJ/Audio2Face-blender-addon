@@ -49,12 +49,12 @@ class A2FAddonPreferences(bpy.types.AddonPreferences):
         setup.label(text="GPU Runtime & Models", icon="PREFERENCES")
 
         terms_row = setup.row(align=True)
+        terms_row.prop(self, "nvidia_terms_accepted")
         terms = terms_row.operator("wm.url_open", text="NVIDIA Terms", icon="URL")
         terms.url = (
             "https://www.nvidia.com/en-us/agreements/enterprise-software/"
             "nvidia-open-model-license/"
         )
-        terms_row.prop(self, "nvidia_terms_accepted")
 
         sources = setup.row(align=True)
         for label, url in (

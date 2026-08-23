@@ -9,12 +9,10 @@
 #include <cstring>
 #include <deque>
 #include <exception>
-#include <filesystem>
 #include <future>
 #include <initializer_list>
 #include <iostream>
 #include <limits>
-#include <memory>
 #include <mutex>
 #include <optional>
 #include <set>
@@ -32,7 +30,7 @@ WorkerError::WorkerError(std::string code, std::string message, json details)
 
 namespace {
 
-constexpr const char* kProtocol = "audio2face/4";
+constexpr const char* kProtocol = "audio2face/5";
 constexpr std::size_t kMaximumRequestBytes = 1024U * 1024U;
 constexpr std::size_t kStreamQueueSeconds = 4;
 
@@ -117,16 +115,6 @@ std::string required_operation_id(const json& params) {
   const std::string value = required_string(params, "operation_id");
   if (value.size() > 128) {
     throw WorkerError("invalid_params", "operation_id is too long");
-  }
-  return value;
-}
-
-std::string required_absolute_path(const json& object, const char* name) {
-  std::string value = required_string(object, name);
-  if (value.find('\0') != std::string::npos ||
-      !std::filesystem::path(value).is_absolute()) {
-    throw WorkerError("invalid_params",
-                      std::string(name) + " must be an absolute path");
   }
   return value;
 }
@@ -260,10 +248,11 @@ std::vector<float> decode_f32le_base64(const json& value,
 }
 
 struct StreamCommand {
-  enum class Kind { Chunk, End };
+  enum class Kind { Chunk, Settings, End };
   Kind kind;
   std::vector<float> audio;
-  std::shared_future<void> response_gate;
+  json settings;
+  std::future<void> response_gate;
 };
 
 class Server {
@@ -352,26 +341,22 @@ class Server {
     if (method == "hello") {
       require_exact_keys(params, {});
       emitter_.response(
-          id, {{"worker_profile", "nvidia-a2f3-a2e3-gpu-arkit52/4"},
+          id, {{"worker_profile", "nvidia-a2f3-a2e3-gpu-arkit52/5"},
                {"worker_version", A2F_WORKER_VERSION}});
       negotiated_ = true;
       return;
     }
     if (method == "load_model") {
       require_negotiated();
-      if (busy_.load(std::memory_order_acquire)) {
-        throw WorkerError("busy",
-                          "Cannot load a model while an operation is running");
-      }
-      join_completed_operation();
+      join_or_reject_active("Cannot load a model while an operation is running");
       require_exact_keys(
           params, {"audio2face_model_path", "audio2emotion_model_path"});
       emitter_.response(
           id, backend_.load_model(
-                  ModelRequest{required_absolute_path(
-                                   params, "audio2face_model_path"),
-                               required_absolute_path(
-                                   params, "audio2emotion_model_path")}));
+                  ModelRequest{required_string(params,
+                                               "audio2face_model_path"),
+                               required_string(params,
+                                               "audio2emotion_model_path")}));
       return;
     }
     if (method == "stream_start") {
@@ -382,6 +367,11 @@ class Server {
     if (method == "stream_chunk") {
       require_negotiated();
       enqueue_stream_chunk(id, params);
+      return;
+    }
+    if (method == "stream_settings") {
+      require_negotiated();
+      enqueue_stream_settings(id, params);
       return;
     }
     if (method == "stream_end") {
@@ -412,14 +402,12 @@ class Server {
     if (!params.at("settings").is_object()) {
       throw WorkerError("invalid_params", "settings must be an object");
     }
-    StreamRequest request{required_operation_id(params),
-                          positive_sample_rate(params.at("sample_rate")),
+    const std::string operation_id = required_operation_id(params);
+    StreamRequest request{positive_sample_rate(params.at("sample_rate")),
                           params.at("settings")};
-    auto start_gate = std::make_shared<std::promise<void>>();
-    std::shared_future<void> start_signal =
-        start_gate->get_future().share();
-    std::string thread_operation_id = request.operation_id;
-    std::optional<std::string> state_operation_id(request.operation_id);
+    std::promise<void> start_gate;
+    std::future<void> start_signal = start_gate.get_future();
+    std::optional<std::string> state_operation_id(operation_id);
     json response = backend_.stream_start(request);
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
@@ -432,24 +420,22 @@ class Server {
       cancel_response_signal_ = {};
     }
     canceled_.store(false, std::memory_order_release);
-    busy_.store(true, std::memory_order_release);
     try {
       operation_thread_ = std::thread(
-          [this, operation_id = std::move(thread_operation_id),
+          [this, operation_id,
            start_signal = std::move(start_signal)]() mutable {
             stream_loop(operation_id, std::move(start_signal));
           });
     } catch (...) {
-      backend_.stream_abort(request.operation_id);
+      backend_.stream_abort();
       finish_active();
       throw;
     }
     try {
       emitter_.response(request_id, std::move(response));
-      start_gate->set_value();
+      start_gate.set_value();
     } catch (...) {
-      start_gate->set_exception(std::current_exception());
-      stream_condition_.notify_all();
+      start_gate.set_exception(std::current_exception());
       operation_thread_.join();
       throw;
     }
@@ -469,15 +455,12 @@ class Server {
     }
     std::vector<float> audio =
         decode_f32le_base64(params.at("audio_f32le_base64"), sample_rate);
-    auto response_gate = std::make_shared<std::promise<void>>();
-    StreamCommand command{StreamCommand::Kind::Chunk, std::move(audio),
-                          response_gate->get_future().share()};
+    std::promise<void> response_gate;
+    StreamCommand command{StreamCommand::Kind::Chunk, std::move(audio), {},
+                          response_gate.get_future()};
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
       require_stream_locked(requested_operation_id);
-      if (stream_end_queued_) {
-        throw WorkerError("invalid_state", "stream_end is already queued");
-      }
       const std::size_t maximum_queued =
           static_cast<std::size_t>(stream_sample_rate_) * kStreamQueueSeconds;
       if (command.audio.size() > maximum_queued - stream_queued_samples_) {
@@ -490,21 +473,37 @@ class Server {
       stream_queued_samples_ += command_samples;
     }
     stream_condition_.notify_one();
-    try {
-      emitter_.response(request_id, json::object());
-      response_gate->set_value();
-    } catch (...) {
-      response_gate->set_exception(std::current_exception());
-      throw;
+    respond_and_release(request_id, response_gate);
+  }
+
+  void enqueue_stream_settings(const json& request_id, const json& params) {
+    require_exact_keys(params, {"operation_id", "settings"});
+    const std::string requested_operation_id = required_operation_id(params);
+    if (!params.at("settings").is_object()) {
+      throw WorkerError("invalid_params", "settings must be an object");
     }
+    std::promise<void> response_gate;
+    StreamCommand command{StreamCommand::Kind::Settings, {},
+                          params.at("settings"),
+                          response_gate.get_future()};
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      require_stream_locked(requested_operation_id);
+      if (stream_end_queued_) {
+        throw WorkerError("invalid_state", "stream_end is already queued");
+      }
+      stream_queue_.push_back(std::move(command));
+    }
+    stream_condition_.notify_one();
+    respond_and_release(request_id, response_gate);
   }
 
   void enqueue_stream_end(const json& request_id, const json& params) {
     require_exact_keys(params, {"operation_id"});
     const std::string requested_operation_id = required_operation_id(params);
-    auto response_gate = std::make_shared<std::promise<void>>();
-    StreamCommand command{StreamCommand::Kind::End, {},
-                          response_gate->get_future().share()};
+    std::promise<void> response_gate;
+    StreamCommand command{StreamCommand::Kind::End, {}, {},
+                          response_gate.get_future()};
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
       require_stream_locked(requested_operation_id);
@@ -515,23 +514,16 @@ class Server {
       stream_end_queued_ = true;
     }
     stream_condition_.notify_one();
-    try {
-      emitter_.response(request_id, json::object());
-      response_gate->set_value();
-    } catch (...) {
-      response_gate->set_exception(std::current_exception());
-      throw;
-    }
+    respond_and_release(request_id, response_gate);
   }
 
   void cancel_operation(const json& request_id, const json& params) {
     require_exact_keys(params, {"operation_id"});
     const std::string requested = required_operation_id(params);
-    auto response_gate = std::make_shared<std::promise<void>>();
+    std::promise<void> response_gate;
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
       if (!current_operation_id_.has_value() ||
-          !busy_.load(std::memory_order_acquire) ||
           requested != *current_operation_id_ ||
           canceled_.load(std::memory_order_acquire) ||
           terminal_committed_) {
@@ -539,37 +531,50 @@ class Server {
                           "The requested operation is not active",
                           {{"operation_id", requested}});
       }
-      cancel_response_signal_ = response_gate->get_future().share();
+      cancel_response_signal_ = response_gate.get_future().share();
       canceled_.store(true, std::memory_order_release);
     }
     stream_condition_.notify_all();
+    respond_and_release(request_id, response_gate);
+  }
+
+  void respond_and_release(const json& request_id,
+                           std::promise<void>& response_gate) {
     try {
       emitter_.response(request_id, json::object());
-      response_gate->set_value();
+      response_gate.set_value();
     } catch (...) {
-      response_gate->set_exception(std::current_exception());
+      response_gate.set_exception(std::current_exception());
       throw;
     }
   }
 
+  void emit_active_stream_event(const std::string& operation_id,
+                                const char* event, json data) {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    if (canceled_.load(std::memory_order_acquire) || terminal_committed_) {
+      throw WorkerError("canceled", "Stream was stopped");
+    }
+    emitter_.event(event, std::move(data), operation_id);
+  }
+
   void stream_loop(const std::string& operation_id,
-                   std::shared_future<void> start_signal) {
+                   std::future<void> start_signal) {
     try {
       start_signal.get();
     } catch (...) {
-      backend_.stream_abort(operation_id);
+      backend_.stream_abort();
       finish_active();
       return;
     }
     const auto emit_frame = [this, &operation_id](const StreamFrame& frame) {
-      std::lock_guard<std::mutex> lock(state_mutex_);
-      if (canceled_.load(std::memory_order_acquire) || terminal_committed_) {
-        throw WorkerError("canceled", "Stream was stopped");
-      }
-      emitter_.event("stream_frame",
-                     {{"timestamp_sample", frame.timestamp_sample},
-                      {"weights", frame.weights}},
-                     operation_id);
+      emit_active_stream_event(
+          operation_id, "stream_frame",
+          {{"timestamp_sample", frame.timestamp_sample},
+           {"weights", frame.weights}});
+    };
+    const auto emit_reset = [this, &operation_id]() {
+      emit_active_stream_event(operation_id, "stream_reset", json::object());
     };
     try {
       while (true) {
@@ -588,44 +593,33 @@ class Server {
         command.response_gate.get();
         if (canceled_.load(std::memory_order_acquire)) break;
         if (command.kind == StreamCommand::Kind::Chunk) {
-          backend_.stream_chunk(operation_id, command.audio, canceled_, emit_frame);
+          backend_.stream_chunk(command.audio, canceled_, emit_frame);
           continue;
         }
-        backend_.stream_end(operation_id, canceled_, emit_frame);
+        if (command.kind == StreamCommand::Kind::Settings) {
+          backend_.stream_settings(command.settings, canceled_,
+                                   emit_reset, emit_frame);
+          continue;
+        }
+        backend_.stream_end(canceled_, emit_frame);
         emit_stream_ended(operation_id);
         finish_active();
         return;
       }
-      wait_for_cancel_response();
-      backend_.stream_abort(operation_id);
+      backend_.stream_abort();
       emit_stream_ended(operation_id);
     } catch (const WorkerError& error) {
-      backend_.stream_abort(operation_id);
+      backend_.stream_abort();
       if (error.code() == "canceled") {
-        wait_for_cancel_response();
         emit_stream_ended(operation_id);
       } else {
         emit_stream_error_or_ended(operation_id, error.code(), error.what());
       }
     } catch (const std::exception& error) {
-      backend_.stream_abort(operation_id);
+      backend_.stream_abort();
       emit_stream_error_or_ended(operation_id, "internal_error", error.what());
     }
     finish_active();
-  }
-
-  void wait_for_cancel_response() noexcept {
-    std::shared_future<void> signal;
-    {
-      std::lock_guard<std::mutex> lock(state_mutex_);
-      signal = cancel_response_signal_;
-    }
-    if (signal.valid()) {
-      try {
-        signal.get();
-      } catch (...) {
-      }
-    }
   }
 
   void emit_stream_ended(const std::string& operation_id) {
@@ -649,22 +643,14 @@ class Server {
   void emit_stream_error_or_ended(const std::string& operation_id,
                                   const std::string& code,
                                   const std::string& message) {
-    std::shared_future<void> signal;
     bool canceled = false;
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
-      terminal_committed_ = true;
       canceled = canceled_.load(std::memory_order_acquire);
-      if (canceled) signal = cancel_response_signal_;
+      if (!canceled) terminal_committed_ = true;
     }
     if (canceled) {
-      if (signal.valid()) {
-        try {
-          signal.get();
-        } catch (...) {
-        }
-      }
-      emitter_.event("stream_ended", json::object(), operation_id);
+      emit_stream_ended(operation_id);
       return;
     }
     emitter_.event("error", {{"code", code}, {"message", message}},
@@ -672,8 +658,7 @@ class Server {
   }
 
   void require_stream_locked(const std::string& operation_id) const {
-    if (!busy_.load(std::memory_order_acquire) ||
-        !current_operation_id_.has_value() ||
+    if (!current_operation_id_.has_value() ||
         *current_operation_id_ != operation_id ||
         canceled_.load(std::memory_order_acquire) || terminal_committed_) {
       throw WorkerError("operation_not_found", "The requested stream is not active",
@@ -683,16 +668,14 @@ class Server {
 
   void join_or_reject_active(const char* message) {
     if (operation_thread_.joinable()) {
-      if (busy_.load(std::memory_order_acquire)) {
+      bool active;
+      {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        active = current_operation_id_.has_value();
+      }
+      if (active) {
         throw WorkerError("busy", message);
       }
-      operation_thread_.join();
-    }
-  }
-
-  void join_completed_operation() {
-    if (operation_thread_.joinable() &&
-        !busy_.load(std::memory_order_acquire)) {
       operation_thread_.join();
     }
   }
@@ -705,17 +688,14 @@ class Server {
   }
 
   void finish_active() noexcept {
-    {
-      std::lock_guard<std::mutex> lock(state_mutex_);
-      current_operation_id_.reset();
-      stream_sample_rate_ = 0;
-      stream_end_queued_ = false;
-      terminal_committed_ = false;
-      stream_queue_.clear();
-      stream_queued_samples_ = 0;
-      cancel_response_signal_ = {};
-      busy_.store(false, std::memory_order_release);
-    }
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    current_operation_id_.reset();
+    stream_sample_rate_ = 0;
+    stream_end_queued_ = false;
+    terminal_committed_ = false;
+    stream_queue_.clear();
+    stream_queued_samples_ = 0;
+    cancel_response_signal_ = {};
   }
 
   void stop_operation() {
@@ -724,12 +704,10 @@ class Server {
       stream_condition_.notify_all();
       operation_thread_.join();
     }
-    finish_active();
   }
 
   Emitter emitter_;
   Backend backend_;
-  std::atomic_bool busy_{false};
   std::atomic_bool canceled_{false};
   mutable std::mutex state_mutex_;
   std::condition_variable stream_condition_;

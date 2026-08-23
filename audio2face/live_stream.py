@@ -15,7 +15,7 @@ from .path_contract import require_unaliased_path
 from .shape_keys import (
     ShapeKeyStreamError,
     apply_shape_key_frame,
-    build_subscriptions,
+    resolve_target_meshes,
     validate_output_channels,
 )
 
@@ -25,6 +25,37 @@ MAX_BUFFER_SECONDS = 4.0
 
 class LiveStreamError(RuntimeError):
     """Raised when a model output stream cannot be delivered safely."""
+
+
+def validate_stream_frame(
+    channels: tuple[str, ...],
+    timestamp_sample: object,
+    weights: object,
+) -> tuple[float, ...]:
+    """Validate one worker frame independently of its delivery state."""
+
+    if type(timestamp_sample) is not int or not -(1 << 63) <= timestamp_sample < (1 << 63):
+        raise LiveStreamError(
+            "stream frame timestamp_sample must fit a signed 64-bit integer"
+        )
+    if type(weights) is not list:
+        raise LiveStreamError("stream frame weights must be a JSON array")
+    if len(weights) != len(channels):
+        raise LiveStreamError(
+            f"stream frame has {len(weights)} values; expected {len(channels)}"
+        )
+    validated: list[float] = []
+    for index, weight in enumerate(weights):
+        if type(weight) is not float:
+            raise LiveStreamError(
+                f"output channel {channels[index]} is not a JSON float"
+            )
+        if not math.isfinite(weight) or not 0.0 <= weight <= 1.0:
+            raise LiveStreamError(
+                f"output channel {channels[index]} must be in [0, 1]"
+            )
+        validated.append(weight)
+    return tuple(validated)
 
 
 class LiveStreamController:
@@ -37,14 +68,12 @@ class LiveStreamController:
         self._channels: tuple[str, ...] = ()
         self._timestamps: list[int] = []
         self._weights: list[tuple[float, ...]] = []
-        self._subscriptions: tuple[bpy.types.Object, ...] = ()
         self._audio_path: Path | None = None
         self._audio_start_position = 0.0
         self._start_paused = False
         self._device: Any = None
         self._sound: Any = None
         self._handle: Any = None
-        self._aud: Any = None
         self._duration = 0.0
         self._published_progress = 0.0
         self._playback_started: Callable[[], None] | None = None
@@ -65,8 +94,14 @@ class LiveStreamController:
         return self._operation_id
 
     @property
-    def plays_audio(self) -> bool:
-        return self.active and self._audio_path is not None
+    def can_seek(self) -> bool:
+        return (
+            self.active
+            and self._audio_path is not None
+            and self._handle is not None
+            and bool(self._handle.status)
+            and self._duration > 0.0
+        )
 
     def prepare(
         self,
@@ -84,7 +119,7 @@ class LiveStreamController:
         playback_seeked: Callable[[float, bool], None] | None = None,
         playback_stopped: Callable[[bool], None] | None,
     ) -> None:
-        """Freeze the target list before the worker accepts stream audio."""
+        """Prepare one stream while resolving its target meshes at delivery time."""
 
         self.stop(reset=True, notify=False)
         if type(operation_id) is not str or not operation_id:
@@ -119,9 +154,6 @@ class LiveStreamController:
             validated_channels = validate_output_channels(channels)
         except ShapeKeyStreamError as exc:
             raise LiveStreamError(f"invalid stream output contract: {exc}") from exc
-        subscriptions = build_subscriptions(scene.audio2face)
-        if not subscriptions:
-            raise LiveStreamError("no target mesh is selected")
 
         resolved_audio: Path | None = None
         if audio_path is not None:
@@ -137,7 +169,6 @@ class LiveStreamController:
         self._operation_id = operation_id
         self._sample_rate = sample_rate
         self._channels = validated_channels
-        self._subscriptions = subscriptions
         self._audio_path = resolved_audio
         self._audio_start_position = audio_start_position
         self._start_paused = start_paused
@@ -172,13 +203,10 @@ class LiveStreamController:
     def _publish_position(self, settings: Any, position: float) -> None:
         position = min(max(0.0, position), self._duration)
         progress = position / self._duration if self._duration > 0.0 else 0.0
-        settings.playback_time = position
         settings.playback_progress = progress
         self._published_progress = float(settings.playback_progress)
 
     def _start_audio(self) -> None:
-        if self._audio_path is None or self._handle is not None:
-            return
         try:
             import aud
 
@@ -203,7 +231,6 @@ class LiveStreamController:
         self._device = device
         self._sound = sound
         self._handle = handle
-        self._aud = aud
         self._duration = duration
         settings = scene.audio2face
         settings.playback_duration = duration
@@ -216,26 +243,6 @@ class LiveStreamController:
         if self._start_paused and self._playback_paused is not None:
             self._playback_paused()
 
-    def _validated_weights(self, weights: list[float]) -> tuple[float, ...]:
-        if type(weights) is not list:
-            raise LiveStreamError("stream frame weights must be a JSON array")
-        if len(weights) != len(self._channels):
-            raise LiveStreamError(
-                f"stream frame has {len(weights)} values; expected {len(self._channels)}"
-            )
-        validated: list[float] = []
-        for index, weight in enumerate(weights):
-            if type(weight) is not float:
-                raise LiveStreamError(
-                    f"output channel {self._channels[index]} is not a JSON float"
-                )
-            if not math.isfinite(weight) or not 0.0 <= weight <= 1.0:
-                raise LiveStreamError(
-                    f"output channel {self._channels[index]} must be in [0, 1]"
-                )
-            validated.append(weight)
-        return tuple(validated)
-
     def receive(
         self,
         operation_id: str,
@@ -246,16 +253,9 @@ class LiveStreamController:
 
         if operation_id != self._operation_id or not self.active:
             raise LiveStreamError("received a frame for an inactive stream")
-        if (
-            type(timestamp_sample) is not int
-            or not -(1 << 63) <= timestamp_sample < (1 << 63)
-        ):
-            raise LiveStreamError(
-                "stream frame timestamp_sample must fit a signed 64-bit integer"
-            )
+        frame = validate_stream_frame(self._channels, timestamp_sample, weights)
         if self._timestamps and timestamp_sample <= self._timestamps[-1]:
             raise LiveStreamError("stream frame timestamps must be strictly increasing")
-        frame = self._validated_weights(weights)
         self._timestamps.append(timestamp_sample)
         self._weights.append(frame)
 
@@ -288,6 +288,15 @@ class LiveStreamController:
                 self._start_audio()
             else:
                 self.stop(reset=False, notify=True, natural=True)
+
+    def reset_frames(self, operation_id: str) -> None:
+        """Discard cached frames before the worker replays current settings."""
+
+        if operation_id != self._operation_id or not self.active:
+            raise LiveStreamError("received a frame reset for an inactive stream")
+        self._timestamps.clear()
+        self._weights.clear()
+        self._terminal = False
 
     def pause(self) -> None:
         scene = bpy.data.scenes.get(self._scene_name)
@@ -369,7 +378,7 @@ class LiveStreamController:
                 if not math.isfinite(delay):
                     raise LiveStreamError("prediction delay must be finite")
                 apply_shape_key_frame(
-                    self._subscriptions,
+                    resolve_target_meshes(settings),
                     self._channels,
                     sample_linear(
                         self._timestamps,
@@ -392,8 +401,7 @@ class LiveStreamController:
         if self._handle is None:
             return True
         try:
-            status = self._handle.status
-            if status == self._aud.STATUS_STOPPED:
+            if not self._handle.status:
                 # Audio playback can finish a little before the worker has drained its
                 # final inference frames.  Keep the operation registered until the
                 # matching ``stream_ended`` event arrives; otherwise that valid terminal
@@ -412,7 +420,6 @@ class LiveStreamController:
                 rel_tol=0.0,
                 abs_tol=1.0e-9,
             ):
-                self._publish_position(settings, float(self._handle.position))
                 self.request_seek(requested_progress * self._duration)
                 return True
 
@@ -422,7 +429,7 @@ class LiveStreamController:
                 raise LiveStreamError("prediction delay must be finite")
             if self._timestamps:
                 apply_shape_key_frame(
-                    self._subscriptions,
+                    resolve_target_meshes(settings),
                     self._channels,
                     sample_linear(
                         self._timestamps,
@@ -431,20 +438,42 @@ class LiveStreamController:
                     ),
                 )
             self._publish_position(settings, position)
-            if status == self._aud.STATUS_PLAYING:
-                settings.playback_state = "PLAYING"
-            elif status == self._aud.STATUS_PAUSED:
-                settings.playback_state = "PAUSED"
-            else:
-                raise LiveStreamError(
-                    f"audio device returned invalid playback status {status!r}"
-                )
             return True
         except (LiveStreamError, OSError, RuntimeError, ValueError) as exc:
             self.stop(reset=False, notify=True)
             settings.status = "ERROR"
             settings.status_message = str(exc)
             return False
+
+    def stop_for_seek(self, position: float, *, paused: bool) -> None:
+        """Stop the current stream while retaining its seek presentation."""
+
+        if isinstance(position, bool) or not isinstance(position, (int, float)):
+            raise TypeError("playback position must be a number")
+        if type(paused) is not bool:
+            raise TypeError("paused must be an exact bool")
+        requested = float(position)
+        if not math.isfinite(requested) or requested < 0.0:
+            raise LiveStreamError(
+                "playback position must be a finite non-negative number"
+            )
+        scene = bpy.data.scenes.get(self._scene_name)
+        if (
+            scene is None
+            or not scene.is_editable
+            or not self.active
+            or self._audio_path is None
+            or self._handle is None
+            or self._duration <= 0.0
+        ):
+            raise LiveStreamError("selected audio playback is not active")
+        duration = self._duration
+        requested = min(requested, duration)
+        self.stop(reset=False, notify=False)
+        settings = scene.audio2face
+        settings.playback_state = "PAUSED" if paused else "PLAYING"
+        settings.playback_duration = duration
+        settings.playback_progress = requested / duration
 
     def stop(
         self,
@@ -459,15 +488,14 @@ class LiveStreamController:
         settings = scene.audio2face if scene is not None and scene.is_editable else None
         if self._handle is not None:
             self._handle.stop()
-        if reset and self._subscriptions:
+        if reset and settings is not None:
             apply_shape_key_frame(
-                self._subscriptions,
+                resolve_target_meshes(settings),
                 self._channels,
                 (0.0,) * len(self._channels),
             )
         if settings is not None:
             settings.playback_state = "IDLE"
-            settings.playback_time = 0.0
             settings.playback_duration = 0.0
             settings.playback_progress = 0.0
             settings.stream_time = 0.0
@@ -479,14 +507,12 @@ class LiveStreamController:
         self._channels = ()
         self._timestamps.clear()
         self._weights.clear()
-        self._subscriptions = ()
         self._audio_path = None
         self._audio_start_position = 0.0
         self._start_paused = False
         self._device = None
         self._sound = None
         self._handle = None
-        self._aud = None
         self._duration = 0.0
         self._published_progress = 0.0
         self._playback_started = None

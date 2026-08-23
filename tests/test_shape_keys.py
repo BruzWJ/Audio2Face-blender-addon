@@ -51,18 +51,6 @@ def test_sampled_frame_drives_matching_shape_key_only(
     assert shape_keys.key_blocks["jawOpen"].value == pytest.approx(0.25)
 
 
-def test_shape_key_delivery_rejects_mutable_frame_alias(
-    shape_keys_module: ModuleType,
-) -> None:
-    target = SimpleNamespace(data=SimpleNamespace(shape_keys=_ShapeKeys()))
-
-    with pytest.raises(
-        shape_keys_module.ShapeKeyStreamError,
-        match="frozen frame tuple",
-    ):
-        shape_keys_module.apply_shape_key_frame((target,), ("jawOpen",), [0.5])
-
-
 def test_output_channels_require_exact_json_array_of_52_unique_names(
     shape_keys_module: ModuleType,
 ) -> None:
@@ -99,7 +87,7 @@ def test_all_registered_meshes_subscribe_and_missing_objects_are_ignored(
         ]
     )
 
-    subscriptions = shape_keys_module.build_subscriptions(settings)
+    subscriptions = shape_keys_module.resolve_target_meshes(settings)
     shape_keys_module.apply_shape_key_frame(
         subscriptions,
         tuple(f"channel{index}" for index in range(52)),

@@ -32,7 +32,6 @@ struct ModelRequest {
 };
 
 struct StreamRequest {
-  std::string operation_id;
   std::uint32_t sample_rate;
   json settings;
 };
@@ -43,6 +42,7 @@ struct StreamFrame {
 };
 
 using StreamFrameCallback = std::function<void(const StreamFrame& frame)>;
+using StreamResetCallback = std::function<void()>;
 
 class Backend final {
  public:
@@ -54,14 +54,16 @@ class Backend final {
 
   json load_model(const ModelRequest& request);
   json stream_start(const StreamRequest& request);
-  void stream_chunk(const std::string& operation_id,
-                    const std::vector<float>& audio,
+  void stream_chunk(const std::vector<float>& audio,
                     std::atomic_bool& canceled,
                     const StreamFrameCallback& frame);
-  void stream_end(const std::string& operation_id,
-                  std::atomic_bool& canceled,
+  void stream_settings(const json& settings,
+                       std::atomic_bool& canceled,
+                       const StreamResetCallback& reset,
+                       const StreamFrameCallback& frame);
+  void stream_end(std::atomic_bool& canceled,
                   const StreamFrameCallback& frame);
-  void stream_abort(const std::string& operation_id) noexcept;
+  void stream_abort() noexcept;
 
  private:
   class Impl;

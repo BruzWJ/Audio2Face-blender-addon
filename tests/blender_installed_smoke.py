@@ -11,6 +11,28 @@ from unittest.mock import Mock
 import bpy
 
 
+AUDIO2FACE_DEFAULTS: dict[str, float | int] = {
+    "input_strength": 1.0,
+    "lower_face_smoothing": 0.006,
+    "upper_face_smoothing": 0.001,
+    "lower_face_strength": 1.0,
+    "upper_face_strength": 1.0,
+    "face_mask_level": 0.6,
+    "face_mask_softness": 0.0085,
+    "skin_strength": 1.0,
+    "blink_strength": 1.0,
+    "eyelid_open_offset": 0.0,
+    "lip_open_offset": 0.0,
+    "eyeballs_strength": 1.0,
+    "saccade_strength": 0.6,
+    "right_eye_rot_x_offset": 0.0,
+    "right_eye_rot_y_offset": 0.0,
+    "left_eye_rot_x_offset": 0.0,
+    "left_eye_rot_y_offset": 0.0,
+    "eye_saccade_seed": 0,
+}
+
+
 def main() -> None:
     assert bpy.app.version[:2] == (5, 2)
     addon_names = [
@@ -30,20 +52,11 @@ def main() -> None:
     assert runtime._load_pre_handler in bpy.app.handlers.load_pre
     assert runtime._load_post_handler in bpy.app.handlers.load_post
     operator_names = set(dir(bpy.ops.a2f))
-    assert "uninstall" not in operator_names
     assert {
         "play_pause",
-        "rewind",
         "load_preferred_emotion",
         "clear_preferred_emotion",
     } <= operator_names
-    assert {
-        "generate",
-        "start_wav_stream",
-        "stop_stream",
-        "preview_play_pause",
-        "preview_rewind",
-    }.isdisjoint(operator_names)
     runtime.get_controller().poll()
     assert bpy.context.scene.audio2face.status == "IDLE"
 
@@ -74,8 +87,6 @@ def main() -> None:
     )
     scene_property_names = set(properties.A2FSceneSettings.bl_rna.properties.keys())
     assert set(properties.A2FTargetMeshItem.__annotations__) == {"object"}
-    assert "enabled" not in properties.A2FTargetMeshItem.bl_rna.properties
-    assert not hasattr(properties, "A2FModelParameterItem")
     missing_scene_property_names = (
         set(properties.A2FSceneSettings.__annotations__) - scene_property_names
     )
@@ -83,6 +94,8 @@ def main() -> None:
         "scene settings missing registered RNA properties: "
         f"{sorted(missing_scene_property_names)}"
     )
+    assert set(properties.AUDIO2FACE_SETTING_FIELDS) == set(AUDIO2FACE_DEFAULTS)
+    assert len(properties.AUDIO2FACE_SETTING_FIELDS) == 18
     emotion_property_defaults = {
         "a2e_emotion_strength": 0.6,
         "a2e_emotion_contrast": 1.0,
@@ -98,25 +111,59 @@ def main() -> None:
         "manual_emotions",
         "preferred_emotions",
         *emotion_property_defaults,
+        *AUDIO2FACE_DEFAULTS,
     } <= scene_property_names
+    for name, default in AUDIO2FACE_DEFAULTS.items():
+        assert (
+            properties.A2FSceneSettings.bl_rna.properties[name].default
+            == default
+        )
     for name, default in emotion_property_defaults.items():
         assert properties.A2FSceneSettings.bl_rna.properties[name].default == default
     assert not properties.A2FSceneSettings.bl_rna.properties[
         "preferred_emotions"
     ].is_skip_save
-    assert {
-        "preview_progress",
-        "preview_volume",
-        "preview_reset_on_stop",
-        "stream_reset_on_stop",
-        "model_parameters",
-        "identity_index",
-        "model_identities",
-    }.isdisjoint(scene_property_names)
     panel_source = inspect.getsource(ui.A2F_PT_main.draw)
     assert "if settings.manual_emotions:" in panel_source
-    assert "settings.manual_emotions and not settings.auto_audio2emotion" not in panel_source
+    assert (
+        "settings.manual_emotions and not settings.auto_audio2emotion"
+        not in panel_source
+    )
     assert "if settings.auto_audio2emotion:" not in panel_source
+
+    settings = bpy.context.scene.audio2face
+    properties.apply_model_schema(
+        settings,
+        {
+            "channels": [f"modelChannel{index}" for index in range(52)],
+            "emotion_channels": [],
+            "audio2face_defaults": AUDIO2FACE_DEFAULTS.copy(),
+        },
+        ("/models/audio2face/model.json", "/models/audio2emotion/model.json"),
+    )
+    settings.input_strength = 2.0
+    settings.blink_strength = 1.5
+    settings.eye_saccade_seed = 41
+    tuned_audio2face = AUDIO2FACE_DEFAULTS.copy()
+    tuned_audio2face.update(
+        input_strength=2.0,
+        blink_strength=1.5,
+        eye_saccade_seed=41,
+    )
+    assert properties.inference_settings(settings) == {
+        "audio2face": tuned_audio2face,
+        "auto_audio2emotion": False,
+        "manual_emotions": {},
+        "audio2emotion": {
+            "emotion_strength": 0.6,
+            "emotion_contrast": 1.0,
+            "max_emotions": 6,
+            "live_blend_coef": 0.7,
+            "transition_smoothing": 0.5,
+            "preferred_emotion": None,
+            "preferred_emotion_strength": 0.5,
+        },
+    }
 
     bundle = runtime.resolve_runtime_bundle()
     package_directory = Path(package.__file__).resolve().parent

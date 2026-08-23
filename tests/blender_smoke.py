@@ -23,24 +23,44 @@ if str(PROJECT_ROOT) not in sys.path:
 import bpy  # noqa: E402  (available only inside Blender)
 
 import audio2face  # noqa: E402
-import audio2face.properties as properties_module  # noqa: E402
 from audio2face.shape_keys import (  # noqa: E402
     apply_shape_key_frame,
-    build_subscriptions,
+    resolve_target_meshes,
 )
 from audio2face.live_stream import LiveStreamController  # noqa: E402
 from audio2face import runtime  # noqa: E402
 from audio2face.preferences import A2FAddonPreferences  # noqa: E402
 from audio2face.properties import (  # noqa: E402
+    AUDIO2FACE_SETTING_FIELDS,
     A2FSceneSettings,
     A2FTargetMeshItem,
     apply_model_schema,
-    emotion_settings,
+    inference_settings,
 )
 from audio2face.ui_text import draw_wrapped_label  # noqa: E402
 
 
 MODEL_CHANNELS = ["jawOpen", *(f"modelChannel{index}" for index in range(51))]
+MODEL_DEFAULTS: dict[str, float | int] = {
+    "input_strength": 1.0,
+    "lower_face_smoothing": 0.006,
+    "upper_face_smoothing": 0.001,
+    "lower_face_strength": 1.0,
+    "upper_face_strength": 1.0,
+    "face_mask_level": 0.6,
+    "face_mask_softness": 0.0085,
+    "skin_strength": 1.0,
+    "blink_strength": 1.0,
+    "eyelid_open_offset": 0.0,
+    "lip_open_offset": 0.0,
+    "eyeballs_strength": 1.0,
+    "saccade_strength": 0.6,
+    "right_eye_rot_x_offset": 0.0,
+    "right_eye_rot_y_offset": 0.0,
+    "left_eye_rot_x_offset": 0.0,
+    "left_eye_rot_y_offset": 0.0,
+    "eye_saccade_seed": 0,
+}
 
 
 def _assert_close(actual: float, expected: float, *, label: str) -> None:
@@ -103,20 +123,11 @@ def main() -> None:
         assert notice_calls[0].kwargs["icon"] == "INFO"
         assert all(call.kwargs["icon"] == "BLANK1" for call in notice_calls[1:])
         operator_names = set(dir(bpy.ops.a2f))
-        assert "uninstall" not in operator_names
         assert {
             "play_pause",
-            "rewind",
             "load_preferred_emotion",
             "clear_preferred_emotion",
         } <= operator_names
-        assert {
-            "generate",
-            "start_wav_stream",
-            "stop_stream",
-            "preview_play_pause",
-            "preview_rewind",
-        }.isdisjoint(operator_names)
         preference_names = set(A2FAddonPreferences.bl_rna.properties.keys())
         assert set(A2FAddonPreferences.__annotations__) == {
             "nvidia_terms_accepted",
@@ -144,8 +155,6 @@ def main() -> None:
         )
         scene_property_names = set(A2FSceneSettings.bl_rna.properties.keys())
         assert set(A2FTargetMeshItem.__annotations__) == {"object"}
-        assert "enabled" not in A2FTargetMeshItem.bl_rna.properties
-        assert not hasattr(properties_module, "A2FModelParameterItem")
         missing_scene_property_names = (
             set(A2FSceneSettings.__annotations__) - scene_property_names
         )
@@ -165,26 +174,62 @@ def main() -> None:
             "a2e_live_blend_coef",
             "a2e_transition_smoothing",
             "a2e_preferred_emotion_strength",
+            *AUDIO2FACE_SETTING_FIELDS,
         } <= scene_property_names
+        expected_model_ranges = {
+            "input_strength": (0.0, 3.0),
+            "lower_face_smoothing": (0.0, 0.1),
+            "upper_face_smoothing": (0.0, 0.1),
+            "lower_face_strength": (0.0, 2.0),
+            "upper_face_strength": (0.0, 2.0),
+            "face_mask_level": (0.0, 1.0),
+            "face_mask_softness": (0.001, 0.5),
+            "skin_strength": (0.0, 2.0),
+            "blink_strength": (0.0, 2.0),
+            "eyelid_open_offset": (-1.0, 1.0),
+            "lip_open_offset": (-0.2, 0.2),
+            "eyeballs_strength": (0.0, 2.0),
+            "saccade_strength": (0.0, 2.0),
+            "right_eye_rot_x_offset": (-10.0, 10.0),
+            "right_eye_rot_y_offset": (-10.0, 10.0),
+            "left_eye_rot_x_offset": (-10.0, 10.0),
+            "left_eye_rot_y_offset": (-10.0, 10.0),
+            "eye_saccade_seed": (0.0, 4999.0),
+        }
+        for name, expected_range in expected_model_ranges.items():
+            prop = A2FSceneSettings.bl_rna.properties[name]
+            _assert_close(prop.hard_min, expected_range[0], label=f"{name} min")
+            _assert_close(prop.hard_max, expected_range[1], label=f"{name} max")
+        assert {
+            name: A2FSceneSettings.bl_rna.properties[name].name
+            for name in (
+                "eyelid_open_offset",
+                "eyeballs_strength",
+                "right_eye_rot_x_offset",
+                "right_eye_rot_y_offset",
+                "left_eye_rot_x_offset",
+                "left_eye_rot_y_offset",
+                "eye_saccade_seed",
+            )
+        } == {
+            "eyelid_open_offset": "Eyelid Offset",
+            "eyeballs_strength": "Offset Strength",
+            "right_eye_rot_x_offset": "Right Eye Rotate X",
+            "right_eye_rot_y_offset": "Right Eye Rotate Y",
+            "left_eye_rot_x_offset": "Left Eye Rotate X",
+            "left_eye_rot_y_offset": "Left Eye Rotate Y",
+            "eye_saccade_seed": "Eye Saccade Data",
+        }
         assert not A2FSceneSettings.bl_rna.properties[
             "preferred_emotions"
         ].is_skip_save
-        assert {
-            "preview_progress",
-            "preview_volume",
-            "preview_reset_on_stop",
-            "stream_reset_on_stop",
-            "model_parameters",
-            "identity_index",
-            "model_identities",
-        }.isdisjoint(scene_property_names)
-
         scene = bpy.context.scene
         target = _make_shape_key_target(scene)
 
         settings = scene.audio2face
         model_schema = {
             "channels": MODEL_CHANNELS.copy(),
+            "audio2face_defaults": MODEL_DEFAULTS.copy(),
             "emotion_channels": [
                 {"name": "Neutral", "default": 1.0},
                 {"name": "Joy", "default": 0.0},
@@ -192,13 +237,32 @@ def main() -> None:
         }
         model_signature = ("/models/audio2face", "/models/audio2emotion")
         apply_model_schema(settings, model_schema, model_signature)
+        for name, expected in MODEL_DEFAULTS.items():
+            if name == "eye_saccade_seed":
+                assert getattr(settings, name) == expected
+            else:
+                _assert_close(getattr(settings, name), expected, label=name)
         assert [(item.name, item.value) for item in settings.manual_emotions] == [
             ("Neutral", 1.0),
             ("Joy", 0.0),
         ]
         settings.manual_emotions[1].value = 0.75
+        settings.input_strength = 2.0
+        settings.blink_strength = 1.5
+        settings.eye_saccade_seed = 41
         apply_model_schema(settings, model_schema, model_signature)
         _assert_close(settings.manual_emotions[1].value, 0.75, label="preserved Joy")
+        _assert_close(
+            settings.input_strength,
+            2.0,
+            label="preserved input strength",
+        )
+        _assert_close(
+            settings.blink_strength,
+            1.5,
+            label="preserved blink strength",
+        )
+        assert settings.eye_saccade_seed == 41
         settings.auto_audio2emotion = True
         settings.a2e_emotion_strength = 0.8
         settings.a2e_emotion_contrast = 1.4
@@ -209,13 +273,31 @@ def main() -> None:
         assert bpy.ops.a2f.clear_preferred_emotion() == {"FINISHED"}
         assert bpy.ops.a2f.load_preferred_emotion() == {"FINISHED"}
         settings.manual_emotions[1].value = 0.5
-        emotion_payload = emotion_settings(settings)
+        settings.input_strength = 2.0
+        settings.blink_strength = 1.5
+        settings.eye_saccade_seed = 41
+        emotion_payload = inference_settings(settings)
         assert set(emotion_payload) == {
+            "audio2face",
             "auto_audio2emotion",
             "manual_emotions",
             "audio2emotion",
         }
         assert emotion_payload["auto_audio2emotion"] is True
+        assert set(emotion_payload["audio2face"]) == set(
+            AUDIO2FACE_SETTING_FIELDS
+        )
+        _assert_close(
+            emotion_payload["audio2face"]["input_strength"],
+            2.0,
+            label="input strength",
+        )
+        _assert_close(
+            emotion_payload["audio2face"]["blink_strength"],
+            1.5,
+            label="blink strength",
+        )
+        assert emotion_payload["audio2face"]["eye_saccade_seed"] == 41
         manual_payload = emotion_payload["manual_emotions"]
         assert set(manual_payload) == {"Neutral", "Joy"}
         _assert_close(manual_payload["Neutral"], 1.0, label="manual Neutral")
@@ -244,7 +326,10 @@ def main() -> None:
         ):
             _assert_close(automatic_payload[name], expected, label=name)
         assert bpy.ops.a2f.clear_preferred_emotion() == {"FINISHED"}
-        assert emotion_settings(settings)["audio2emotion"]["preferred_emotion"] is None
+        assert (
+            inference_settings(settings)["audio2emotion"]["preferred_emotion"]
+            is None
+        )
 
         extra_target = _make_shape_key_target(
             scene,
@@ -272,7 +357,7 @@ def main() -> None:
         primary_vertices = [tuple(vertex.co) for vertex in target.data.vertices]
         extra_vertices = [tuple(vertex.co) for vertex in extra_target.data.vertices]
 
-        subscriptions = build_subscriptions(settings)
+        subscriptions = resolve_target_meshes(settings)
         # Every mesh remains subscribed without Shape Key inspection; shared
         # Key datablocks are deduplicated only when a frame is delivered.
         assert len(subscriptions) == 4

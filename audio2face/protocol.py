@@ -10,8 +10,8 @@ from typing import Any
 from .strict_json import duplicate_key_hook, invalid_constant_hook
 
 
-PROTOCOL_VERSION = "audio2face/4"
-WORKER_PROFILE = "nvidia-a2f3-a2e3-gpu-arkit52/4"
+PROTOCOL_VERSION = "audio2face/5"
+WORKER_PROFILE = "nvidia-a2f3-a2e3-gpu-arkit52/5"
 MAX_CONTROL_LINE_BYTES = 1_048_576
 _CONTROL_TYPES = frozenset({"request", "response", "error", "event"})
 _REQUEST_METHODS = frozenset(
@@ -20,12 +20,15 @@ _REQUEST_METHODS = frozenset(
         "load_model",
         "stream_start",
         "stream_chunk",
+        "stream_settings",
         "stream_end",
         "cancel",
         "shutdown",
     }
 )
-_EVENT_NAMES = frozenset({"stream_frame", "stream_ended", "error"})
+_EVENT_NAMES = frozenset(
+    {"stream_frame", "stream_reset", "stream_ended", "error"}
+)
 _NAME_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
 
 
@@ -69,7 +72,7 @@ def _require_id(value: Any, field: str) -> str:
     return value
 
 
-def _validate_message(message: dict[str, Any]) -> dict[str, Any]:
+def _validate_message(message: Any) -> dict[str, Any]:
     envelope = _require_object(message, "message")
     missing_common = {"protocol", "type"} - set(envelope)
     if missing_common:
@@ -199,4 +202,4 @@ def decode_message(line: str) -> dict[str, Any]:
         )
     except json.JSONDecodeError as exc:
         raise ProtocolError(f"invalid JSON at column {exc.colno}: {exc.msg}") from exc
-    return _validate_message(_require_object(value, "message"))
+    return _validate_message(value)
