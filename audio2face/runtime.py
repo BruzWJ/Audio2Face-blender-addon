@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import math
+import os
 import queue
 import struct
 import threading
@@ -237,6 +238,22 @@ class RuntimeController:
         )
 
     @staticmethod
+    def _selected_directory_path(value: str, description: str) -> Path:
+        """Remove only the terminal separator emitted by Blender ``DIR_PATH``."""
+
+        if value.startswith("//"):
+            raise SidecarError(f"{description} must be one canonical absolute path")
+        canonical = os.path.abspath(value)
+        separators = os.sep if os.altsep is None else os.sep + os.altsep
+        if value != canonical and value.rstrip(separators) != canonical:
+            raise SidecarError(f"{description} must be one canonical absolute path")
+        return require_unaliased_path(
+            canonical,
+            description=description,
+            error_type=SidecarError,
+        )
+
+    @staticmethod
     def _extension_data_directory(name: str) -> Path:
         description = f"Audio2Face {name} directory"
         try:
@@ -340,7 +357,10 @@ class RuntimeController:
                     "in Add-on Preferences"
                 )
             selections.append(
-                self._selected_path(value, f"selected {label} model directory")
+                self._selected_directory_path(
+                    value,
+                    f"selected {label} model directory",
+                )
             )
         return selections[0], selections[1]
 

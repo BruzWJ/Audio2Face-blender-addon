@@ -235,6 +235,25 @@ def test_selected_paths_reject_blender_relative_spelling(
         runtime.RuntimeController._selected_path("//models/Audio2Face", "model")
 
 
+def test_selected_directory_paths_accept_only_blender_terminal_separator(
+    runtime_module: tuple[ModuleType, ModuleType],
+    tmp_path: Path,
+) -> None:
+    runtime, _bpy = runtime_module
+    selected = tmp_path / "Audio2Face"
+    selected.mkdir()
+
+    assert (
+        runtime.RuntimeController._selected_directory_path(f"{selected}/", "model")
+        == selected
+    )
+    with pytest.raises(runtime.SidecarError, match="canonical absolute path"):
+        runtime.RuntimeController._selected_directory_path(
+            f"{tmp_path}/./Audio2Face/",
+            "model",
+        )
+
+
 def test_initial_poll_resets_only_editable_scenes(
     runtime_module: tuple[ModuleType, ModuleType],
 ) -> None:

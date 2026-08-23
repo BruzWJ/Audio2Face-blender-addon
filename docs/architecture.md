@@ -104,9 +104,10 @@ Preferences. The page links to the NVIDIA Audio2Face-3D v3.0 and gated
 Audio2Emotion v3.0 repositories. Users download and extract both complete
 repositories, then use two persistent Blender `DIR_PATH` properties to select
 their exact clone or download roots anywhere on disk. For each selected root,
-the add-on derives only `<root>/model.json`. It does not authenticate with a
-model host and never downloads, copies, relocates, or deletes either model
-root.
+the add-on removes the terminal separator emitted by `DIR_PATH` before applying
+strict canonical-path and filesystem-alias checks, then derives only
+`<root>/model.json`. It does not authenticate with a model host and never
+downloads, copies, relocates, or deletes either model root.
 
 NVIDIA provides the Audio2Face-3D SDK source and ONNX-based model inputs. It
 does not provide the native Blender child described by this architecture. A

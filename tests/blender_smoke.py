@@ -77,6 +77,11 @@ def main() -> None:
     try:
         audio2face.register()
         registered = True
+        selected = runtime.RuntimeController._selected_directory_path(
+            bpy.app.tempdir,
+            "selected model directory",
+        )
+        assert selected == Path(bpy.app.tempdir)
         assert hasattr(bpy.types.Scene, "audio2face")
         assert bpy.app.timers.is_registered(runtime._timer_callback)
         assert runtime._load_pre_handler in bpy.app.handlers.load_pre
