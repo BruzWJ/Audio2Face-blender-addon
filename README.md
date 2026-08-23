@@ -54,13 +54,21 @@ root must contain the repository's top-level `model.json`; that is the only
 descriptor path the add-on derives. It does not sign in to Hugging Face,
 download, copy, relocate, or delete model files.
 
+The Hugging Face repositories intentionally contain `network.onnx`, not
+`network.trt`. After selecting both repositories, click **Optimize Models**;
+the add-on generates each GPU-specific `network.trt` locally from its ONNX
+model. Do not download or create that file yourself.
+
 The extension validates its package-local `runtime/bundle.json`, native
 executables, runtime directories, and notices. Setup then validates
 `model.json`, `network.onnx`, and `trt_info.json` in each selected root,
 rejects unresolved model references and Git LFS pointer files, and runs the
-bundled `trtexec` on CUDA device 0. It builds both engine candidates before
-atomically replacing `<selected-root>/network.trt` in the two roots, so both
-roots must be writable. Preferences provide cancellation and progress. The 3D
+bundled `trtexec` on CUDA device 0. Since the worker owns one audio track, the
+add-on builds a one-track profile while preserving NVIDIA's model-provided
+buffer ranges and other TensorRT settings. It builds both engine candidates
+before atomically replacing `<selected-root>/network.trt` in the two roots, so
+both roots must be writable. Preferences provide cancellation, progress,
+readable failure summaries, and access to the complete TensorRT logs. The 3D
 View sidebar only reports readiness and directs model setup to Preferences.
 
 The runtime is not installed, updated, or repaired after the extension is

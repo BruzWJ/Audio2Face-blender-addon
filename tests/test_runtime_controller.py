@@ -289,6 +289,19 @@ def test_optimization_progress_keeps_only_latest_snapshot(
 
     assert controller.optimization_message == "step 9999"
     assert controller.optimization_progress == pytest.approx(0.9999)
+    assert controller.optimization_failed is False
+
+
+def test_optimization_error_is_retained_for_preferences(
+    runtime_module: tuple[ModuleType, ModuleType],
+) -> None:
+    runtime, _bpy = runtime_module
+    controller = runtime.RuntimeController()
+
+    controller._finish_optimization("error", "readable TensorRT failure")
+
+    assert controller.optimization_failed is True
+    assert controller.optimization_message == "readable TensorRT failure"
 
 
 def test_optimization_eligibility_reports_the_bundled_runtime_blocker(
@@ -362,6 +375,21 @@ def test_setup_snapshot_validates_the_saved_model_pair_once(
     assert engine_checks == (
         [(selected[0] / "model.json", selected[1] / "model.json")]
     )
+    monkeypatch.setattr(
+        runtime,
+        "validate_model_engines",
+        lambda _face, _emotion: (_ for _ in ()).throw(
+            runtime.ModelInputError("network.trt is missing")
+        ),
+    )
+    setup = runtime.RuntimeController().setup_snapshot()
+    assert setup.model_status.ready is True
+    assert setup.engine_status == runtime.SetupStatus(
+        False,
+        "Click Optimize Models to generate the GPU-specific TensorRT engines "
+        "from the downloaded ONNX models",
+    )
+    assert setup.model_spec is not None
 
 
 def test_setup_snapshot_explains_a_missing_selection(

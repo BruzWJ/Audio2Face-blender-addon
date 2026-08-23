@@ -149,6 +149,11 @@ def _trt_build_plan(
             )
         format_values[name] = value
 
+    # The worker owns one audio track; every non-batch dimension remains model-owned.
+    for name in ("OPT_BATCH_SIZE", "MAX_BATCH_SIZE"):
+        if name in format_values:
+            format_values[name] = 1
+
     formatter = string.Formatter()
     placeholders: set[str] = set()
     for template in parameter_templates:
@@ -184,7 +189,7 @@ def _trt_build_plan(
             f"selected {model_label} TRT settings cannot be formatted: {exc}"
         ) from exc
 
-    runner_options = {"--onnx", "--saveengine", "--device"}
+    runner_options = {"--onnx", "--saveengine", "--device", "--skipinference"}
     for parameter in model_parameters:
         option = parameter.split("=", 1)[0].split(maxsplit=1)[0].casefold()
         if option in runner_options:
@@ -197,6 +202,7 @@ def _trt_build_plan(
         f"--onnx={onnx_path}",
         f"--saveEngine={output_path}",
         "--device=0",
+        "--skipInference",
         *model_parameters,
     ]
     estimate = document["estimated_trt_builder_time"]
@@ -214,6 +220,29 @@ def _trt_build_plan(
         f"(NVIDIA estimate: about {int(round(estimate))} seconds)"
     )
     return command, message
+
+
+def _trtexec_failure_message(
+    model_label: str,
+    returncode: int,
+    log_path: Path,
+    *,
+    output_ready: bool,
+) -> str:
+    """Point Blender at the complete log without exposing raw process bytes."""
+
+    if returncode != 0:
+        summary = (
+            f"TensorRT {model_label} optimization failed "
+            f"(exit code {returncode})."
+        )
+    elif not output_ready:
+        summary = (
+            f"TensorRT {model_label} optimization did not produce a usable engine."
+        )
+    else:
+        summary = f"TensorRT {model_label} optimization failed."
+    return f"{summary}\nComplete TensorRT log: {log_path.name}"
 
 
 def _windows_staging_directory(system_root: str) -> Path:
@@ -306,16 +335,17 @@ def _build_engine(
                 raise ModelOptimizationCancelled("model optimization was canceled")
             returncode = process.returncode
 
-        if (
-            returncode != 0
-            or not command_output.is_file()
-            or command_output.stat().st_size == 0
-        ):
-            tail = log_path.read_bytes()[-4000:]
-            detail = f"\nTensorRT log bytes: {tail!r}" if tail else ""
+        output_ready = (
+            command_output.is_file() and command_output.stat().st_size > 0
+        )
+        if returncode != 0 or not output_ready:
             raise ModelOptimizationError(
-                f"TensorRT {model_label} optimization failed with exit code "
-                f"{returncode}{detail}"
+                _trtexec_failure_message(
+                    model_label,
+                    returncode,
+                    log_path,
+                    output_ready=output_ready,
+                )
             )
         if command_output != candidate:
             shutil.copyfile(command_output, candidate)

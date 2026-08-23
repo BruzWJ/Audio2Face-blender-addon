@@ -200,7 +200,9 @@ installation. It performs no online request.
    that root; Git LFS pointers are rejected;
 2. validates the fixed bundled runtime payload;
 3. runs the bundled `trtexec` on CUDA device 0 for each selected model,
-   building each completed engine as a temporary sibling candidate;
+   fixing NVIDIA's batch placeholders to the worker's one-track contract while
+   retaining every model-provided buffer range and other build parameter, and
+   builds each completed engine as a temporary sibling candidate;
 4. honors cancellation while each native build is running; and
 5. atomically replaces both `<selected-root>/network.trt` engines as one
    transaction after both candidates succeed.

@@ -11,9 +11,13 @@ import bpy
 from .live_stream import get_live_stream_controller
 from .runtime import get_controller
 from .sidecar import Lifecycle
+from .ui_text import draw_wrapped_label
 
 if TYPE_CHECKING:
     from .properties import A2FModelParameterItem, A2FSceneSettings
+
+
+SIDEBAR_TEXT_WIDTH = 42
 
 
 def _draw_audio_playback(
@@ -30,15 +34,24 @@ def _draw_audio_playback(
             if settings.result_path
             else "No generated result yet"
         )
-        playback_box.label(text=result_name, icon="FILE")
+        draw_wrapped_label(
+            playback_box,
+            result_name,
+            width=SIDEBAR_TEXT_WIDTH,
+            icon="FILE",
+        )
         if settings.result_audio_path:
-            playback_box.label(
-                text=f"Audio: {Path(settings.result_audio_path).name}",
+            draw_wrapped_label(
+                playback_box,
+                f"Audio: {Path(settings.result_audio_path).name}",
+                width=SIDEBAR_TEXT_WIDTH,
                 icon="SOUND",
             )
         else:
-            playback_box.label(
-                text="Generate the selected WAV to enable playback",
+            draw_wrapped_label(
+                playback_box,
+                "Generate the selected WAV to enable playback",
+                width=SIDEBAR_TEXT_WIDTH,
                 icon="INFO",
             )
 
@@ -59,8 +72,10 @@ def _draw_audio_playback(
         controls.prop(settings, "preview_loop")
         controls.prop(settings, "preview_volume")
         playback_box.prop(settings, "preview_reset_on_stop")
-        playback_box.label(
-            text="Plays audio and delivers model channels to targets in sync",
+        draw_wrapped_label(
+            playback_box,
+            "Plays audio and delivers model channels to targets in sync",
+            width=SIDEBAR_TEXT_WIDTH,
             icon="INFO",
         )
         return
@@ -77,8 +92,10 @@ def _draw_audio_playback(
     if not settings.stream_operation_id or live_stream.plays_audio:
         playback_box.prop(settings, "preview_volume")
     else:
-        playback_box.label(
-            text="External PCM source owns audio playback",
+        draw_wrapped_label(
+            playback_box,
+            "External PCM source owns audio playback",
+            width=SIDEBAR_TEXT_WIDTH,
             icon="INFO",
         )
     playback_box.prop(settings, "stream_reset_on_stop")
@@ -135,8 +152,10 @@ class A2F_PT_main(bpy.types.Panel):
         if not context.scene.is_editable:
             warning = layout.box()
             warning.alert = True
-            warning.label(
-                text="Use a local scene or editable library override",
+            draw_wrapped_label(
+                warning,
+                "Use a local scene or editable library override",
+                width=SIDEBAR_TEXT_WIDTH,
                 icon="ERROR",
             )
             return
@@ -160,7 +179,11 @@ class A2F_PT_main(bpy.types.Panel):
         header.label(text=settings.status.replace("_", " ").title(), icon=status_icon)
         worker_pid = controller.client.pid
         header.label(text=f"PID {worker_pid}" if worker_pid is not None else "Stopped")
-        status_box.label(text=settings.status_message)
+        draw_wrapped_label(
+            status_box,
+            settings.status_message,
+            width=SIDEBAR_TEXT_WIDTH,
+        )
         if settings.status in {"GENERATING", "CANCELLING"}:
             status_box.prop(settings, "progress", text="Progress", slider=True)
 
@@ -168,7 +191,11 @@ class A2F_PT_main(bpy.types.Panel):
         runtime_box.label(text="GPU Worker & Models", icon="PREFERENCES")
         if controller.optimization_in_progress:
             runtime_box.label(text="Model optimization in progress", icon="TIME")
-            runtime_box.label(text="Manage optimization in Add-on Preferences")
+            draw_wrapped_label(
+                runtime_box,
+                "Manage optimization in Add-on Preferences",
+                width=SIDEBAR_TEXT_WIDTH,
+            )
         elif runtime_ready:
             runtime_box.label(
                 text="Bundled GPU worker and models ready",
@@ -178,7 +205,11 @@ class A2F_PT_main(bpy.types.Panel):
             warning = runtime_box.row()
             warning.alert = True
             warning.label(text="GPU worker and models are not ready", icon="ERROR")
-            runtime_box.label(text=runtime_message)
+            draw_wrapped_label(
+                runtime_box,
+                runtime_message,
+                width=SIDEBAR_TEXT_WIDTH,
+            )
             runtime_box.label(text="Open this add-on's Preferences", icon="INFO")
 
         worker_row = layout.row(align=True)
@@ -213,16 +244,22 @@ class A2F_PT_main(bpy.types.Panel):
         _draw_audio_playback(input_box, settings)
         input_box.prop(settings, "audio_path")
         if settings.input_mode == "STREAM":
-            input_box.label(
-                text="Built-in WAV source sends incremental mono PCM",
+            draw_wrapped_label(
+                input_box,
+                "Built-in WAV source sends incremental mono PCM",
+                width=SIDEBAR_TEXT_WIDTH,
                 icon="INFO",
             )
-            input_box.label(
-                text="Blender integrations may also push live f32le PCM",
+            draw_wrapped_label(
+                input_box,
+                "Blender integrations may also push live f32le PCM",
+                width=SIDEBAR_TEXT_WIDTH,
                 icon="INFO",
             )
-        input_box.label(
-            text="Output: model-provided ARKit-52 channels",
+        draw_wrapped_label(
+            input_box,
+            "Output: model-provided ARKit-52 channels",
+            width=SIDEBAR_TEXT_WIDTH,
             icon="SHAPEKEY_DATA",
         )
         if len(settings.model_identities) > 1:
@@ -237,8 +274,10 @@ class A2F_PT_main(bpy.types.Panel):
                 rows=min(4, len(settings.model_identities)),
             )
         elif len(settings.model_identities) == 1:
-            input_box.label(
-                text=f"Identity: {settings.model_identities[0].name}",
+            draw_wrapped_label(
+                input_box,
+                f"Identity: {settings.model_identities[0].name}",
+                width=SIDEBAR_TEXT_WIDTH,
                 icon="USER",
             )
         else:
@@ -260,18 +299,24 @@ class A2F_PT_main(bpy.types.Panel):
             for emotion in settings.manual_emotions:
                 manual_column.prop(emotion, "value", text=emotion.name, slider=True)
         else:
-            manual_box.label(
-                text="Channels and defaults load dynamically from the model",
+            draw_wrapped_label(
+                manual_box,
+                "Channels and defaults load dynamically from the model",
+                width=SIDEBAR_TEXT_WIDTH,
                 icon="INFO",
             )
-            manual_box.label(
-                text="Start the GPU worker to make them available",
+            draw_wrapped_label(
+                manual_box,
+                "Start the GPU worker to make them available",
+                width=SIDEBAR_TEXT_WIDTH,
                 icon="INFO",
             )
 
         if settings.auto_audio2emotion:
-            emotion_box.label(
-                text="Inferred values override the manual driver",
+            draw_wrapped_label(
+                emotion_box,
+                "Inferred values override the manual driver",
+                width=SIDEBAR_TEXT_WIDTH,
                 icon="INFO",
             )
 
@@ -284,8 +329,10 @@ class A2F_PT_main(bpy.types.Panel):
                 settings.model_parameters,
             )
         else:
-            tuning_box.label(
-                text="Controls and defaults load from the worker",
+            draw_wrapped_label(
+                tuning_box,
+                "Controls and defaults load from the worker",
+                width=SIDEBAR_TEXT_WIDTH,
                 icon="INFO",
             )
 
@@ -330,12 +377,16 @@ class A2F_PT_main(bpy.types.Panel):
 
         target_box = layout.box()
         target_box.label(text="Mesh Targets", icon="SHAPEKEY_DATA")
-        target_box.label(
-            text="Any mesh can receive the model channel stream",
+        draw_wrapped_label(
+            target_box,
+            "Any mesh can receive the model channel stream",
+            width=SIDEBAR_TEXT_WIDTH,
             icon="INFO",
         )
-        target_box.label(
-            text="Missing Shape Keys are ignored during delivery",
+        draw_wrapped_label(
+            target_box,
+            "Missing Shape Keys are ignored during delivery",
+            width=SIDEBAR_TEXT_WIDTH,
             icon="INFO",
         )
         target_row = target_box.row(align=True)

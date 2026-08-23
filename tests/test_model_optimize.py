@@ -61,7 +61,7 @@ def _make_spec(
                 ],
             },
             "defaults": {
-                "MIN_BATCH_SIZE": 2,
+                "MIN_BATCH_SIZE": 1,
                 "OPT_BATCH_SIZE": 4,
                 "MAX_BATCH_SIZE": 8,
             },
@@ -80,7 +80,7 @@ def _make_spec(
     return RuntimeModelSpec(bundle, models[0], models[1])
 
 
-def test_trt_command_comes_from_model_metadata_and_one_owned_device(
+def test_trt_command_uses_model_metadata_for_one_worker_track(
     tmp_path: Path,
 ) -> None:
     spec = _make_spec(tmp_path)
@@ -100,10 +100,11 @@ def test_trt_command_comes_from_model_metadata_and_one_owned_device(
         f"--onnx={onnx}",
         f"--saveEngine={output}",
         "--device=0",
+        "--skipInference",
         "--fp16",
-        "--minShapes=input:2x4",
-        "--optShapes=input:4x4",
-        "--maxShapes=input:8x4",
+        "--minShapes=input:1x4",
+        "--optShapes=input:1x4",
+        "--maxShapes=input:1x4",
     ]
     assert message == (
         "Optimizing the Audio2Face model for CUDA device 0 "
@@ -111,7 +112,69 @@ def test_trt_command_comes_from_model_metadata_and_one_owned_device(
     )
 
 
-@pytest.mark.parametrize("owned", ["--onnx=x", "--saveEngine=x", "--DEVICE=1"])
+def test_audio2emotion_profile_keeps_buffers_and_limits_batch_to_one(
+    tmp_path: Path,
+) -> None:
+    spec = _make_spec(
+        tmp_path,
+        {
+            "estimated_trt_builder_time": 150,
+            "trt_build_param": {
+                "batch": [
+                    "--minShapes=input_values:1x{MIN_BUFFER_LEN}",
+                    "--optShapes=input_values:{OPT_BATCH_SIZE}x{OPT_BUFFER_LEN}",
+                    "--maxShapes=input_values:{MAX_BATCH_SIZE}x{MAX_BUFFER_LEN}",
+                ]
+            },
+            "defaults": {
+                "MIN_BUFFER_LEN": 5000,
+                "OPT_BATCH_SIZE": 8,
+                "OPT_BUFFER_LEN": 30000,
+                "MAX_BATCH_SIZE": 128,
+                "MAX_BUFFER_LEN": 60000,
+            },
+        },
+    )
+
+    command, _message = model_optimize._trt_build_plan(
+        spec,
+        spec.audio2emotion_model,
+        "Audio2Emotion",
+        onnx_path=spec.audio2emotion_model.with_name("network.onnx"),
+        output_path=spec.audio2emotion_model.with_name("candidate.trt"),
+    )
+
+    assert command[-3:] == [
+        "--minShapes=input_values:1x5000",
+        "--optShapes=input_values:1x30000",
+        "--maxShapes=input_values:1x60000",
+    ]
+
+
+def test_trtexec_failure_message_references_the_complete_text_log(
+    tmp_path: Path,
+) -> None:
+    log = tmp_path / "trtexec-audio2emotion.log"
+    log.write_bytes(b"arbitrary TensorRT output\xff\r\n")
+
+    message = model_optimize._trtexec_failure_message(
+        "Audio2Emotion",
+        1,
+        log,
+        output_ready=False,
+    )
+
+    assert message == (
+        "TensorRT Audio2Emotion optimization failed (exit code 1).\n"
+        "Complete TensorRT log: trtexec-audio2emotion.log"
+    )
+    assert "b'" not in message
+
+
+@pytest.mark.parametrize(
+    "owned",
+    ["--onnx=x", "--saveEngine=x", "--DEVICE=1", "--skipInference"],
+)
 def test_model_metadata_cannot_define_runner_owned_options(
     tmp_path: Path,
     owned: str,

@@ -13,6 +13,7 @@ from __future__ import annotations
 import math
 import sys
 from pathlib import Path
+from unittest.mock import Mock
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -34,6 +35,7 @@ from audio2face.properties import (  # noqa: E402
     apply_model_schema,
     tuning_parameters,
 )
+from audio2face.ui_text import draw_wrapped_label  # noqa: E402
 
 
 MODEL_CHANNELS = ["jawOpen", *(f"modelChannel{index}" for index in range(51))]
@@ -86,6 +88,18 @@ def main() -> None:
         assert bpy.app.timers.is_registered(runtime._timer_callback)
         assert runtime._load_pre_handler in bpy.app.handlers.load_pre
         assert runtime._load_post_handler in bpy.app.handlers.load_post
+        notice_layout = Mock()
+        draw_wrapped_label(
+            notice_layout,
+            "Click Optimize Models to generate the GPU-specific TensorRT "
+            "engines from the downloaded ONNX models",
+            width=42,
+            icon="INFO",
+        )
+        notice_calls = notice_layout.label.call_args_list
+        assert len(notice_calls) > 1
+        assert notice_calls[0].kwargs["icon"] == "INFO"
+        assert all(call.kwargs["icon"] == "NONE" for call in notice_calls[1:])
         assert hasattr(bpy.ops.a2f, "uninstall")
         assert not bpy.ops.a2f.uninstall.poll()
         preference_names = set(A2FAddonPreferences.bl_rna.properties.keys())

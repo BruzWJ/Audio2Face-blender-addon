@@ -157,6 +157,7 @@ class RuntimeController:
         self.optimization_latest_progress: OptimizationProgress | None = None
         self.optimization_progress = 0.0
         self.optimization_message = ""
+        self.optimization_failed = False
         self.handshake_deadline: float | None = None
         self.last_worker_diagnostic = ""
         self.reset_scene_state_on_poll = True
@@ -316,8 +317,12 @@ class RuntimeController:
             )
             try:
                 validate_model_engines(audio2face_model, audio2emotion_model)
-            except ModelInputError as exc:
-                engine_status = SetupStatus(False, str(exc))
+            except ModelInputError:
+                engine_status = SetupStatus(
+                    False,
+                    "Click Optimize Models to generate the GPU-specific "
+                    "TensorRT engines from the downloaded ONNX models",
+                )
             else:
                 engine_status = SetupStatus(
                     True,
@@ -438,6 +443,7 @@ class RuntimeController:
         self.optimization_cancel = canceled
         self.optimization_progress = 0.0
         self.optimization_message = "Preparing both NVIDIA models"
+        self.optimization_failed = False
         self._tag_runtime_setup_redraw()
 
         def progress(event: OptimizationProgress) -> None:
@@ -1672,6 +1678,7 @@ class RuntimeController:
             self._handle_event(envelope)
 
     def _finish_optimization(self, kind: str, payload: str | None) -> None:
+        self.optimization_failed = kind == "error"
         if kind == "complete":
             self.optimization_message = "Both NVIDIA models are optimized"
             self.optimization_progress = 1.0
