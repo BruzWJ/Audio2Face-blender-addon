@@ -15,7 +15,6 @@ AppliedFrame = tuple[tuple[str, ...], tuple[float, ...]]
 @dataclass
 class _Settings:
     stream_time: float = 7.0
-    stream_reset_on_stop: bool = True
 
 
 @dataclass
@@ -237,7 +236,7 @@ def test_live_stream_rejects_terminal_event_for_inactive_stream(
         live.LiveStreamController().mark_terminal("stream-1")
 
 
-def test_terminal_event_cleans_external_stream_and_resets_values(
+def test_terminal_event_cleans_external_stream_and_holds_final_values(
     live_module: tuple[ModuleType, _Scene, list[AppliedFrame]],
 ) -> None:
     live, scene, applied = live_module
@@ -257,10 +256,7 @@ def test_terminal_event_cleans_external_stream_and_resets_values(
 
     controller.mark_terminal("stream-1")
 
-    assert applied == [
-        (tuple(MODEL_CHANNELS), tuple(weights)),
-        (tuple(MODEL_CHANNELS), (0.0,) * len(MODEL_CHANNELS)),
-    ]
+    assert applied == [(tuple(MODEL_CHANNELS), tuple(weights))]
     assert controller.active is False
     assert controller.operation_id is None
     assert scene.audio2face.stream_time == 0.0

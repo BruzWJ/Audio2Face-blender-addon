@@ -50,7 +50,7 @@ response is always written before an event caused by that request.
 Parameters are exactly `{}`. The result is exactly:
 
 ```json
-{"worker_profile":"nvidia-a2f3-a2e3-gpu-arkit52/2","worker_version":"0.1.0"}
+{"worker_profile":"nvidia-a2f3-a2e3-gpu-arkit52/3","worker_version":"0.1.0"}
 ```
 
 Blender requires that exact profile and a non-empty worker version. `hello`
@@ -64,8 +64,7 @@ Parameters contain exactly:
 ```json
 {
   "audio2face_model_path": "/absolute/user-selected/audio2face/model.json",
-  "audio2emotion_model_path": "/absolute/user-selected/audio2emotion/model.json",
-  "identity_index": 0
+  "audio2emotion_model_path": "/absolute/user-selected/audio2emotion/model.json"
 }
 ```
 
@@ -75,11 +74,12 @@ is considered. Before the worker starts, setup has validated each root's
 non-empty `model.json`, `network.onnx`, `trt_info.json`, every file referenced
 by the descriptor, and locally optimized `network.trt`; unresolved Git LFS
 pointers are rejected. The model repositories remain external to the add-on's
-add-on-owned storage. `identity_index` is a non-negative integer within the
-Audio2Face identity range. Loading creates the device-0 Audio2Face
-diffusion/blendshape executor, Audio2Emotion classifier executor, their shared
-CUDA stream, and shared audio and emotion accumulators. The models must agree
-on sample rate and emotion-vector width. Loading does not execute inference.
+add-on-owned storage. The worker selects the Audio2Face model's default identity
+at SDK index `0` internally; no identity value enters or leaves the protocol.
+Loading creates the device-0 Audio2Face diffusion/blendshape executor,
+Audio2Emotion classifier executor, their shared CUDA stream, and shared audio
+and emotion accumulators. The models must agree on sample rate and
+emotion-vector width. Loading does not execute inference.
 
 The response contains exactly `sample_rate` and `model_schema`:
 
@@ -87,9 +87,7 @@ The response contains exactly `sample_rate` and `model_schema`:
 {
   "sample_rate": 16000,
   "model_schema": {
-    "identities": ["<model identity>"],
     "channels": ["<52 exact model-provided names in model order>"],
-    "parameters": {"/advertised/path": 0.0},
     "emotion_channels": [{"name": "<model emotion>", "default": 0.0}]
   }
 }
@@ -98,22 +96,18 @@ The response contains exactly `sample_rate` and `model_schema`:
 Angle-bracket values in this document are explanatory metavariables. The
 `channels` example abbreviates an array that contains exactly 52 strings.
 
-`model_schema` has exactly these four fields:
+`model_schema` has exactly these two fields:
 
-- `identities` is a non-empty ordered array of non-empty model names. Its array
-  position is the identity index.
 - `channels` contains 52 unique non-empty strings in the model's order.
-- `parameters` maps each unique opaque worker path to its finite numeric
-  default. JSON integer and float types define the control type.
 - `emotion_channels` is an ordered array of exact `{name, default}` objects.
   Names are unique model-provided strings and defaults are finite values in
   `[0.0, 1.0]`.
 
-Output channels, identity names, emotion names, and their ordering come from
-the loaded Audio2Face model. Numeric defaults are read through the SDK. The
-worker's typed adapter defines the paths it can apply through the SDK's public
-parameter structures. SDK 1.0 has no parameter reflection; graph nodes and
-tensors are outside this contract.
+Output channels, emotion names, and their ordering come from the loaded
+Audio2Face model. Blender has no identity selector or identity state.
+Audio2Emotion post-process controls are operation settings rather than model
+schema fields. Graph nodes, tensors, and all other SDK parameter structures are
+outside this contract.
 
 ## Settings document
 
@@ -126,24 +120,46 @@ exactly:
   "manual_emotions": {
     "<every model_schema emotion name>": 0.0
   },
-  "parameters": {
-    "/every/advertised/parameter/path": 0.0
+  "audio2emotion": {
+    "emotion_strength": 0.6,
+    "emotion_contrast": 1.0,
+    "max_emotions": 6,
+    "live_blend_coef": 0.7,
+    "transition_smoothing": 0.5,
+    "preferred_emotion": null,
+    "preferred_emotion_strength": 0.5
   }
 }
 ```
 
 `manual_emotions` contains every advertised emotion name exactly once and no
-other key. Values are finite in `[0.0, 1.0]`. `parameters` contains every
-advertised parameter path exactly once and no other key. Each value retains
-the advertised JSON numeric type and must be accepted by the applicable SDK
-setter. Partial documents and unknown keys are rejected.
+other key. Values are finite in `[0.0, 1.0]`. The `audio2emotion` object has
+exactly the seven keys shown. Its ranges and shapes are:
 
-When `auto_audio2emotion` is false, the ordered manual values are accumulated
-at timestamp zero and form a constant emotion driver. When it is true,
-Audio2Emotion analyzes the operation's audio and its timestamped output fully
-replaces the manual vector. Manual values remain present in the document but
-are ignored. Selected WAV and Stream use this identical rule and parameter
-shape.
+- `emotion_strength`: finite float in `[0.0, 1.0]`;
+- `emotion_contrast`: finite float in `[0.1, 3.0]`;
+- `max_emotions`: integer from `1` through the loaded classifier's emotion
+  count (the Blender control supports the six-emotion v3 model);
+- `live_blend_coef`: finite float in `[0.0, 1.0]`;
+- `transition_smoothing`: finite seconds in `[0.1, 1.0]`;
+- `preferred_emotion`: either `null` or an object containing every advertised
+  emotion name exactly once and no other key, with finite values in
+  `[0.0, 1.0]`; and
+- `preferred_emotion_strength`: finite float in `[0.0, 1.0]`.
+
+Partial documents and unknown keys are rejected. When
+`auto_audio2emotion` is false, the ordered manual values are accumulated at
+timestamp zero and form a direct constant emotion driver; the nested automatic
+controls are still validated and frozen but are not used. When it is true,
+Audio2Emotion analyzes the operation's audio and its SDK post-processor applies
+the nested controls. `preferred_emotion` is a separate snapshot: Blender's
+**Load** action copies the current manual values into it, later manual edits do
+not mutate it, and **Clear** restores `null`. This Load/Clear state is
+independent of `auto_audio2emotion`. When automatic emotion is enabled and the
+snapshot is present, with preferred strength `p` the mix is
+`p * preferred + (1 - p) * generated`, followed by `emotion_strength`. When it
+is `null`, no preferred mix is applied. Selected WAV and Stream use this
+identical rule and settings shape.
 
 ## `generate`
 
@@ -157,7 +173,15 @@ Parameters contain exactly:
   "settings": {
     "auto_audio2emotion": false,
     "manual_emotions": {"<model emotion>": 0.0},
-    "parameters": {"/advertised/path": 0.0}
+    "audio2emotion": {
+      "emotion_strength": 0.6,
+      "emotion_contrast": 1.0,
+      "max_emotions": 6,
+      "live_blend_coef": 0.7,
+      "transition_smoothing": 0.5,
+      "preferred_emotion": null,
+      "preferred_emotion_strength": 0.5
+    }
   }
 }
 ```
@@ -196,15 +220,24 @@ Parameters contain exactly:
   "settings": {
     "auto_audio2emotion": true,
     "manual_emotions": {"<model emotion>": 0.0},
-    "parameters": {"/advertised/path": 0.0}
+    "audio2emotion": {
+      "emotion_strength": 0.6,
+      "emotion_contrast": 1.0,
+      "max_emotions": 6,
+      "live_blend_coef": 0.7,
+      "transition_smoothing": 0.5,
+      "preferred_emotion": null,
+      "preferred_emotion_strength": 0.5
+    }
   }
 }
 ```
 
 `sample_rate` must equal the rate returned by `load_model`; source adapters own
 resampling. The worker freezes the complete settings, resets both incremental
-executors and accumulators, and selects the manual or automatic emotion
-driver. The response contains exactly:
+executors and accumulators, then configures either the direct manual driver or
+automatic SDK post-processing and optional preferred-emotion mix. The response
+contains exactly:
 
 ```json
 {"sample_rate":16000,"prebuffer_samples":60000}
@@ -326,8 +359,7 @@ used by the implementation include:
 - `invalid_json`, `invalid_request`, `request_too_large`,
   `protocol_mismatch`, `method_not_found`, `invalid_params`, `invalid_state`,
   and `busy`;
-- `model_not_found`, `model_invalid`, `identity_invalid`, and
-  `model_not_loaded`;
+- `model_not_found`, `model_invalid`, and `model_not_loaded`;
 - `audio_open_failed`, `invalid_audio`,
   `unsupported_audio`, and `audio_too_large`;
 - `operation_not_found`, `generation_failed`, `sample_rate_mismatch`, and

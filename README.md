@@ -106,13 +106,15 @@ driver caches.
    not required when a mesh is added.
 5. Click **Start Worker**. Blender launches the verified package-local worker,
    negotiates the protocol, and loads both selected models.
-6. Choose a model identity and adjust the controls reported by that model.
-7. Leave **Auto Audio2Emotion** off to use the manual emotion values. Enable it
-   to replace the manual driver with emotions inferred from the same audio.
-8. In Selected WAV mode, click **Generate ARKit Values**, then **Play Result**.
-   In Stream mode, click **Start WAV Stream** or submit live PCM through the
-   integration API.
-9. **Stop Stream** ends only the active stream and keeps the loaded model
+6. The manual emotion sliders remain available in both modes. Leave **Auto
+   Audio2Emotion** off to apply their operation-start values directly. Enable
+   it to infer emotion from the same audio. **Load** under **Preferred Emotion**
+   captures the current manual sliders for mixing with generated emotion;
+   **Clear** removes that captured preference.
+7. In Selected WAV mode, click **Generate ARKit Values**, then use the single
+   **Play/Pause** control. In Stream mode, click **Start WAV Stream** or submit
+   live PCM through the integration API.
+8. **Stop Stream** ends only the active stream and keeps the loaded model
    ready. **Stop Worker** exits the child process and releases its model and
    CUDA resources.
 
@@ -141,8 +143,12 @@ need independent values.
 **Selected WAV** sends one complete RIFF/WAVE file to the worker. The worker
 decodes, downmixes, resamples, generates all frames, and atomically commits a
 strict result. **Audio Playback** uses Blender's audio-device clock to sample
-that result and provides play, pause/resume, stop, loop, volume, and
-reset-on-stop controls.
+that result. It provides one stateful **Play/Pause** button, **Rewind**,
+**Loop**, a normalized scrub control mapped to the audio duration, an elapsed /
+duration timecode, and **Prediction Delay** from `-1.0` to `1.0` seconds. A
+positive delay samples facial output later in the result, advancing the face
+relative to audible playback; a negative value makes it lag. Playback volume,
+stop, and reset behavior are not exposed as separate controls.
 
 **Stream** uses one `stream_start` / chunk / `stream_end` lifecycle. The
 built-in source incrementally decodes a selected WAV, resamples it to the model
@@ -156,34 +162,52 @@ With automatic emotion enabled, it covers both Audio2Face and Audio2Emotion
 readiness. Streamed frames are buffered and sampled against the local audio or
 presentation clock; scene FPS is not used for synchronization.
 
-## Model-driven controls
+## Model-driven emotion
 
 `load_model` returns a self-describing `model_schema` with exactly
-`identities`, `channels`, `parameters`, and `emotion_channels`. Blender builds
-its selectors and numeric controls from those values. `parameters` is one
-object mapping opaque worker paths to numeric defaults; JSON integer and float
-types select the corresponding Blender control. Blender displays each opaque
-parameter ID exactly as advertised and does not parse, rename, group, or map it.
+`channels` and `emotion_channels`. Blender builds target-channel delivery and
+manual emotion controls from those values. It does not define an independent
+list of names. The worker uses the Audio2Face model's default identity at SDK
+index `0` internally; Blender has no identity selector or identity state.
 
-NVIDIA SDK 1.0 exposes parameter structures but no parameter reflection. The
-worker therefore contains the one typed path-to-member adapter; Blender owns
-no parameter list. Defaults, identities, emotion channels, and output channels
-come from the loaded SDK/model. Internal graph nodes and tensors are not
-controls. Both input modes submit one exact settings object:
+Audio2Emotion post-process controls are operation settings, not model-schema
+fields. The sidebar keeps them available for configuration regardless of the
+**Auto Audio2Emotion** toggle, and the model-described manual sliders also
+remain visible in both modes. Both input modes submit one exact emotion
+settings object; these are its defaults:
 
 ```json
 {
   "auto_audio2emotion": false,
   "manual_emotions": {"<model emotion name>": 0.0},
-  "parameters": {"/advertised/path": 0.0}
+  "audio2emotion": {
+    "emotion_strength": 0.6,
+    "emotion_contrast": 1.0,
+    "max_emotions": 6,
+    "live_blend_coef": 0.7,
+    "transition_smoothing": 0.5,
+    "preferred_emotion": null,
+    "preferred_emotion_strength": 0.5
+  }
 }
 ```
 
-Manual emotion values are a constant, model-shaped conditioning vector. When
-`auto_audio2emotion` is true, Audio2Emotion analyzes the same input and fully
-replaces that vector. Manual values are ignored in automatic mode. The same
-semantics and complete frozen settings apply to Selected WAV and Stream; a
-stream must be restarted to apply changed controls.
+With automatic emotion off, the operation-start manual snapshot is the direct,
+constant emotion driver. With it on, Audio2Emotion generates timestamped
+values and applies strength, contrast, retained-emotion count, temporal blend,
+and transition controls through NVIDIA's SDK post-processor. **Load** copies
+the current manual emotion values into a distinct preferred-emotion snapshot;
+later manual-slider changes do not mutate it. **Clear** unsets that snapshot.
+The loaded snapshot is saved with the Blender scene.
+When a preferred snapshot is loaded, for preferred-mix weight `p` the SDK
+computes `p * preferred + (1 - p) * generated`, then applies the overall
+emotion strength. Auto Audio2Emotion and the Preferred Emotion snapshot are
+independent controls.
+
+The same complete settings snapshot and behavior apply to Selected WAV and
+Stream. Changing a control does not alter an operation already in progress; a
+stream must be restarted to use the new values. Internal graph nodes and
+tensors are not controls.
 
 ## Output contract
 

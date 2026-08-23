@@ -31,7 +31,6 @@ class WorkerError final : public std::runtime_error {
 struct ModelRequest {
   std::string audio2face_model_path;
   std::string audio2emotion_model_path;
-  int identity_index;
 };
 
 struct GenerateRequest {

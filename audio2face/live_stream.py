@@ -62,19 +62,6 @@ class LiveStreamController:
 
         return self.active and self._audio_path is not None
 
-    @property
-    def reset_on_stop(self) -> bool:
-        scene = (
-            bpy.data.scenes.get(self._scene_name)
-            if self._scene_name is not None
-            else None
-        )
-        return (
-            scene is not None
-            and scene.is_editable
-            and scene.audio2face.stream_reset_on_stop
-        )
-
     def prepare(
         self,
         scene: bpy.types.Scene,
@@ -149,7 +136,6 @@ class LiveStreamController:
         if scene is None:
             handle.stop()
             raise LiveStreamError("stream scene no longer exists")
-        handle.volume = scene.audio2face.preview_volume
         self._device = device
         self._sound = sound
         self._handle = handle
@@ -231,9 +217,9 @@ class LiveStreamController:
                 not self._timestamps
                 or self._stream_sample_position() >= self._timestamps[-1]
             ):
-                self.stop(reset=self.reset_on_stop)
+                self.stop(reset=False)
         elif self._handle is None:
-            self.stop(reset=self.reset_on_stop)
+            self.stop(reset=False)
 
     def _stream_sample_position(self) -> float:
         if self._stream_clock_started is None:
@@ -287,7 +273,7 @@ class LiveStreamController:
             scene.audio2face.stream_time = max(0.0, sample_position / self._sample_rate)
             self._drop_old_frames(sample_position)
             if self._terminal and sample_position >= self._timestamps[-1]:
-                self.stop(reset=self.reset_on_stop)
+                self.stop(reset=False)
                 return False
             return True
         if self._handle is None:
@@ -300,9 +286,8 @@ class LiveStreamController:
         try:
             status = self._handle.status
             if status == self._aud.STATUS_STOPPED:
-                self.stop(reset=self.reset_on_stop)
+                self.stop(reset=False)
                 return False
-            self._handle.volume = settings.preview_volume
             position = max(0.0, self._handle.position)
             sample_position = position * self._sample_rate
             if self._timestamps:

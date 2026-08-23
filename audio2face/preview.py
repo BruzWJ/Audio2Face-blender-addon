@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -96,6 +97,8 @@ class PreviewController:
         self._sound: Any = None
         self._handle: Any = None
         self._aud: Any = None
+        self._duration = 0.0
+        self._published_progress = 0.0
 
     @property
     def active(self) -> bool:
@@ -124,9 +127,26 @@ class PreviewController:
 
             device = aud.Device()
             sound = aud.Sound(str(resolved_audio))
+            sound_length = sound.length
+            sound_specs = sound.specs
+            if (
+                isinstance(sound_length, bool)
+                or not isinstance(sound_length, (int, float))
+                or not math.isfinite(sound_length)
+                or sound_length <= 0
+                or not isinstance(sound_specs, tuple)
+                or len(sound_specs) != 2
+                or isinstance(sound_specs[0], bool)
+                or not isinstance(sound_specs[0], (int, float))
+                or not math.isfinite(sound_specs[0])
+                or sound_specs[0] <= 0
+            ):
+                raise PreviewError("selected audio has no finite positive duration")
+            duration = float(sound_length) / float(sound_specs[0])
+            if not math.isfinite(duration) or duration <= 0.0:
+                raise PreviewError("selected audio has no finite positive duration")
             handle = device.play(sound)
             handle.loop_count = -1 if settings.preview_loop else 0
-            handle.volume = settings.preview_volume
         except Exception as exc:
             raise PreviewError(f"could not play selected audio: {exc}") from exc
 
@@ -140,15 +160,67 @@ class PreviewController:
         self._sound = sound
         self._handle = handle
         self._aud = aud
+        self._duration = duration
 
         settings.preview_state = "PLAYING"
-        settings.preview_time = 0.0
-        settings.preview_duration = max(0.0, self._timestamps[-1] / self._sample_rate)
+        settings.preview_duration = duration
+        self._publish_position(settings, 0.0)
         settings.status_message = (
             f"Playing {len(result.channels)} model channels on "
             f"{len(subscriptions)} mesh target(s)"
         )
         self.tick()
+
+    def _publish_position(self, settings: A2FSceneSettings, position: float) -> None:
+        position = min(max(0.0, position), self._duration)
+        progress = position / self._duration if self._duration > 0.0 else 0.0
+        settings.preview_time = position
+        settings.preview_progress = progress
+        self._published_progress = float(settings.preview_progress)
+
+    def _apply_position(self, settings: A2FSceneSettings, position: float) -> None:
+        delay = float(settings.prediction_delay)
+        if not math.isfinite(delay):
+            raise PreviewError("prediction delay must be finite")
+        frame = sample_linear(
+            self._timestamps,
+            self._weights,
+            (position + delay) * self._sample_rate,
+        )
+        apply_shape_key_frame(
+            self._subscriptions,
+            self._channels,
+            frame,
+        )
+        self._publish_position(settings, position)
+
+    def seek(self, position: float) -> None:
+        """Seek audible playback and model delivery to one audio time."""
+
+        if isinstance(position, bool) or not isinstance(position, (int, float)):
+            raise TypeError("preview position must be a number")
+        requested = float(position)
+        if not math.isfinite(requested):
+            raise PreviewError("preview position must be finite")
+        scene = (
+            bpy.data.scenes.get(self._scene_name)
+            if self._scene_name is not None
+            else None
+        )
+        if self._handle is None or scene is None:
+            raise PreviewError("audio preview is not active")
+        requested = min(max(0.0, requested), self._duration)
+        try:
+            self._handle.position = requested
+            actual = min(max(0.0, float(self._handle.position)), self._duration)
+            self._apply_position(scene.audio2face, actual)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise PreviewError(f"could not seek audio preview: {exc}") from exc
+
+    def rewind(self) -> None:
+        """Return to the beginning without changing play/pause state."""
+
+        self.seek(0.0)
 
     def pause(self) -> None:
         scene = (
@@ -194,6 +266,7 @@ class PreviewController:
         if settings is not None:
             settings.preview_state = "IDLE"
             settings.preview_time = 0.0
+            settings.preview_progress = 0.0
 
         self._scene_name = None
         self._timestamps = ()
@@ -205,6 +278,8 @@ class PreviewController:
         self._sound = None
         self._device = None
         self._aud = None
+        self._duration = 0.0
+        self._published_progress = 0.0
 
     def tick(self) -> bool:
         if not self.active:
@@ -217,22 +292,28 @@ class PreviewController:
         try:
             status = self._handle.status
             if status == self._aud.STATUS_STOPPED:
-                self.stop(reset=settings.preview_reset_on_stop)
+                self.stop(reset=False)
                 return False
-            position = max(0.0, self._handle.position)
+            requested_progress = float(settings.preview_progress)
+            if (
+                not math.isfinite(requested_progress)
+                or requested_progress < 0.0
+                or requested_progress > 1.0
+            ):
+                raise PreviewError("preview progress must be in [0, 1]")
+            if not math.isclose(
+                requested_progress,
+                self._published_progress,
+                rel_tol=0.0,
+                abs_tol=1.0e-9,
+            ):
+                self._handle.position = requested_progress * self._duration
+            position = min(
+                max(0.0, float(self._handle.position)),
+                self._duration,
+            )
             self._handle.loop_count = -1 if settings.preview_loop else 0
-            self._handle.volume = settings.preview_volume
-            frame = sample_linear(
-                self._timestamps,
-                self._weights,
-                position * self._sample_rate,
-            )
-            apply_shape_key_frame(
-                self._subscriptions,
-                self._channels,
-                frame,
-            )
-            settings.preview_time = position
+            self._apply_position(settings, position)
             if status == self._aud.STATUS_PLAYING:
                 settings.preview_state = "PLAYING"
             elif status == self._aud.STATUS_PAUSED:

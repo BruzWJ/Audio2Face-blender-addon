@@ -36,7 +36,7 @@ from .path_contract import require_unaliased_path
 from .preferences import get_preferences
 from .preview import get_preview_controller, unregister_preview
 from .protocol import WORKER_PROFILE
-from .properties import apply_model_schema, tuning_parameters
+from .properties import apply_model_schema, emotion_settings
 from .runtime_bundle import (
     BundleError,
     RuntimeModelSpec,
@@ -104,7 +104,7 @@ class PendingRequest:
     method: str
     scene_name: str
     continuation: ModelContinuation | None
-    model_signature: tuple[str, str, int] | None
+    model_signature: tuple[str, str] | None
     operation_id: str | None
 
     def __post_init__(self) -> None:
@@ -144,7 +144,7 @@ class RuntimeController:
         self.handshake_spec: RuntimeModelSpec | None = None
         # One sidecar owns exactly one selected model pair, so its signature is global rather
         # than attached to a Blender scene.
-        self.loaded_signature: tuple[str, str, int] | None = None
+        self.loaded_signature: tuple[str, str] | None = None
         self.model_sample_rate: int | None = None
         self.model_schema: dict[str, Any] | None = None
         self.schema_scenes: set[int] = set()
@@ -528,7 +528,7 @@ class RuntimeController:
         params: dict[str, Any],
         *,
         continuation: ModelContinuation | None,
-        model_signature: tuple[str, str, int] | None,
+        model_signature: tuple[str, str] | None,
         operation_id: str | None,
     ) -> str:
         with self.pending_lock:
@@ -557,14 +557,10 @@ class RuntimeController:
         self._set_status(scene, "STARTING", "Starting bundled Audio2Face GPU worker")
 
     @staticmethod
-    def _model_signature(
-        spec: RuntimeModelSpec,
-        identity_index: int,
-    ) -> tuple[str, str, int]:
+    def _model_signature(spec: RuntimeModelSpec) -> tuple[str, str]:
         return (
             str(spec.audio2face_model),
             str(spec.audio2emotion_model),
-            identity_index,
         )
 
     def _clear_model_state(self) -> None:
@@ -574,7 +570,7 @@ class RuntimeController:
         self.schema_scenes.clear()
 
     def _ensure_scene_model_schema(self, scene: bpy.types.Scene) -> None:
-        """Populate model-derived controls for any scene using the loaded worker."""
+        """Populate model-derived emotion channels for the target scene."""
 
         model_schema = self.model_schema
         if self.loaded_signature is None or model_schema is None:
@@ -597,10 +593,9 @@ class RuntimeController:
         scene: bpy.types.Scene,
         spec: RuntimeModelSpec,
         *,
-        identity_index: int,
         continuation: ModelContinuation,
     ) -> None:
-        signature = self._model_signature(spec, identity_index)
+        signature = self._model_signature(spec)
         self._clear_model_state()
         self._request(
             scene,
@@ -608,7 +603,6 @@ class RuntimeController:
             {
                 "audio2face_model_path": str(spec.audio2face_model),
                 "audio2emotion_model_path": str(spec.audio2emotion_model),
-                "identity_index": identity_index,
             },
             continuation=continuation,
             model_signature=signature,
@@ -626,12 +620,10 @@ class RuntimeController:
         self._require_worker_ready()
         settings = scene.audio2face
         spec = self.setup_snapshot().require_inference_spec()
-        identity_index = int(settings.identity_index)
-        if self.loaded_signature != self._model_signature(spec, identity_index):
+        if self.loaded_signature != self._model_signature(spec):
             self._submit_model_load(
                 scene,
                 spec,
-                identity_index=identity_index,
                 continuation="generate",
             )
             return
@@ -651,7 +643,7 @@ class RuntimeController:
                 "operation_id": operation_id,
                 "audio_path": str(audio_path),
                 "result_path": str(result_path),
-                "settings": tuning_parameters(settings),
+                "settings": emotion_settings(settings),
             },
             continuation=None,
             model_signature=None,
@@ -679,9 +671,7 @@ class RuntimeController:
         self._ensure_scene_model_schema(scene)
         operation_id = uuid.uuid4().hex
         playback_started = threading.Event() if audio_path is not None else None
-        get_preview_controller().stop(
-            reset=bool(scene.audio2face.preview_reset_on_stop)
-        )
+        get_preview_controller().stop(reset=False)
         try:
             get_live_stream_controller().prepare(
                 scene,
@@ -706,7 +696,7 @@ class RuntimeController:
                 {
                     "operation_id": operation_id,
                     "sample_rate": sample_rate,
-                    "settings": tuning_parameters(scene.audio2face),
+                    "settings": emotion_settings(scene.audio2face),
                 },
                 continuation=None,
                 model_signature=None,
@@ -740,12 +730,10 @@ class RuntimeController:
         if not audio_path.is_file():
             raise SidecarError(f"audio file does not exist: {audio_path}")
         spec = self.setup_snapshot().require_inference_spec()
-        identity_index = int(settings.identity_index)
-        if self.loaded_signature != self._model_signature(spec, identity_index):
+        if self.loaded_signature != self._model_signature(spec):
             self._submit_model_load(
                 scene,
                 spec,
-                identity_index=identity_index,
                 continuation="stream_wav",
             )
             return None
@@ -757,14 +745,10 @@ class RuntimeController:
         self._require_editable_scene(scene)
         self._require_operation_idle()
         self._require_worker_ready()
-        settings = scene.audio2face
         spec = self.setup_snapshot().require_inference_spec()
-        if self.loaded_signature != self._model_signature(
-            spec,
-            int(settings.identity_index),
-        ):
+        if self.loaded_signature != self._model_signature(spec):
             raise SidecarError(
-                "model settings changed; restart the worker before opening a PCM stream"
+                "configured models changed; restart the worker before opening a PCM stream"
             )
         return self._submit_stream_start(scene, audio_path=None)
 
@@ -1011,9 +995,7 @@ class RuntimeController:
         if not operation_id:
             raise SidecarError("there is no active PCM stream")
         if operation_id not in self.stream_scene_names:
-            get_live_stream_controller().stop(
-                reset=bool(scene.audio2face.stream_reset_on_stop)
-            )
+            get_live_stream_controller().stop(reset=False)
             self._clear_stream_state(scene, operation_id=operation_id)
             self._set_status(
                 scene,
@@ -1155,9 +1137,7 @@ class RuntimeController:
         self._require_editable_scene(scene)
         if self.stream_source_cancel is not None:
             self.stream_source_cancel.set()
-        get_live_stream_controller().stop(
-            reset=bool(scene.audio2face.stream_reset_on_stop)
-        )
+        get_live_stream_controller().stop(reset=False)
         if self.client.state in {Lifecycle.STOPPED, Lifecycle.FAILED}:
             self._clear_model_state()
             self._clear_stream_state(
@@ -1268,15 +1248,10 @@ class RuntimeController:
                 return
             self.negotiated = True
             self.handshake_deadline = None
-            # No identity index is trustworthy until this worker has described
-            # the current model. Bootstrap identity zero, then let the validated
-            # schema populate the selector used by later model reloads.
-            settings.identity_index = 0
             self.handshake_spec = None
             self._submit_model_load(
                 scene,
                 spec,
-                identity_index=0,
                 continuation="ready",
             )
             return
@@ -1555,9 +1530,7 @@ class RuntimeController:
                 return
             explicit_stop = operation_id in self.stream_stop_requests
             if explicit_stop:
-                get_live_stream_controller().stop(
-                    reset=bool(scene.audio2face.stream_reset_on_stop)
-                )
+                get_live_stream_controller().stop(reset=False)
                 self._clear_stream_state(scene, operation_id=operation_id)
                 self._set_status(
                     scene,
@@ -1720,6 +1693,7 @@ class RuntimeController:
                 settings.preview_state = "IDLE"
                 settings.preview_time = 0.0
                 settings.preview_duration = 0.0
+                settings.preview_progress = 0.0
                 settings.stream_operation_id = ""
                 settings.stream_sample_rate = 0
                 settings.stream_prebuffer_samples = 0
@@ -1747,7 +1721,7 @@ class RuntimeController:
                 if self.stream_source_cancel is not None:
                     self.stream_source_cancel.set()
                 live_controller = get_live_stream_controller()
-                live_controller.stop(reset=live_controller.reset_on_stop)
+                live_controller.stop(reset=False)
                 for scene in self._editable_scenes():
                     settings = scene.audio2face
                     operation_id = settings.result_operation_id

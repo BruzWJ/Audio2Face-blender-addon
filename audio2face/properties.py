@@ -1,4 +1,4 @@
-"""Blender RNA state and model-tunable Audio2Face parameters."""
+"""Blender RNA state for Audio2Face playback and model-derived channels."""
 
 from __future__ import annotations
 
@@ -72,39 +72,6 @@ class A2FEmotionValueItem(bpy.types.PropertyGroup):
     )
 
 
-class A2FModelParameterItem(bpy.types.PropertyGroup):
-    """One worker-advertised, model-tunable numeric parameter."""
-
-    path: StringProperty(
-        name="Path",
-        description="Opaque worker parameter identifier",
-        default="",
-        options={"HIDDEN"},
-    )
-    kind: StringProperty(
-        name="Kind",
-        description="Worker parameter type: float or integer",
-        default="",
-        options={"HIDDEN"},
-    )
-    float_value: FloatProperty(
-        name="Value",
-        description="Floating-point model parameter value",
-        default=0.0,
-    )
-    int_value: IntProperty(
-        name="Value",
-        description="Integer model parameter value",
-        default=0,
-    )
-
-
-class A2FModelIdentityItem(bpy.types.PropertyGroup):
-    """One identity reported by the loaded Audio2Face model."""
-
-    name: StringProperty(name="Identity", default="", options={"HIDDEN"})
-
-
 class A2FSceneSettings(bpy.types.PropertyGroup):
     input_mode: EnumProperty(
         name="Input Mode",
@@ -120,24 +87,64 @@ class A2FSceneSettings(bpy.types.PropertyGroup):
         description="WAV used by Selected mode or by the built-in streamed-WAV source",
         subtype="FILE_PATH",
     )
-    identity_index: IntProperty(
-        name="Identity Index",
-        description="Identity selected from the loaded model",
-        default=0,
-        min=0,
-    )
-    model_identities: CollectionProperty(type=A2FModelIdentityItem)
-
     auto_audio2emotion: BoolProperty(
         name="Auto Audio2Emotion",
-        description=(
-            "Override the manual emotion driver with emotion values inferred "
-            "from the input audio"
-        ),
+        description="Infer emotion values from the input audio for this operation",
         default=False,
     )
     manual_emotions: CollectionProperty(type=A2FEmotionValueItem)
-    model_parameters: CollectionProperty(type=A2FModelParameterItem)
+    preferred_emotions: CollectionProperty(
+        type=A2FEmotionValueItem,
+        options={"HIDDEN"},
+    )
+    a2e_emotion_strength: FloatProperty(
+        name="Emotion Strength",
+        description="Strength of automatic emotion relative to neutral emotion",
+        default=0.6,
+        min=0.0,
+        max=1.0,
+        subtype="FACTOR",
+    )
+    a2e_emotion_contrast: FloatProperty(
+        name="Emotion Contrast",
+        description="Increase or reduce the spread between generated emotions",
+        default=1.0,
+        min=0.1,
+        max=3.0,
+    )
+    a2e_max_emotions: IntProperty(
+        name="Max Emotions",
+        description="Maximum generated emotions retained at each inference frame",
+        default=6,
+        min=1,
+        max=6,
+    )
+    a2e_live_blend_coef: FloatProperty(
+        name="Smoothing",
+        description="Influence of the preceding generated emotion on the next result",
+        default=0.7,
+        min=0.0,
+        max=1.0,
+        subtype="FACTOR",
+    )
+    a2e_transition_smoothing: FloatProperty(
+        name="Transition Time",
+        description="Time used to transition between automatic emotion states",
+        default=0.5,
+        min=0.1,
+        max=1.0,
+        unit="TIME",
+    )
+    a2e_preferred_emotion_strength: FloatProperty(
+        name="Strength",
+        description=(
+            "Strength of the loaded preferred emotion relative to generated emotion"
+        ),
+        default=0.5,
+        min=0.0,
+        max=1.0,
+        subtype="FACTOR",
+    )
     model_schema_signature: StringProperty(options={"HIDDEN"})
 
     target_meshes: CollectionProperty(type=A2FTargetMeshItem)
@@ -148,18 +155,13 @@ class A2FSceneSettings(bpy.types.PropertyGroup):
         description="Loop selected audio and its model-provided channel stream",
         default=False,
     )
-    preview_reset_on_stop: BoolProperty(
-        name="Reset on Stop",
-        description="Set driven shape keys to zero when preview playback stops",
-        default=True,
-    )
-    preview_volume: FloatProperty(
-        name="Volume",
-        description="Selected or streamed WAV playback volume",
-        default=1.0,
-        min=0.0,
+    prediction_delay: FloatProperty(
+        name="Prediction Delay",
+        description="Adjust synchronization of mouth motion to audio in seconds",
+        default=0.0,
+        min=-1.0,
         max=1.0,
-        subtype="FACTOR",
+        unit="TIME",
     )
     preview_state: EnumProperty(
         items=(
@@ -176,10 +178,14 @@ class A2FSceneSettings(bpy.types.PropertyGroup):
     preview_duration: FloatProperty(
         name="Preview Duration", default=0.0, min=0.0, unit="TIME", options={"SKIP_SAVE"}
     )
-    stream_reset_on_stop: BoolProperty(
-        name="Reset on Stop",
-        description="Set driven Shape Keys to zero when a live stream stops",
-        default=True,
+    preview_progress: FloatProperty(
+        name="Playback Position",
+        description="Seek within the selected audio result",
+        default=0.0,
+        min=0.0,
+        max=1.0,
+        subtype="FACTOR",
+        options={"SKIP_SAVE"},
     )
     stream_operation_id: StringProperty(options={"HIDDEN", "SKIP_SAVE"})
     stream_sample_rate: IntProperty(
@@ -212,10 +218,10 @@ class A2FSceneSettings(bpy.types.PropertyGroup):
         subtype="FACTOR",
         options={"SKIP_SAVE"},
     )
-_MODEL_SCHEMA_FIELDS = {"identities", "channels", "parameters", "emotion_channels"}
+
+
+_MODEL_SCHEMA_FIELDS = {"channels", "emotion_channels"}
 _EMOTION_DESCRIPTOR_FIELDS = {"name", "default"}
-_BLENDER_INT_MIN = -(1 << 31)
-_BLENDER_INT_MAX = (1 << 31) - 1
 
 
 def _finite_float_in_range(
@@ -237,34 +243,10 @@ def _finite_float(value: object, *, label: str) -> float:
     return value
 
 
-def _integer(value: object, *, label: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise ValueError(f"{label} must be an integer")
-    if value < _BLENDER_INT_MIN or value > _BLENDER_INT_MAX:
-        raise ValueError(f"{label} is outside Blender's integer range")
-    return value
-
-
 def _nonempty_string(value: object, *, label: str) -> str:
     if not isinstance(value, str) or not value:
         raise ValueError(f"{label} must be a non-empty string")
     return value
-
-
-def _validated_parameters(
-    defaults: object,
-) -> list[tuple[str, str, float | int]]:
-    if not isinstance(defaults, dict):
-        raise ValueError("model_schema.parameters must be an object")
-    result: list[tuple[str, str, float | int]] = []
-    for raw_path, default in defaults.items():
-        path = _nonempty_string(raw_path, label="model_schema parameter path")
-        label = f"model_schema.parameters[{path!r}]"
-        if isinstance(default, int) and not isinstance(default, bool):
-            result.append((path, "integer", _integer(default, label=label)))
-        else:
-            result.append((path, "float", _finite_float(default, label=label)))
-    return result
 
 
 def _validated_emotion_descriptors(
@@ -276,7 +258,10 @@ def _validated_emotion_descriptors(
     seen_names: set[str] = set()
     for index, descriptor in enumerate(descriptors):
         location = f"model_schema.emotion_channels[{index}]"
-        if not isinstance(descriptor, dict) or set(descriptor) != _EMOTION_DESCRIPTOR_FIELDS:
+        if (
+            not isinstance(descriptor, dict)
+            or set(descriptor) != _EMOTION_DESCRIPTOR_FIELDS
+        ):
             raise ValueError(f"{location} has unexpected or missing fields")
         name = _nonempty_string(descriptor["name"], label=f"{location}.name")
         if name in seen_names:
@@ -292,32 +277,14 @@ def _validated_emotion_descriptors(
     return result
 
 
-def _validated_identities(identities: object) -> list[str]:
-    if not isinstance(identities, list) or not identities:
-        raise ValueError("model_schema.identities must be a non-empty array")
-    result: list[str] = []
-    seen: set[str] = set()
-    for position, identity in enumerate(identities):
-        location = f"model_schema.identities[{position}]"
-        name = _nonempty_string(identity, label=location)
-        if name in seen:
-            raise ValueError(f"model_schema contains duplicate identity name {name!r}")
-        seen.add(name)
-        result.append(name)
-    return result
-
-
 def _schema_signature(
-    model_signature: tuple[str, str, int],
+    model_signature: tuple[str, str],
     model_schema: dict[str, object],
 ) -> str:
     if (
         not isinstance(model_signature, tuple)
-        or len(model_signature) != 3
-        or not all(isinstance(value, str) and value for value in model_signature[:2])
-        or isinstance(model_signature[2], bool)
-        or not isinstance(model_signature[2], int)
-        or model_signature[2] < 0
+        or len(model_signature) != 2
+        or not all(isinstance(value, str) and value for value in model_signature)
     ):
         raise ValueError("model signature is invalid")
     payload = json.dumps(
@@ -330,64 +297,81 @@ def _schema_signature(
     return hashlib.sha256(payload).hexdigest()
 
 
-def _manual_emotion_values(settings: A2FSceneSettings) -> dict[str, float]:
+def _emotion_values(items: object, *, label: str) -> dict[str, float]:
     values: dict[str, float] = {}
-    for position, item in enumerate(settings.manual_emotions):
+    for position, item in enumerate(items):
         name = _nonempty_string(
             item.name,
-            label=f"manual emotion {position} name",
+            label=f"{label} {position} name",
         )
         if name in values:
-            raise ValueError(f"manual emotion collection repeats {name!r}")
+            raise ValueError(f"{label} collection repeats {name!r}")
         values[name] = _finite_float_in_range(
             item.value,
-            label=f"manual emotion {name!r} value",
+            label=f"{label} {name!r} value",
             minimum=0.0,
             maximum=1.0,
         )
     return values
 
 
-def _model_parameter_value(parameter: A2FModelParameterItem) -> float | int:
-    if parameter.kind == "float":
-        return float(parameter.float_value)
-    if parameter.kind == "integer":
-        return int(parameter.int_value)
-    raise ValueError(f"unsupported model parameter kind {parameter.kind!r}")
+def _manual_emotion_values(settings: A2FSceneSettings) -> dict[str, float]:
+    return _emotion_values(settings.manual_emotions, label="manual emotion")
 
 
-def _model_parameter_values(settings: A2FSceneSettings) -> dict[str, float | int]:
-    values: dict[str, float | int] = {}
-    for position, item in enumerate(settings.model_parameters):
-        path = _nonempty_string(
-            item.path,
-            label=f"model parameter {position} path",
+def _preferred_emotion_values(settings: A2FSceneSettings) -> dict[str, float]:
+    return _emotion_values(settings.preferred_emotions, label="preferred emotion")
+
+
+def load_preferred_emotion(settings: A2FSceneSettings) -> None:
+    """Snapshot the current model-defined manual emotion values."""
+
+    values = _manual_emotion_values(settings)
+    if not values:
+        raise ValueError("load the Audio2Face model before loading preferred emotion")
+    settings.preferred_emotions.clear()
+    for name, value in values.items():
+        item = settings.preferred_emotions.add()
+        item.name = name
+        item.value = value
+
+
+def clear_preferred_emotion(settings: A2FSceneSettings) -> None:
+    """Unset the preferred emotion snapshot."""
+
+    settings.preferred_emotions.clear()
+
+
+def emotion_settings(settings: A2FSceneSettings) -> dict[str, object]:
+    """Return the exact manual/automatic emotion mixer settings."""
+
+    manual_emotions = _manual_emotion_values(settings)
+    preferred_emotions = _preferred_emotion_values(settings)
+    if preferred_emotions and set(preferred_emotions) != set(manual_emotions):
+        raise ValueError(
+            "preferred emotion does not match the loaded model emotion channels"
         )
-        if path in values:
-            raise ValueError(f"model parameter collection repeats {path!r}")
-        value = _model_parameter_value(item)
-        if item.kind == "float":
-            value = _finite_float(value, label=f"model parameter {path!r} value")
-        else:
-            value = _integer(value, label=f"model parameter {path!r} value")
-        values[path] = value
-    return values
-
-
-def tuning_parameters(settings: A2FSceneSettings) -> dict[str, object]:
-    """Return values for exactly the schema advertised by the loaded worker."""
-
     return {
         "auto_audio2emotion": bool(settings.auto_audio2emotion),
-        "manual_emotions": _manual_emotion_values(settings),
-        "parameters": _model_parameter_values(settings),
+        "manual_emotions": manual_emotions,
+        "audio2emotion": {
+            "emotion_strength": float(settings.a2e_emotion_strength),
+            "emotion_contrast": float(settings.a2e_emotion_contrast),
+            "max_emotions": int(settings.a2e_max_emotions),
+            "live_blend_coef": float(settings.a2e_live_blend_coef),
+            "transition_smoothing": float(settings.a2e_transition_smoothing),
+            "preferred_emotion": preferred_emotions or None,
+            "preferred_emotion_strength": float(
+                settings.a2e_preferred_emotion_strength
+            ),
+        },
     }
 
 
 def apply_model_schema(
     settings: A2FSceneSettings,
     model_schema: object,
-    model_signature: tuple[str, str, int],
+    model_signature: tuple[str, str],
 ) -> tuple[str, ...]:
     """Validate and materialize one self-describing worker model schema."""
 
@@ -397,66 +381,35 @@ def apply_model_schema(
         channels = validate_output_channels(model_schema["channels"])
     except ResultValidationError as exc:
         raise ValueError(f"worker returned invalid output channels: {exc}") from exc
-    identities = _validated_identities(model_schema["identities"])
-    parameters = _validated_parameters(model_schema["parameters"])
     emotions = _validated_emotion_descriptors(model_schema["emotion_channels"])
     signature = _schema_signature(model_signature, model_schema)
 
-    selected_identity = settings.identity_index
-    if (
-        isinstance(selected_identity, bool)
-        or not isinstance(selected_identity, int)
-        or not 0 <= selected_identity < len(identities)
-    ):
-        raise ValueError("selected identity is outside the loaded model schema")
-
     same_schema = settings.model_schema_signature == signature
-    preserved_parameters: dict[str, float | int] = {}
     preserved_manual: dict[str, float] = {}
+    expected_emotion_names = {name for name, _default in emotions}
     if same_schema:
-        preserved_parameters = _model_parameter_values(settings)
-        expected_parameter_kinds = {path: kind for path, kind, _default in parameters}
-        actual_parameter_kinds = {
-            item.path: item.kind for item in settings.model_parameters
-        }
-        if (
-            actual_parameter_kinds != expected_parameter_kinds
-            or set(preserved_parameters) != set(expected_parameter_kinds)
-        ):
-            raise ValueError(
-                "saved model parameters do not match the exact loaded model schema"
-            )
         preserved_manual = _manual_emotion_values(settings)
-        if set(preserved_manual) != {name for name, _default in emotions}:
+        if set(preserved_manual) != expected_emotion_names:
             raise ValueError(
                 "saved manual emotions do not match the exact loaded model schema"
             )
-        if [item.name for item in settings.model_identities] != identities:
+        preserved_preferred = _preferred_emotion_values(settings)
+        if (
+            preserved_preferred
+            and set(preserved_preferred) != expected_emotion_names
+        ):
             raise ValueError(
-                "saved model identities do not match the exact loaded model schema"
+                "saved preferred emotion does not match the exact loaded model schema"
             )
 
-    settings.model_parameters.clear()
-    for path, kind, default in parameters:
-        item = settings.model_parameters.add()
-        item.path = path
-        item.kind = kind
-        value = preserved_parameters[path] if same_schema else default
-        if kind == "float":
-            item.float_value = float(value)
-        else:
-            item.int_value = int(value)
-
     settings.manual_emotions.clear()
+    if not same_schema:
+        settings.preferred_emotions.clear()
     for name, default in emotions:
         item = settings.manual_emotions.add()
         item.name = name
         item.value = preserved_manual[name] if same_schema else default
 
-    settings.model_identities.clear()
-    for name in identities:
-        item = settings.model_identities.add()
-        item.name = name
     settings.model_schema_signature = signature
     return channels
 
@@ -464,7 +417,5 @@ def apply_model_schema(
 CLASSES = (
     A2FTargetMeshItem,
     A2FEmotionValueItem,
-    A2FModelParameterItem,
-    A2FModelIdentityItem,
     A2FSceneSettings,
 )

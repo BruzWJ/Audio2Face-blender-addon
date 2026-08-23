@@ -42,25 +42,11 @@ class A2FAddonPreferences(bpy.types.AddonPreferences):
         text_width = context_wrap_width(_context)
         controller = get_controller()
         snapshot = controller.setup_snapshot()
-        runtime_status = snapshot.runtime_status
-        model_status = snapshot.model_status
         engine_status = snapshot.engine_status
         can_optimize, blocked_reason = controller.optimization_eligibility(snapshot)
 
         setup = layout.box()
-        setup.label(text="Bundled GPU Runtime & Models", icon="PREFERENCES")
-        setup.label(
-            text="The native worker and CUDA/TensorRT libraries ship with this add-on.",
-            icon="INFO",
-        )
-        runtime_row = setup.column()
-        runtime_row.alert = not runtime_status.ready
-        draw_wrapped_label(
-            runtime_row,
-            runtime_status.message,
-            width=text_width,
-            icon="CHECKMARK" if runtime_status.ready else "ERROR",
-        )
+        setup.label(text="GPU Runtime & Models", icon="PREFERENCES")
 
         terms = setup.operator("wm.url_open", text="NVIDIA Terms", icon="URL")
         terms.url = (
@@ -69,8 +55,7 @@ class A2FAddonPreferences(bpy.types.AddonPreferences):
         )
         setup.prop(self, "nvidia_terms_accepted")
 
-        setup.label(text="Clone or download both complete model repositories.")
-        sources = setup.row(align=True)
+        sources = setup.column(align=True)
         for label, url in (
             ("Download Audio2Face", "https://huggingface.co/nvidia/Audio2Face-3D-v3.0"),
             (
@@ -84,14 +69,6 @@ class A2FAddonPreferences(bpy.types.AddonPreferences):
         model_directories.enabled = not controller.optimization_in_progress
         model_directories.prop(self, "audio2face_model_directory")
         model_directories.prop(self, "audio2emotion_model_directory")
-        model_row = setup.column()
-        model_row.alert = not model_status.ready
-        draw_wrapped_label(
-            model_row,
-            model_status.message,
-            width=text_width,
-            icon="CHECKMARK" if model_status.ready else "ERROR",
-        )
 
         if controller.optimization_in_progress:
             draw_wrapped_label(
@@ -112,15 +89,6 @@ class A2FAddonPreferences(bpy.types.AddonPreferences):
             )
             return
 
-        if model_status.ready:
-            optimized_status = setup.column()
-            draw_wrapped_label(
-                optimized_status,
-                engine_status.message,
-                width=text_width,
-                icon="CHECKMARK" if engine_status.ready else "INFO",
-            )
-
         action = setup.row()
         action.enabled = can_optimize
         action.scale_y = 1.2
@@ -138,22 +106,21 @@ class A2FAddonPreferences(bpy.types.AddonPreferences):
                 width=text_width,
                 icon="ERROR",
             )
-        elif controller.optimization_message:
+        elif controller.optimization_failed:
             message = setup.column()
-            message.alert = controller.optimization_failed
+            message.alert = True
             draw_wrapped_label(
                 message,
                 controller.optimization_message,
                 width=text_width,
-                icon="ERROR" if controller.optimization_failed else "INFO",
+                icon="ERROR",
             )
-            if controller.optimization_failed:
-                open_logs = message.operator(
-                    "wm.path_open",
-                    text="Open Optimization Logs",
-                    icon="FILE_FOLDER",
-                )
-                open_logs.filepath = str(controller.log_directory())
+            open_logs = message.operator(
+                "wm.path_open",
+                text="Open Optimization Logs",
+                icon="FILE_FOLDER",
+            )
+            open_logs.filepath = str(controller.log_directory())
 
 
 def get_preferences() -> A2FAddonPreferences | None:

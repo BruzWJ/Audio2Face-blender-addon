@@ -14,15 +14,19 @@ Blender 5.2 extension
     |  private audio2face/3 JSONL over stdin/stdout
 package-local native worker on CUDA device 0
     |
-shared audio accumulator --------+--------------------------+
-                                 |                          |
-                         Audio2Emotion v3.0         Audio2Face-3D v3.0
-                            (Auto on)                       ^
-                                 |                          |
-manual emotion vector (Auto off)-+-> emotion accumulator --+
-                                                            |
-                                      model-ordered ARKit coefficients
-                                                            |
+shared audio accumulator --------+------------------------------+
+                                 |                              |
+                         Audio2Emotion v3.0             Audio2Face-3D v3.0
+                            (Auto on)                            ^
+                                 | generated                     |
+manual operation snapshot -------+-> SDK preferred mixer --+     |
+                         (Auto on, optional)               |     |
+manual operation snapshot ------------ direct (Auto off) --+     |
+                                                            |     |
+                                           emotion accumulator ---+
+                                                                  |
+                                            model-ordered ARKit coefficients
+                                                                  |
 Blender main thread -> per-frame Shape Key lookup on enabled mesh targets
 ```
 
@@ -44,19 +48,22 @@ The extension owns:
 - Add-on Preferences for one NVIDIA terms acceptance, model-source links, two
   persistent external repository-root selections, model optimization,
   cancellation, and progress;
-- a compact sidebar readiness notice plus worker and inference controls;
+- compact, actionable sidebar status for setup gaps, active work, and errors,
+  plus worker and inference controls;
 - worker launch, handshake, model load, generation, streaming, cancellation,
   and shutdown;
-- WAV, mode, identity, and target selection;
-- UI controls materialized from the worker's `model_schema`;
+- WAV, mode, and target selection;
+- emotion controls materialized from the worker's `model_schema`;
 - strict control-message, output-schema, result, and stream-frame validation;
   and
 - bounded PCM sourcing, audio synchronization, and Shape Key value delivery.
 
 The **Audio Playback** section is drawn immediately after the Selected WAV /
 Stream selector. In Selected WAV mode it controls the completed result and its
-audio. In Stream mode it reports streaming audio state and the applicable
-volume and reset controls.
+audio with one stateful Play/Pause button, Rewind, Loop, normalized scrubbing,
+timecode, and Prediction Delay. In Stream mode it reports the active stream
+clock and sample rate. There are no separate playback volume, stop, or reset
+controls.
 
 ### Mesh subscriptions
 
@@ -84,8 +91,8 @@ The native worker owns:
 - one Audio2Emotion v3.0 classifier executor;
 - selected WAV decoding, downmixing, and resampling;
 - shared audio and emotion accumulators;
-- the typed SDK parameter adapter;
-- manual-emotion accumulation or direct Audio2Emotion-to-Audio2Face binding;
+- direct manual-emotion accumulation or Audio2Emotion post-processing with
+  optional SDK preferred-emotion mixing;
 - in-place eye-look resolution into the model's output slots;
 - atomic Selected WAV result publication; and
 - incremental stream-frame publication.
@@ -257,9 +264,9 @@ that handshake; it does not read changed Preferences between process launch
 and `load_model`. One worker accepts at most one generation or stream
 operation.
 
-**Generate ARKit Values** reloads when the selected identity changes, freezes
-the current model-described settings, and submits a complete WAV. **Cancel
-Generation** interrupts active execution and prevents a partial result commit.
+**Generate ARKit Values** freezes the current model-described emotion settings
+and submits a complete WAV. **Cancel Generation** interrupts active execution
+and prevents a partial result commit.
 
 **Start WAV Stream** freezes the same settings and target subscriptions,
 incrementally decodes and resamples the selected WAV, and sends bounded mono
@@ -287,19 +294,19 @@ accumulators, and the CUDA stream in dependency order.
 
 The UI persists two model roots, but the extension derives their exact
 top-level `model.json` paths before protocol submission. `load_model` accepts
-only those two validated absolute descriptor paths and a non-negative identity
-index. It returns a positive `sample_rate` and one `model_schema` with exactly:
+only those two validated absolute descriptor paths. The worker selects the
+Audio2Face model's default identity at SDK index `0` internally. The protocol
+has no identity input or state. The response contains a positive `sample_rate`
+and one `model_schema` with exactly:
 
-- `identities`: ordered non-empty names from Audio2Face;
 - `channels`: the exact 52 unique model-provided names in model order;
-- `parameters`: opaque worker paths mapped to numeric SDK defaults; and
 - `emotion_channels`: ordered `{name, default}` records from Audio2Face.
 
-Blender owns no independent identity, emotion, output-channel, or parameter
-list. It validates the schema and materializes RNA collections from it.
-SDK 1.0.0 has no parameter reflection, so one typed worker adapter defines the
-supported paths; Blender displays each path exactly and owns no duplicate
-parameter metadata. Internal nodes and tensors do not enter the schema.
+Blender owns no identity selector or state and no independent emotion or
+output-channel list. It validates the schema and materializes RNA collections
+from it. Audio2Emotion post-process controls are operation settings rather
+than schema fields. Internal nodes, tensors, and other SDK parameter structures
+do not enter the schema.
 
 Every generation and stream-start request contains exactly:
 
@@ -307,19 +314,35 @@ Every generation and stream-start request contains exactly:
 {
   "auto_audio2emotion": false,
   "manual_emotions": {"<every advertised emotion name>": 0.0},
-  "parameters": {"<every advertised worker path>": 0.0}
+  "audio2emotion": {
+    "emotion_strength": 0.6,
+    "emotion_contrast": 1.0,
+    "max_emotions": 6,
+    "live_blend_coef": 0.7,
+    "transition_smoothing": 0.5,
+    "preferred_emotion": null,
+    "preferred_emotion_strength": 0.5
+  }
 }
 ```
 
-The worker rejects missing or extra emotion names and parameter paths,
-incorrect numeric kinds, and non-finite values. Stream settings remain frozen
-until that stream ends.
+The worker rejects missing or extra keys, missing or extra emotion names,
+out-of-range controls, and non-finite values. Settings, including the manual
+slider snapshot, remain frozen until the generation or stream ends.
 
 With `auto_audio2emotion` false, the ordered manual values form one constant
 emotion vector for the operation. With it true, the Audio2Emotion executor
-analyzes the same audio and its timestamped values fully override the manual
-vector. The worker does not blend the two modes. The rule is identical for
-Selected WAV and Stream.
+analyzes the same audio. Its SDK post-processor applies overall strength,
+contrast, maximum retained emotions, temporal blending, and transition time.
+`preferred_emotion` is either `null` or a distinct snapshot containing every
+model-provided emotion name. Blender's **Load** action copies the current
+manual values into that snapshot; later manual edits do not mutate it, and
+**Clear** restores `null`. Blender saves the loaded snapshot with the scene.
+When the snapshot is present, for preferred strength
+`p` the SDK mixes `p * preferred + (1 - p) * generated`, then applies
+`emotion_strength`. When it is `null`, the generated vector is used without a
+preferred mix. Auto Audio2Emotion is independent of loading or clearing the
+snapshot. The rule is identical for Selected WAV and Stream.
 
 ## ARKit output and playback
 
@@ -343,10 +366,14 @@ finite values in `[0.0, 1.0]`. Timestamps are non-empty, strictly increasing
 signed 64-bit audio-sample positions, and row count equals timestamp count.
 Live frames use the same negotiated channel order.
 
-Selected playback verifies the add-on-owned result and submitted WAV identity,
+Selected playback verifies the add-on-owned result and submitted WAV source,
 linearly samples frames against Blender audio position, and delivers values to
-current target Shape Keys. Play, pause/resume, stop, loop, volume, and
-reset-on-stop are Blender-local and do not invoke inference.
+current target Shape Keys. Its single Play/Pause control changes with playback
+state; Rewind and Loop are Blender-local and do not invoke inference. A
+normalized scrub value maps exactly onto the audio duration and is accompanied
+by elapsed / duration timecode. Prediction Delay is bounded to `[-1.0, 1.0]`
+seconds and offsets only result sampling: positive values advance facial motion
+relative to the audible audio and negative values make it lag.
 
 The streamed-WAV path uses a bounded frame buffer and Blender audio position.
 A live PCM source uses a monotonic presentation clock anchored to the first
@@ -356,7 +383,7 @@ result file.
 ## Failure boundaries
 
 The extension accepts only the exact worker profile
-`nvidia-a2f3-a2e3-gpu-arkit52/2` and a non-empty worker version. Control records
+`nvidia-a2f3-a2e3-gpu-arkit52/3` and a non-empty worker version. Control records
 reject missing or unknown fields, duplicate JSON keys, non-finite numbers,
 invalid IDs, unknown methods or events, malformed UTF-8, and payloads over
 1 MiB. A malformed method response, malformed or misrouted event, unknown

@@ -23,6 +23,7 @@ if str(PROJECT_ROOT) not in sys.path:
 import bpy  # noqa: E402  (available only inside Blender)
 
 import audio2face  # noqa: E402
+import audio2face.properties as properties_module  # noqa: E402
 from audio2face.preview import (  # noqa: E402
     apply_shape_key_frame,
     build_subscriptions,
@@ -33,7 +34,7 @@ from audio2face.preferences import A2FAddonPreferences  # noqa: E402
 from audio2face.properties import (  # noqa: E402
     A2FSceneSettings,
     apply_model_schema,
-    tuning_parameters,
+    emotion_settings,
 )
 from audio2face.ui_text import draw_wrapped_label  # noqa: E402
 
@@ -100,7 +101,17 @@ def main() -> None:
         assert len(notice_calls) > 1
         assert notice_calls[0].kwargs["icon"] == "INFO"
         assert all(call.kwargs["icon"] == "BLANK1" for call in notice_calls[1:])
-        assert "uninstall" not in dir(bpy.ops.a2f)
+        operator_names = set(dir(bpy.ops.a2f))
+        assert "uninstall" not in operator_names
+        assert {
+            "preview_play_pause",
+            "preview_rewind",
+            "load_preferred_emotion",
+            "clear_preferred_emotion",
+        } <= operator_names
+        assert {"preview_play", "preview_pause", "preview_stop"}.isdisjoint(
+            operator_names
+        )
         preference_names = set(A2FAddonPreferences.bl_rna.properties.keys())
         assert set(A2FAddonPreferences.__annotations__) == {
             "nvidia_terms_accepted",
@@ -127,6 +138,7 @@ def main() -> None:
             == "DIR_PATH"
         )
         scene_property_names = set(A2FSceneSettings.bl_rna.properties.keys())
+        assert not hasattr(properties_module, "A2FModelParameterItem")
         missing_scene_property_names = (
             set(A2FSceneSettings.__annotations__) - scene_property_names
         )
@@ -134,65 +146,97 @@ def main() -> None:
             f"scene settings missing registered RNA properties: "
             f"{sorted(missing_scene_property_names)}"
         )
+        assert {
+            "prediction_delay",
+            "preview_progress",
+            "auto_audio2emotion",
+            "manual_emotions",
+            "preferred_emotions",
+            "a2e_emotion_strength",
+            "a2e_emotion_contrast",
+            "a2e_max_emotions",
+            "a2e_live_blend_coef",
+            "a2e_transition_smoothing",
+            "a2e_preferred_emotion_strength",
+        } <= scene_property_names
+        assert not A2FSceneSettings.bl_rna.properties[
+            "preferred_emotions"
+        ].is_skip_save
+        assert {
+            "preview_volume",
+            "preview_reset_on_stop",
+            "stream_reset_on_stop",
+            "model_parameters",
+            "identity_index",
+            "model_identities",
+        }.isdisjoint(scene_property_names)
 
         scene = bpy.context.scene
         target = _make_shape_key_target(scene)
 
         settings = scene.audio2face
         model_schema = {
-            "identities": ["Aki", "Mark"],
             "channels": MODEL_CHANNELS.copy(),
-            "parameters": {
-                "/input_strength": 1.0,
-                "/audio2emotion/emotion_strength": 0.6,
-                "/audio2emotion/max_emotions": 6,
-            },
             "emotion_channels": [
                 {"name": "Neutral", "default": 1.0},
                 {"name": "Joy", "default": 0.0},
             ],
         }
-        model_signature = ("/models/audio2face", "/models/audio2emotion", 0)
+        model_signature = ("/models/audio2face", "/models/audio2emotion")
         apply_model_schema(settings, model_schema, model_signature)
-        assert [item.name for item in settings.model_identities] == ["Aki", "Mark"]
         assert [(item.name, item.value) for item in settings.manual_emotions] == [
             ("Neutral", 1.0),
             ("Joy", 0.0),
         ]
         settings.manual_emotions[1].value = 0.75
-        settings.model_parameters[1].float_value = 0.8
         apply_model_schema(settings, model_schema, model_signature)
         _assert_close(settings.manual_emotions[1].value, 0.75, label="preserved Joy")
-        _assert_close(
-            settings.model_parameters[1].float_value,
-            0.8,
-            label="preserved emotion strength",
-        )
         settings.auto_audio2emotion = True
-        tuning_payload = tuning_parameters(settings)
-        assert set(tuning_payload) == {
+        settings.a2e_emotion_strength = 0.8
+        settings.a2e_emotion_contrast = 1.4
+        settings.a2e_max_emotions = 3
+        settings.a2e_live_blend_coef = 0.4
+        settings.a2e_transition_smoothing = 0.9
+        settings.a2e_preferred_emotion_strength = 0.35
+        assert bpy.ops.a2f.clear_preferred_emotion() == {"FINISHED"}
+        assert bpy.ops.a2f.load_preferred_emotion() == {"FINISHED"}
+        settings.manual_emotions[1].value = 0.5
+        emotion_payload = emotion_settings(settings)
+        assert set(emotion_payload) == {
             "auto_audio2emotion",
             "manual_emotions",
-            "parameters",
+            "audio2emotion",
         }
-        assert tuning_payload["auto_audio2emotion"] is True
-        manual_payload = tuning_payload["manual_emotions"]
+        assert emotion_payload["auto_audio2emotion"] is True
+        manual_payload = emotion_payload["manual_emotions"]
         assert set(manual_payload) == {"Neutral", "Joy"}
         _assert_close(manual_payload["Neutral"], 1.0, label="manual Neutral")
-        _assert_close(manual_payload["Joy"], 0.75, label="manual Joy")
-        parameter_payload = tuning_payload["parameters"]
-        assert set(parameter_payload) == {
-            "/input_strength",
-            "/audio2emotion/emotion_strength",
-            "/audio2emotion/max_emotions",
+        _assert_close(manual_payload["Joy"], 0.5, label="manual Joy")
+        automatic_payload = emotion_payload["audio2emotion"]
+        assert set(automatic_payload) == {
+            "emotion_strength",
+            "emotion_contrast",
+            "max_emotions",
+            "live_blend_coef",
+            "transition_smoothing",
+            "preferred_emotion",
+            "preferred_emotion_strength",
         }
-        _assert_close(parameter_payload["/input_strength"], 1.0, label="input strength")
-        _assert_close(
-            parameter_payload["/audio2emotion/emotion_strength"],
-            0.8,
-            label="emotion strength",
-        )
-        assert parameter_payload["/audio2emotion/max_emotions"] == 6
+        assert automatic_payload["max_emotions"] == 3
+        preferred_payload = automatic_payload["preferred_emotion"]
+        assert set(preferred_payload) == {"Neutral", "Joy"}
+        _assert_close(preferred_payload["Neutral"], 1.0, label="preferred Neutral")
+        _assert_close(preferred_payload["Joy"], 0.75, label="preferred Joy")
+        for name, expected in (
+            ("emotion_strength", 0.8),
+            ("emotion_contrast", 1.4),
+            ("live_blend_coef", 0.4),
+            ("transition_smoothing", 0.9),
+            ("preferred_emotion_strength", 0.35),
+        ):
+            _assert_close(automatic_payload[name], expected, label=name)
+        assert bpy.ops.a2f.clear_preferred_emotion() == {"FINISHED"}
+        assert emotion_settings(settings)["audio2emotion"]["preferred_emotion"] is None
 
         extra_target = _make_shape_key_target(
             scene,

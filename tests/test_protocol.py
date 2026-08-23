@@ -38,6 +38,7 @@ def test_windows_native_transport_uses_binary_stdio() -> None:
 
 
 def test_native_worker_mirrors_the_python_wire_identity() -> None:
+    assert WORKER_PROFILE.rpartition("/")[2] == "3"
     assert f'constexpr const char* kProtocol = "{PROTOCOL_VERSION}";' in (
         WORKER_PROTOCOL_SOURCE
     )
@@ -54,7 +55,6 @@ def test_request_round_trip_is_compact_utf8_and_one_record() -> None:
         {
             "audio2face_model_path": "/models/脸/audio2face/model.json",
             "audio2emotion_model_path": "/models/脸/audio2emotion/model.json",
-            "identity_index": 0,
         },
     )
 
@@ -202,7 +202,11 @@ def test_error_requires_one_exact_shape() -> None:
 def test_encode_rejects_non_json_numbers(bad_value: float) -> None:
     message = make_request(
         "generate",
-        {"settings": {"input_strength": bad_value}},
+        {
+            "settings": {
+                "audio2emotion": {"emotion_strength": bad_value},
+            }
+        },
     )
 
     with pytest.raises(ProtocolError, match="not valid JSON"):

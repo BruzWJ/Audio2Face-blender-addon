@@ -354,7 +354,7 @@ class Server {
     if (method == "hello") {
       require_exact_keys(params, {});
       emitter_.response(
-          id, {{"worker_profile", "nvidia-a2f3-a2e3-gpu-arkit52/2"},
+          id, {{"worker_profile", "nvidia-a2f3-a2e3-gpu-arkit52/3"},
                {"worker_version", A2F_WORKER_VERSION}});
       negotiated_ = true;
       return;
@@ -366,17 +366,14 @@ class Server {
                           "Cannot load a model while an operation is running");
       }
       join_completed_operation();
-      require_exact_keys(params,
-                         {"audio2face_model_path", "audio2emotion_model_path",
-                          "identity_index"});
+      require_exact_keys(
+          params, {"audio2face_model_path", "audio2emotion_model_path"});
       emitter_.response(
           id, backend_.load_model(
                   ModelRequest{required_absolute_path(
                                    params, "audio2face_model_path"),
                                required_absolute_path(
-                                   params, "audio2emotion_model_path"),
-                               nonnegative_int(params.at("identity_index"),
-                                               "identity_index")}));
+                                   params, "audio2emotion_model_path")}));
       return;
     }
     if (method == "generate") {

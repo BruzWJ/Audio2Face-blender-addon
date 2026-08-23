@@ -156,14 +156,40 @@ external model root or its generated engine.
 
 The process is silent until `hello {}` and communicates only through strict
 `audio2face/3` UTF-8 JSON Lines on stdin/stdout. It reports worker profile
-`nvidia-a2f3-a2e3-gpu-arkit52/2`.
+`nvidia-a2f3-a2e3-gpu-arkit52/3`.
 
 `load_model` returns the model sample rate and one exact `model_schema` with
-`identities`, `channels`, `parameters`, and `emotion_channels`. Channels retain
-the model's exact 52-name order. Parameters are an object mapping opaque worker
-paths to numeric SDK defaults. SDK 1.0 has no parameter reflection, so the
-worker is the single typed adapter from those paths to the SDK structures;
-Blender owns no duplicate list or presentation metadata.
+`channels` and `emotion_channels`. Channels retain the model's exact 52-name
+order, and emotion names and defaults are model-provided. The worker selects
+the Audio2Face model's default identity at SDK index `0` internally; identity
+is not a protocol input, schema field, or Blender control.
+Audio2Emotion post-processing is configured per `generate` or `stream_start`
+operation through this exact nested settings object (values shown are Blender
+defaults):
+
+```json
+{
+  "emotion_strength": 0.6,
+  "emotion_contrast": 1.0,
+  "max_emotions": 6,
+  "live_blend_coef": 0.7,
+  "transition_smoothing": 0.5,
+  "preferred_emotion": null,
+  "preferred_emotion_strength": 0.5
+}
+```
+
+The complete operation settings also carry `auto_audio2emotion` and a snapshot
+of every model-described manual emotion. With automatic emotion off, that
+snapshot is accumulated directly as a constant driver. With it on, the worker
+resets the Audio2Emotion executor before setting the SDK post-process
+parameters. `preferred_emotion` is independently either `null` or an exact
+model-named snapshot captured by Blender's **Load** action; **Clear** unsets it,
+and later manual changes do not mutate the loaded snapshot. When present, for
+preferred strength `p` the SDK mixes
+`p * preferred + (1 - p) * generated`, then applies overall
+`emotion_strength`. Selected WAV and Stream use the same frozen settings
+contract.
 
 One non-interactive diffusion/device-blendshape executor and one
 Audio2Emotion executor serve both modes. A complete WAV produces a six-field

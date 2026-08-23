@@ -11,7 +11,10 @@ import pytest
 
 
 CHANNELS = tuple(f"modelChannel{index}" for index in range(52))
-MODEL_SIGNATURE = ("/models/audio2face/model.json", "/models/audio2emotion/model.json", 0)
+MODEL_SIGNATURE = ("/models/audio2face/model.json", "/models/audio2emotion/model.json")
+UI_SOURCE = (
+    Path(__file__).resolve().parents[1] / "audio2face" / "ui.py"
+).read_text(encoding="utf-8")
 
 
 class _Collection(list[SimpleNamespace]):
@@ -56,25 +59,24 @@ def properties_module(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
 
 def _settings() -> SimpleNamespace:
     return SimpleNamespace(
-        identity_index=0,
         model_schema_signature="",
-        model_identities=_Collection(lambda: SimpleNamespace(name="")),
         auto_audio2emotion=False,
         manual_emotions=_Collection(lambda: SimpleNamespace(name="", value=0.0)),
-        model_parameters=_Collection(
-            lambda: SimpleNamespace(path="", kind="", float_value=0.0, int_value=0)
+        preferred_emotions=_Collection(
+            lambda: SimpleNamespace(name="", value=0.0)
         ),
+        a2e_emotion_strength=0.6,
+        a2e_emotion_contrast=1.0,
+        a2e_max_emotions=6,
+        a2e_live_blend_coef=0.7,
+        a2e_transition_smoothing=0.5,
+        a2e_preferred_emotion_strength=0.5,
     )
 
 
 def _schema() -> dict[str, object]:
     return {
-        "identities": ["Aki", "Mark"],
         "channels": list(CHANNELS),
-        "parameters": {
-            "/input_strength": 0.9,
-            "/audio2emotion/max_emotions": 4,
-        },
         "emotion_channels": [
             {"name": "Neutral", "default": 0.5},
             {"name": "Joy", "default": 0.2},
@@ -82,16 +84,26 @@ def _schema() -> dict[str, object]:
     }
 
 
-def _parameter_values(settings: SimpleNamespace) -> list[tuple[object, ...]]:
-    return [
-        (item.path, item.kind, item.int_value if item.kind == "integer" else item.float_value)
-        for item in settings.model_parameters
-    ]
+def test_emotion_configuration_is_not_hidden_by_auto_mode() -> None:
+    assert "if settings.auto_audio2emotion:" not in UI_SOURCE
+    for name in (
+        "a2e_preferred_emotion_strength",
+        "a2e_emotion_strength",
+        "a2e_emotion_contrast",
+        "a2e_max_emotions",
+        "a2e_live_blend_coef",
+        "a2e_transition_smoothing",
+    ):
+        assert f'auto_controls.prop(settings, "{name}")' in UI_SOURCE
+    assert '"a2f.load_preferred_emotion"' in UI_SOURCE
+    assert '"a2f.clear_preferred_emotion"' in UI_SOURCE
 
 
-def test_schema_materializes_model_controls(properties_module: ModuleType) -> None:
+def test_schema_materializes_dynamic_emotions(
+    properties_module: ModuleType,
+) -> None:
+    assert not hasattr(properties_module, "A2FModelParameterItem")
     settings = _settings()
-    settings.identity_index = 1
 
     assert (
         properties_module.apply_model_schema(
@@ -101,12 +113,6 @@ def test_schema_materializes_model_controls(properties_module: ModuleType) -> No
         )
         == CHANNELS
     )
-    assert [item.name for item in settings.model_identities] == ["Aki", "Mark"]
-    assert settings.identity_index == 1
-    assert _parameter_values(settings) == [
-        ("/input_strength", "float", 0.9),
-        ("/audio2emotion/max_emotions", "integer", 4),
-    ]
     assert [(item.name, item.value) for item in settings.manual_emotions] == [
         ("Neutral", 0.5),
         ("Joy", 0.2),
@@ -118,16 +124,15 @@ def test_reload_preserves_values_only_for_the_exact_same_schema(
 ) -> None:
     settings = _settings()
     properties_module.apply_model_schema(settings, _schema(), MODEL_SIGNATURE)
-    settings.model_parameters[0].float_value = 1.7
-    settings.model_parameters[1].int_value = 2
     settings.manual_emotions[1].value = 0.82
+    properties_module.load_preferred_emotion(settings)
 
     properties_module.apply_model_schema(settings, _schema(), MODEL_SIGNATURE)
-    assert _parameter_values(settings) == [
-        ("/input_strength", "float", 1.7),
-        ("/audio2emotion/max_emotions", "integer", 2),
-    ]
     assert [(item.name, item.value) for item in settings.manual_emotions] == [
+        ("Neutral", 0.5),
+        ("Joy", 0.82),
+    ]
+    assert [(item.name, item.value) for item in settings.preferred_emotions] == [
         ("Neutral", 0.5),
         ("Joy", 0.82),
     ]
@@ -138,15 +143,10 @@ def test_changed_schema_resets_every_control_to_advertised_defaults(
 ) -> None:
     settings = _settings()
     properties_module.apply_model_schema(settings, _schema(), MODEL_SIGNATURE)
-    settings.model_parameters[0].float_value = 1.7
     settings.manual_emotions[1].value = 0.82
+    properties_module.load_preferred_emotion(settings)
 
     schema = _schema()
-    schema["parameters"] = {
-        "/audio2emotion/max_emotions": 3.5,
-        "/input_strength": 0.5,
-        "/skin/skin_strength": 1.1,
-    }
     schema["emotion_channels"] = [
         {"name": "Joy", "default": 0.1},
         {"name": "Sadness", "default": 0.3},
@@ -154,31 +154,70 @@ def test_changed_schema_resets_every_control_to_advertised_defaults(
     properties_module.apply_model_schema(settings, schema, MODEL_SIGNATURE)
     settings.auto_audio2emotion = True
 
-    assert _parameter_values(settings) == [
-        ("/audio2emotion/max_emotions", "float", 3.5),
-        ("/input_strength", "float", 0.5),
-        ("/skin/skin_strength", "float", 1.1),
-    ]
-    assert properties_module.tuning_parameters(settings) == {
+    assert not settings.preferred_emotions
+    assert properties_module.emotion_settings(settings) == {
         "auto_audio2emotion": True,
         "manual_emotions": {"Joy": 0.1, "Sadness": 0.3},
-        "parameters": {
-            "/audio2emotion/max_emotions": 3.5,
-            "/input_strength": 0.5,
-            "/skin/skin_strength": 1.1,
+        "audio2emotion": {
+            "emotion_strength": 0.6,
+            "emotion_contrast": 1.0,
+            "max_emotions": 6,
+            "live_blend_coef": 0.7,
+            "transition_smoothing": 0.5,
+            "preferred_emotion": None,
+            "preferred_emotion_strength": 0.5,
         },
     }
+
+
+def test_emotion_settings_freezes_manual_and_automatic_controls(
+    properties_module: ModuleType,
+) -> None:
+    settings = _settings()
+    properties_module.apply_model_schema(settings, _schema(), MODEL_SIGNATURE)
+    settings.manual_emotions[0].value = 0.25
+    settings.manual_emotions[1].value = 0.75
+    settings.auto_audio2emotion = True
+    settings.a2e_emotion_strength = 0.8
+    settings.a2e_emotion_contrast = 1.4
+    settings.a2e_max_emotions = 3
+    settings.a2e_live_blend_coef = 0.4
+    settings.a2e_transition_smoothing = 0.9
+    settings.a2e_preferred_emotion_strength = 0.35
+    properties_module.load_preferred_emotion(settings)
+    settings.manual_emotions[0].value = 0.1
+    settings.manual_emotions[1].value = 0.9
+
+    assert properties_module.emotion_settings(settings) == {
+        "auto_audio2emotion": True,
+        "manual_emotions": {"Neutral": 0.1, "Joy": 0.9},
+        "audio2emotion": {
+            "emotion_strength": 0.8,
+            "emotion_contrast": 1.4,
+            "max_emotions": 3,
+            "live_blend_coef": 0.4,
+            "transition_smoothing": 0.9,
+            "preferred_emotion": {"Neutral": 0.25, "Joy": 0.75},
+            "preferred_emotion_strength": 0.35,
+        },
+    }
+
+    properties_module.clear_preferred_emotion(settings)
+    assert (
+        properties_module.emotion_settings(settings)["audio2emotion"][
+            "preferred_emotion"
+        ]
+        is None
+    )
 
 
 @pytest.mark.parametrize(
     "corrupt",
     (
-        lambda settings: settings.model_parameters.pop(),
-        lambda settings: setattr(settings.model_parameters[0], "path", "/renamed"),
-        lambda settings: setattr(settings.model_parameters[0], "kind", "integer"),
         lambda settings: settings.manual_emotions.pop(),
         lambda settings: setattr(settings.manual_emotions[0], "name", "Renamed"),
-        lambda settings: settings.model_identities.pop(),
+        lambda settings: settings.preferred_emotions.pop(),
+        lambda settings: setattr(settings.preferred_emotions[0], "name", "Renamed"),
     ),
 )
 def test_exact_schema_signature_never_masks_corrupt_saved_collections(
@@ -187,6 +226,7 @@ def test_exact_schema_signature_never_masks_corrupt_saved_collections(
 ) -> None:
     settings = _settings()
     properties_module.apply_model_schema(settings, _schema(), MODEL_SIGNATURE)
+    properties_module.load_preferred_emotion(settings)
     corrupt(settings)
 
     with pytest.raises(ValueError, match="saved|unsupported"):
@@ -198,14 +238,13 @@ def test_exact_schema_signature_never_masks_corrupt_saved_collections(
     (
         lambda schema: schema.update(extra=True),
         lambda schema: schema.update(channels=[]),
-        lambda schema: schema.update(parameters={"/invalid": True}),
+        lambda schema: schema.update(parameters={}),
         lambda schema: schema.update(
             emotion_channels=[{"name": "Joy", "default": 0}]
         ),
         lambda schema: schema["emotion_channels"].append(
             {"name": "Joy", "default": 0.1}
         ),
-        lambda schema: schema.update(identities=[]),
     ),
 )
 def test_invalid_schema_does_not_mutate_controls(
@@ -215,7 +254,7 @@ def test_invalid_schema_does_not_mutate_controls(
     settings = _settings()
     properties_module.apply_model_schema(settings, _schema(), MODEL_SIGNATURE)
     before = copy.deepcopy(
-        (_parameter_values(settings), [(item.name, item.value) for item in settings.manual_emotions])
+        [(item.name, item.value) for item in settings.manual_emotions]
     )
     schema = _schema()
     mutate(schema)
@@ -223,46 +262,4 @@ def test_invalid_schema_does_not_mutate_controls(
     with pytest.raises(ValueError):
         properties_module.apply_model_schema(settings, schema, MODEL_SIGNATURE)
 
-    assert (
-        _parameter_values(settings),
-        [(item.name, item.value) for item in settings.manual_emotions],
-    ) == before
-
-
-def test_schema_rejects_invalid_identity_instead_of_remapping_it(
-    properties_module: ModuleType,
-) -> None:
-    settings = _settings()
-    settings.identity_index = 9
-
-    with pytest.raises(ValueError, match="selected identity"):
-        properties_module.apply_model_schema(settings, _schema(), MODEL_SIGNATURE)
-
-    assert settings.model_identities == []
-
-
-def test_schema_rejects_duplicate_identities(
-    properties_module: ModuleType,
-) -> None:
-    schema = _schema()
-    schema["identities"] = ["Aki", "Aki"]
-    with pytest.raises(ValueError):
-        properties_module.apply_model_schema(_settings(), schema, MODEL_SIGNATURE)
-
-
-def test_model_parameter_identifiers_are_opaque_and_model_defined(
-    properties_module: ModuleType,
-) -> None:
-    settings = _settings()
-    schema = _schema()
-    schema["parameters"] = {
-        "SDK parameter with spaces": 0.5,
-        "/future/nested/Parameter": 3,
-    }
-
-    properties_module.apply_model_schema(settings, schema, MODEL_SIGNATURE)
-
-    assert _parameter_values(settings) == [
-        ("SDK parameter with spaces", "float", 0.5),
-        ("/future/nested/Parameter", "integer", 3),
-    ]
+    assert [(item.name, item.value) for item in settings.manual_emotions] == before

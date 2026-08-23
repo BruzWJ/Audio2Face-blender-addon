@@ -8,7 +8,11 @@ import bpy
 
 from .live_stream import get_live_stream_controller
 from .preview import PreviewError, get_preview_controller
-from .properties import A2FSceneSettings
+from .properties import (
+    A2FSceneSettings,
+    clear_preferred_emotion,
+    load_preferred_emotion,
+)
 from .result_io import AnimationResult, ResultValidationError, load_animation_result
 from .runtime import RuntimeController, get_controller
 from .sidecar import SidecarError
@@ -155,6 +159,37 @@ class A2F_OT_stop_stream(bpy.types.Operator):
         )
 
 
+class A2F_OT_load_preferred_emotion(bpy.types.Operator):
+    bl_idname = "a2f.load_preferred_emotion"
+    bl_label = "Load Preferred Emotion"
+    bl_description = "Load preferred emotion from the current manual emotion settings"
+
+    @classmethod
+    def poll(cls, context: bpy.types.Context) -> bool:
+        available = bool(context.scene.audio2face.manual_emotions)
+        if not available:
+            cls.poll_message_set("load the Audio2Face model first")
+        return available
+
+    def execute(self, context: bpy.types.Context) -> set[str]:
+        try:
+            load_preferred_emotion(context.scene.audio2face)
+        except ValueError as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        return {"FINISHED"}
+
+
+class A2F_OT_clear_preferred_emotion(bpy.types.Operator):
+    bl_idname = "a2f.clear_preferred_emotion"
+    bl_label = "Clear Preferred Emotion"
+    bl_description = "Clear the loaded preferred emotion"
+
+    def execute(self, context: bpy.types.Context) -> set[str]:
+        clear_preferred_emotion(context.scene.audio2face)
+        return {"FINISHED"}
+
+
 class A2F_OT_add_selected_targets(bpy.types.Operator):
     bl_idname = "a2f.add_selected_targets"
     bl_label = "Add Selected Meshes"
@@ -215,36 +250,35 @@ class A2F_OT_remove_target(bpy.types.Operator):
         return {"FINISHED"}
 
 
-class A2F_OT_preview_play(bpy.types.Operator):
-    bl_idname = "a2f.preview_play"
-    bl_label = "Play Audio and Animation"
+class A2F_OT_preview_play_pause(bpy.types.Operator):
+    bl_idname = "a2f.preview_play_pause"
+    bl_label = "Play/Pause Audio and Animation"
     bl_description = (
-        "Play generated audio and deliver model channels to target Shape Keys in sync"
+        "Toggle generated audio and synchronized target Shape Key playback"
     )
 
     @classmethod
     def poll(cls, context: bpy.types.Context) -> bool:
         settings = context.scene.audio2face
         controller = get_preview_controller()
-        preview_state_ready = (
-            settings.preview_state == "IDLE" and not controller.active
-        ) or (
-            settings.preview_state == "PAUSED" and controller.active
-        )
+        if settings.stream_operation_id or get_live_stream_controller().active:
+            return False
+        if controller.active:
+            return settings.preview_state in {"PLAYING", "PAUSED"}
         return (
-            settings.result_path != ""
+            settings.preview_state == "IDLE"
+            and settings.result_path != ""
             and settings.result_operation_id != ""
             and settings.result_audio_path != ""
-            and settings.stream_operation_id == ""
-            and not get_live_stream_controller().active
-            and preview_state_ready
         )
 
     def execute(self, context: bpy.types.Context) -> set[str]:
         settings = context.scene.audio2face
         controller = get_preview_controller()
         try:
-            if settings.preview_state == "PAUSED":
+            if settings.preview_state == "PLAYING":
+                controller.pause()
+            elif settings.preview_state == "PAUSED":
                 controller.resume()
             elif settings.preview_state == "IDLE":
                 result = _load_selected_result(settings)
@@ -255,7 +289,7 @@ class A2F_OT_preview_play(bpy.types.Operator):
                 )
             else:
                 raise PreviewError(
-                    f"cannot play preview from state {settings.preview_state!r}"
+                    f"cannot toggle preview from state {settings.preview_state!r}"
                 )
         except (PreviewError, ResultValidationError, OSError, ValueError) as exc:
             settings.status = "ERROR"
@@ -265,44 +299,26 @@ class A2F_OT_preview_play(bpy.types.Operator):
         return {"FINISHED"}
 
 
-class A2F_OT_preview_pause(bpy.types.Operator):
-    bl_idname = "a2f.preview_pause"
-    bl_label = "Pause Audio and Animation"
-    bl_description = "Pause generated audio and hold the current Shape Key values"
+class A2F_OT_preview_rewind(bpy.types.Operator):
+    bl_idname = "a2f.preview_rewind"
+    bl_label = "Rewind Audio and Animation"
+    bl_description = (
+        "Rewind audio and synchronized Shape Keys without changing playback state"
+    )
 
     @classmethod
     def poll(cls, context: bpy.types.Context) -> bool:
         return (
-            context.scene.audio2face.preview_state == "PLAYING"
+            context.scene.audio2face.preview_state in {"PLAYING", "PAUSED"}
             and get_preview_controller().active
         )
 
     def execute(self, context: bpy.types.Context) -> set[str]:
         try:
-            get_preview_controller().pause()
+            get_preview_controller().rewind()
         except PreviewError as exc:
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
-        return {"FINISHED"}
-
-
-class A2F_OT_preview_stop(bpy.types.Operator):
-    bl_idname = "a2f.preview_stop"
-    bl_label = "Stop Audio and Animation"
-    bl_description = "Stop audio playback and synchronized Shape Key updates"
-
-    @classmethod
-    def poll(cls, context: bpy.types.Context) -> bool:
-        settings = context.scene.audio2face
-        return (
-            settings.preview_state in {"PLAYING", "PAUSED"}
-            and get_preview_controller().active
-        )
-
-    def execute(self, context: bpy.types.Context) -> set[str]:
-        get_preview_controller().stop(
-            reset=context.scene.audio2face.preview_reset_on_stop
-        )
         return {"FINISHED"}
 
 
@@ -315,9 +331,10 @@ CLASSES = (
     A2F_OT_cancel,
     A2F_OT_stream_wav,
     A2F_OT_stop_stream,
+    A2F_OT_load_preferred_emotion,
+    A2F_OT_clear_preferred_emotion,
     A2F_OT_add_selected_targets,
     A2F_OT_remove_target,
-    A2F_OT_preview_play,
-    A2F_OT_preview_pause,
-    A2F_OT_preview_stop,
+    A2F_OT_preview_play_pause,
+    A2F_OT_preview_rewind,
 )

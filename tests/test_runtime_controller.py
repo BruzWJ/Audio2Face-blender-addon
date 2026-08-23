@@ -14,11 +14,25 @@ import pytest
 MODEL_CHANNELS = tuple(f"modelChannel{index}" for index in range(52))
 
 
-def _model_schema(*, parameter_default: float = 1.0) -> dict[str, object]:
+def _emotion_settings_payload() -> dict[str, object]:
     return {
-        "identities": ["Model Identity"],
+        "auto_audio2emotion": True,
+        "manual_emotions": {"Joy": 0.25},
+        "audio2emotion": {
+            "emotion_strength": 0.6,
+            "emotion_contrast": 1.0,
+            "max_emotions": 6,
+            "live_blend_coef": 0.7,
+            "transition_smoothing": 0.5,
+            "preferred_emotion": {"Joy": 0.75},
+            "preferred_emotion_strength": 0.35,
+        },
+    }
+
+
+def _model_schema() -> dict[str, object]:
+    return {
         "channels": list(MODEL_CHANNELS),
-        "parameters": {"/input_strength": parameter_default},
         "emotion_channels": [{"name": "Joy", "default": 0.0}],
     }
 
@@ -31,17 +45,17 @@ class _Settings:
         self.preview_state = "PLAYING"
         self.preview_time = 1.0
         self.preview_duration = 2.0
-        self.preview_reset_on_stop = True
+        self.preview_progress = 0.5
+        self.prediction_delay = 0.0
         self.result_operation_id = ""
         self.result_path = ""
         self.result_audio_path = ""
         self.audio_path = ""
-        self.identity_index = 0
         self.stream_operation_id = ""
         self.stream_sample_rate = 0
         self.stream_prebuffer_samples = 0
         self.stream_time = 0.0
-        self.stream_reset_on_stop = True
+
 
 class _ReadOnlySettings:
     def __setattr__(self, name: str, value: object) -> None:
@@ -70,7 +84,7 @@ class _LiveController:
         self.receive_calls: list[tuple[object, ...]] = []
         self.terminal_calls: list[str] = []
         self.stop_calls: list[dict[str, object]] = []
-        self.reset_on_stop = True
+        self.prepare_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
 
     def tick(self) -> bool:
         return False
@@ -85,6 +99,11 @@ class _LiveController:
 
     def receive(self, *args: object) -> None:
         self.receive_calls.append(args)
+
+    def prepare(self, *args: object, **kwargs: object) -> None:
+        self.prepare_calls.append((args, dict(kwargs)))
+        self.operation_id = str(args[1])
+        self.is_active = True
 
     def mark_terminal(self, operation_id: str) -> None:
         self.terminal_calls.append(operation_id)
@@ -117,7 +136,7 @@ def _plain_pending(runtime: ModuleType, method: str, scene_name: str) -> object:
 def _model_pending(
     runtime: ModuleType,
     scene_name: str,
-    signature: tuple[str, str, int],
+    signature: tuple[str, str],
 ) -> object:
     return runtime.PendingRequest(
         "load_model",
@@ -174,7 +193,7 @@ def runtime_module(monkeypatch: pytest.MonkeyPatch) -> tuple[ModuleType, ModuleT
 
     properties = ModuleType("audio2face.properties")
     properties.apply_model_schema = lambda *_args, **_kwargs: MODEL_CHANNELS  # type: ignore[attr-defined]
-    properties.tuning_parameters = lambda *_args, **_kwargs: {}  # type: ignore[attr-defined]
+    properties.emotion_settings = lambda *_args, **_kwargs: _emotion_settings_payload()  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, properties.__name__, properties)
 
     preview = ModuleType("audio2face.preview")
@@ -270,6 +289,7 @@ def test_initial_poll_resets_only_editable_scenes(
     assert local_settings.status == "IDLE"
     assert local_settings.status_message == "Worker is stopped"
     assert local_settings.preview_state == "IDLE"
+    assert local_settings.preview_progress == 0.0
 
 
 def test_optimization_progress_keeps_only_latest_snapshot(
@@ -466,7 +486,6 @@ def test_exact_hello_contract_automatically_loads_bundled_model(
 ) -> None:
     runtime, bpy = runtime_module
     scene, settings = _local_scene(bpy)
-    settings.identity_index = 99
     controller = runtime.RuntimeController()
     controller.pending["hello"] = _plain_pending(runtime, "hello", scene.name)
     loaded: list[object] = []
@@ -479,10 +498,9 @@ def test_exact_hello_contract_automatically_loads_bundled_model(
         target: object,
         spec: object,
         *,
-        identity_index: int,
         continuation: str,
     ) -> None:
-        loaded.append((target, spec, identity_index, continuation))
+        loaded.append((target, spec, continuation))
 
     controller._submit_model_load = submit_model_load
 
@@ -499,8 +517,7 @@ def test_exact_hello_contract_automatically_loads_bundled_model(
     assert controller.negotiated is True
     assert controller.handshake_deadline is None
     assert controller.handshake_spec is None
-    assert loaded == [(scene, "bundled-spec", 0, "ready")]
-    assert settings.identity_index == 0
+    assert loaded == [(scene, "bundled-spec", "ready")]
     assert settings.status != "ERROR"
 
 
@@ -563,7 +580,7 @@ def test_exact_model_response_marks_model_ready(
     runtime, bpy = runtime_module
     scene, settings = _local_scene(bpy)
     controller = runtime.RuntimeController()
-    signature = ("audio2face/model.json", "audio2emotion/model.json", 0)
+    signature = ("audio2face/model.json", "audio2emotion/model.json")
     controller.pending["load"] = _model_pending(runtime, scene.name, signature)
 
     controller._handle_response(
@@ -593,19 +610,18 @@ def test_loaded_model_schema_is_cached_and_applied_once_per_scene(
     second_scene = _Scene("Second", editable=True, settings=second_settings)
     bpy.data.scenes.append(second_scene)  # type: ignore[attr-defined]
     controller = runtime.RuntimeController()
-    signature = ("audio2face/model.json", "audio2emotion/model.json", 0)
-    model_schema = _model_schema(parameter_default=1.0)
-    applications: list[tuple[object, float]] = []
+    signature = ("audio2face/model.json", "audio2emotion/model.json")
+    model_schema = _model_schema()
+    applications: list[object] = []
 
     def apply(
         settings: object,
         payload: object,
-        applied_signature: tuple[str, str, int],
+        applied_signature: tuple[str, str],
     ) -> tuple[str, ...]:
         assert applied_signature == signature
-        assert isinstance(payload, dict)
-        parameters = payload["parameters"]
-        applications.append((settings, parameters["/input_strength"]))
+        assert payload == model_schema
+        applications.append(settings)
         return MODEL_CHANNELS
 
     monkeypatch.setattr(runtime, "apply_model_schema", apply)
@@ -628,8 +644,8 @@ def test_loaded_model_schema_is_cached_and_applied_once_per_scene(
     controller._ensure_scene_model_schema(second_scene)
 
     assert applications == [
-        (first_settings, 1.0),
-        (second_settings, 1.0),
+        first_settings,
+        second_settings,
     ]
     assert controller.model_schema is model_schema
     assert controller.schema_scenes == {
@@ -664,7 +680,6 @@ def test_model_load_submits_both_bundled_models(
     controller._submit_model_load(
         scene,
         spec,
-        identity_index=0,
         continuation="ready",
     )
 
@@ -674,14 +689,12 @@ def test_model_load_submits_both_bundled_models(
             {
                 "audio2face_model_path": str(spec.audio2face_model),
                 "audio2emotion_model_path": str(spec.audio2emotion_model),
-                "identity_index": 0,
             },
             {
                 "continuation": "ready",
                 "model_signature": (
                     str(spec.audio2face_model),
                     str(spec.audio2emotion_model),
-                    0,
                 ),
                 "operation_id": None,
             },
@@ -698,7 +711,7 @@ def test_model_response_rejects_an_unknown_field(
     controller.pending["load"] = _model_pending(
         runtime,
         scene.name,
-        ("audio2face/model.json", "audio2emotion/model.json", 0),
+        ("audio2face/model.json", "audio2emotion/model.json"),
     )
     shutdown_timeouts: list[float] = []
     controller.client.begin_shutdown = lambda *, timeout: shutdown_timeouts.append(
@@ -1001,7 +1014,7 @@ def test_late_non_shutdown_response_does_not_replace_stopping_state(
     controller.pending["load"] = _model_pending(
         runtime,
         scene.name,
-        ("audio2face/model.json", "audio2emotion/model.json", 0),
+        ("audio2face/model.json", "audio2emotion/model.json"),
     )
 
     controller._handle_response(
@@ -1050,7 +1063,6 @@ def test_generation_binds_result_to_exact_submitted_audio(
     signature = (
         str(spec.audio2face_model),
         str(spec.audio2emotion_model),
-        0,
     )
     controller.loaded_signature = signature
     controller.model_schema = _model_schema()
@@ -1079,9 +1091,46 @@ def test_generation_binds_result_to_exact_submitted_audio(
     }
     assert requests[0][1]["operation_id"] == settings.result_operation_id
     assert requests[0][1]["audio_path"] == str(audio_path.resolve())
+    assert requests[0][1]["settings"] == _emotion_settings_payload()
     assert settings.result_audio_path == str(audio_path.resolve())
     settings.audio_path = str(tmp_path / "different.wav")
     assert settings.result_audio_path == str(audio_path.resolve())
+
+
+def test_stream_start_submits_the_same_complete_emotion_settings(
+    runtime_module: tuple[ModuleType, ModuleType],
+) -> None:
+    runtime, bpy = runtime_module
+    scene, _settings = _local_scene(bpy)
+    controller = runtime.RuntimeController()
+    controller.model_sample_rate = 16_000
+    controller.model_schema = _model_schema()
+    controller.loaded_signature = ("face/model.json", "emotion/model.json")
+    controller.schema_scenes.add(scene.as_pointer())
+    runtime.get_preview_controller = lambda: SimpleNamespace(stop=lambda **_kwargs: None)
+    requests: list[tuple[str, dict[str, object], dict[str, object]]] = []
+
+    def request(
+        _scene: object,
+        method: str,
+        params: dict[str, object],
+        **kwargs: object,
+    ) -> str:
+        requests.append((method, params, kwargs))
+        return "stream-start-request"
+
+    controller._request = request
+    operation_id = controller._submit_stream_start(scene, audio_path=None)
+
+    assert len(requests) == 1
+    method, params, kwargs = requests[0]
+    assert method == "stream_start"
+    assert params == {
+        "operation_id": operation_id,
+        "sample_rate": 16_000,
+        "settings": _emotion_settings_payload(),
+    }
+    assert kwargs["operation_id"] == operation_id
 
 
 def test_stream_audio_request_is_exact_base64_f32le(
@@ -1598,7 +1647,7 @@ def test_explicit_stream_stop_ends_local_audio_instead_of_finishing_playback(
         {"event": "stream_ended", "operation_id": "stream-1", "data": {}}
     )
 
-    assert runtime._test_live_controller.stop_calls == [{"reset": True}]
+    assert runtime._test_live_controller.stop_calls == [{"reset": False}]
     assert runtime._test_live_controller.terminal_calls == []
     assert controller.stream_stop_requests == set()
     assert settings.stream_operation_id == ""
