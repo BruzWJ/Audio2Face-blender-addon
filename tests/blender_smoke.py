@@ -250,6 +250,7 @@ def main() -> None:
                 "left_eye_rot_x_offset",
                 "left_eye_rot_y_offset",
                 "eye_saccade_seed",
+                "a2e_preferred_emotion_strength",
             )
         } == {
             "eyelid_open_offset": "Eyelid Offset",
@@ -259,6 +260,7 @@ def main() -> None:
             "left_eye_rot_x_offset": "Left Eye Rotate X",
             "left_eye_rot_y_offset": "Left Eye Rotate Y",
             "eye_saccade_seed": "Eye Saccade Data",
+            "a2e_preferred_emotion_strength": "Preferred Emotion Strength",
         }
         assert not A2FSceneSettings.bl_rna.properties[
             "preferred_emotions"

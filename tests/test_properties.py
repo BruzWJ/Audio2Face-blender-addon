@@ -180,8 +180,9 @@ def test_playback_ui_uses_an_editable_absolute_time_slider() -> None:
 
 
 def test_input_mode_switch_is_never_disabled() -> None:
-    assert 'input_box.prop(settings, "input_mode", expand=True)' in UI_SOURCE
-    assert "mode_row" not in UI_SOURCE
+    assert "input_mode_row = input_box.row(align=True)" in UI_SOURCE
+    assert 'input_mode_row.prop(settings, "input_mode", expand=True)' in UI_SOURCE
+    assert "input_mode_row.enabled" not in UI_SOURCE
 
 
 def test_audio_path_update_replaces_the_selected_media_slider(

@@ -231,7 +231,8 @@ class A2F_PT_main(bpy.types.Panel):
 
         input_box = layout.box()
         input_box.label(text="Inputs", icon="SOUND")
-        input_box.prop(settings, "input_mode", expand=True)
+        input_mode_row = input_box.row(align=True)
+        input_mode_row.prop(settings, "input_mode", expand=True)
         _draw_audio_playback(input_box, settings, controller, context.scene.name)
         if settings.input_mode == "SELECTED":
             input_box.prop(settings, "audio_path")

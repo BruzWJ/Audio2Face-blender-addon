@@ -266,7 +266,7 @@ def test_live_frames_resolve_the_current_mesh_targets(
     ]
 
 
-def test_paused_selected_audio_uses_the_current_mesh_targets(
+def test_paused_selected_audio_preserves_emotion_edits_and_current_mesh_targets(
     live_module: tuple[ModuleType, _Scene, list[AppliedFrame]],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -312,14 +312,23 @@ def test_paused_selected_audio_uses_the_current_mesh_targets(
     )
     assert [item.value for item in scene.audio2face.manual_emotions] == [0.0, 0.0]
 
+    scene.audio2face.manual_emotions[0].value = 0.35
+    scene.audio2face.manual_emotions[1].value = 0.65
     controller.tick()
-    assert [item.value for item in scene.audio2face.manual_emotions] == pytest.approx(
-        MODEL_EMOTIONS
-    )
+    assert [item.value for item in scene.audio2face.manual_emotions] == [0.35, 0.65]
     current_targets[0] = (second_target,)
     controller.tick()
 
     assert delivered_targets == [(first_target,), (second_target,)]
+    assert [item.value for item in scene.audio2face.manual_emotions] == [0.35, 0.65]
+
+    scene.audio2face.playback_state = "PLAYING"
+    controller.tick()
+
+    assert delivered_targets == [(first_target,), (second_target,), (second_target,)]
+    assert [item.value for item in scene.audio2face.manual_emotions] == pytest.approx(
+        MODEL_EMOTIONS
+    )
 
 
 def test_frame_reset_starts_a_new_timestamp_epoch_without_stopping_stream(

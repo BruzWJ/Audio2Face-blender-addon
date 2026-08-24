@@ -379,7 +379,7 @@ class A2FSceneSettings(bpy.types.PropertyGroup):
         update=_inference_setting_updated,
     )
     a2e_preferred_emotion_strength: FloatProperty(
-        name="Strength",
+        name="Preferred Emotion Strength",
         description=(
             "Strength of the loaded preferred emotion relative to generated emotion"
         ),

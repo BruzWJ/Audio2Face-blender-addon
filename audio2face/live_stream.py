@@ -532,7 +532,13 @@ class LiveStreamController:
             del self._weights[:remove]
             del self._emotions[:remove]
 
-    def _apply_sampled_frame(self, settings: Any, sample_position: float) -> None:
+    def _apply_sampled_frame(
+        self,
+        settings: Any,
+        sample_position: float,
+        *,
+        publish_emotions: bool,
+    ) -> None:
         apply_shape_key_frame(
             resolve_target_meshes(settings),
             self._channels,
@@ -542,15 +548,16 @@ class LiveStreamController:
                 sample_position,
             ),
         )
-        apply_effective_emotions(
-            settings,
-            self._emotion_channels,
-            sample_linear(
-                self._timestamps,
-                self._emotions,
-                sample_position,
-            ),
-        )
+        if publish_emotions:
+            apply_effective_emotions(
+                settings,
+                self._emotion_channels,
+                sample_linear(
+                    self._timestamps,
+                    self._emotions,
+                    sample_position,
+                ),
+            )
 
     def tick(self) -> bool:
         """Advance one audio-clocked stream; return whether fast polling is useful."""
@@ -573,6 +580,7 @@ class LiveStreamController:
                 self._apply_sampled_frame(
                     settings,
                     sample_position + delay * self._sample_rate,
+                    publish_emotions=True,
                 )
                 settings.stream_time = max(0.0, sample_position / self._sample_rate)
                 self._drop_old_frames(sample_position)
@@ -612,6 +620,8 @@ class LiveStreamController:
                 self._apply_sampled_frame(
                     settings,
                     (position + delay) * self._sample_rate,
+                    # A paused timestamp must not overwrite emotion slider edits.
+                    publish_emotions=settings.playback_state != "PAUSED",
                 )
             if self._pending_seek_position is None:
                 self._publish_position(settings, position)
