@@ -21,6 +21,7 @@ class _Settings:
     playback_state: str = "IDLE"
     status: str = "MODEL_READY"
     status_message: str = ""
+    manual_emotion_pending: bool = False
     custom_properties: dict[str, object] = field(default_factory=dict)
     custom_property_ui: dict[str, dict[str, object]] = field(default_factory=dict)
     manual_emotions: tuple[SimpleNamespace, ...] = field(
@@ -84,7 +85,7 @@ def live_module(
         return tuple(channels)
 
     shape_keys.validate_output_channels = validate_output_channels  # type: ignore[attr-defined]
-    shape_keys.resolve_target_meshes = lambda _settings: (object(),)  # type: ignore[attr-defined]
+    shape_keys.resolve_target_objects = lambda _settings: (object(),)  # type: ignore[attr-defined]
 
     def apply_shape_key_frame(
         _subscriptions: object,
@@ -106,6 +107,8 @@ def live_module(
         values: tuple[float, ...],
     ) -> None:
         assert channels == tuple(item.name for item in settings.manual_emotions)
+        if settings.manual_emotion_pending:
+            return
         for item, value in zip(settings.manual_emotions, values):
             item.value = min(max(value, 0.0), 1.0)
 
@@ -157,7 +160,7 @@ def test_prepare_allows_targets_to_be_added_after_stream_start(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     live, scene, _applied = live_module
-    monkeypatch.setattr(live, "resolve_target_meshes", lambda _settings: ())
+    monkeypatch.setattr(live, "resolve_target_objects", lambda _settings: ())
     controller = live.LiveStreamController()
 
     controller.prepare(
@@ -221,7 +224,7 @@ def test_source_free_stream_interpolates_bursted_frames_on_a_monotonic_clock(
     assert scene.audio2face.stream_time == pytest.approx(0.05)
 
 
-def test_live_frames_resolve_the_current_mesh_targets(
+def test_live_frames_resolve_the_current_object_targets(
     live_module: tuple[ModuleType, _Scene, list[AppliedFrame]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -234,7 +237,7 @@ def test_live_frames_resolve_the_current_mesh_targets(
     monkeypatch.setattr(live.time, "monotonic", lambda: now[0])
     monkeypatch.setattr(
         live,
-        "resolve_target_meshes",
+        "resolve_target_objects",
         lambda _settings: current_targets[0],
     )
     monkeypatch.setattr(
@@ -266,7 +269,7 @@ def test_live_frames_resolve_the_current_mesh_targets(
     ]
 
 
-def test_paused_selected_audio_preserves_emotion_edits_and_current_mesh_targets(
+def test_paused_selected_audio_preserves_emotion_edits_and_current_object_targets(
     live_module: tuple[ModuleType, _Scene, list[AppliedFrame]],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -280,7 +283,7 @@ def test_paused_selected_audio_preserves_emotion_edits_and_current_mesh_targets(
     delivered_targets: list[tuple[object, ...]] = []
     monkeypatch.setattr(
         live,
-        "resolve_target_meshes",
+        "resolve_target_objects",
         lambda _settings: current_targets[0],
     )
     monkeypatch.setattr(
@@ -314,6 +317,7 @@ def test_paused_selected_audio_preserves_emotion_edits_and_current_mesh_targets(
 
     scene.audio2face.manual_emotions[0].value = 0.35
     scene.audio2face.manual_emotions[1].value = 0.65
+    scene.audio2face.manual_emotion_pending = True
     controller.tick()
     assert [item.value for item in scene.audio2face.manual_emotions] == [0.35, 0.65]
     current_targets[0] = (second_target,)
@@ -322,6 +326,7 @@ def test_paused_selected_audio_preserves_emotion_edits_and_current_mesh_targets(
     assert delivered_targets == [(first_target,), (second_target,)]
     assert [item.value for item in scene.audio2face.manual_emotions] == [0.35, 0.65]
 
+    scene.audio2face.manual_emotion_pending = False
     scene.audio2face.playback_state = "PLAYING"
     controller.tick()
 

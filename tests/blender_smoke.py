@@ -5,7 +5,7 @@ Run from the project root with::
     blender --factory-startup --background --python tests/blender_smoke.py
 
 This is intentionally a Blender script rather than a pytest test: it validates
-real ``bpy`` RNA registration and multi-mesh ``ShapeKey.value`` assignment.
+real ``bpy`` RNA registration and multi-object ``ShapeKey.value`` assignment.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ from _bpy_restrict_state import RestrictBlend  # noqa: E402
 import audio2face  # noqa: E402
 from audio2face.shape_keys import (  # noqa: E402
     apply_shape_key_frame,
-    resolve_target_meshes,
+    resolve_target_objects,
 )
 from audio2face.live_stream import (  # noqa: E402
     PLAYBACK_POSITION_KEY,
@@ -43,7 +43,8 @@ from audio2face.preferences import A2FAddonPreferences  # noqa: E402
 from audio2face.properties import (  # noqa: E402
     AUDIO2FACE_SETTING_FIELDS,
     A2FSceneSettings,
-    A2FTargetMeshItem,
+    A2FTargetObjectItem,
+    apply_effective_emotions,
     apply_model_schema,
     inference_settings,
 )
@@ -84,16 +85,26 @@ def _make_shape_key_target(
     scene: bpy.types.Scene,
     *,
     object_name: str = "A2FSmokeTarget",
+    object_type: str = "MESH",
     shape_name: str = "jawOpen",
 ) -> bpy.types.Object:
-    mesh = bpy.data.meshes.new(f"{object_name}Mesh")
-    mesh.from_pydata(
-        [(-1.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 0.0, 1.0)],
-        [],
-        [(0, 1, 2)],
-    )
-    mesh.update()
-    target = bpy.data.objects.new(object_name, mesh)
+    if object_type == "MESH":
+        data = bpy.data.meshes.new(f"{object_name}Mesh")
+        data.from_pydata(
+            [(-1.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 0.0, 1.0)],
+            [],
+            [(0, 1, 2)],
+        )
+        data.update()
+    elif object_type in {"CURVE", "SURFACE"}:
+        data = bpy.data.curves.new(f"{object_name}Curve", object_type)
+        spline = data.splines.new("POLY" if object_type == "CURVE" else "NURBS")
+        spline.points.add(2)
+    elif object_type == "LATTICE":
+        data = bpy.data.lattices.new(f"{object_name}Lattice")
+    else:
+        raise ValueError(f"unsupported Shape Key object type {object_type!r}")
+    target = bpy.data.objects.new(object_name, data)
     scene.collection.objects.link(target)
     target.shape_key_add(name="Basis")
     target.shape_key_add(name=shape_name)
@@ -195,7 +206,7 @@ def main() -> None:
             == "DIR_PATH"
         )
         scene_property_names = set(A2FSceneSettings.bl_rna.properties.keys())
-        assert set(A2FTargetMeshItem.__annotations__) == {"object"}
+        assert set(A2FTargetObjectItem.__annotations__) == {"object"}
         missing_scene_property_names = (
             set(A2FSceneSettings.__annotations__) - scene_property_names
         )
@@ -408,10 +419,65 @@ def main() -> None:
             inference_settings(settings)["audio2emotion"]["preferred_emotion"]
             is None
         )
+        for playback_state in ("PLAYING", "PAUSED"):
+            settings.playback_state = playback_state
+            apply_effective_emotions(
+                settings,
+                ("Neutral", "Joy"),
+                (0.2, 0.8),
+            )
+            assert settings.manual_emotion_pending is False
+            settings.manual_emotions[1].value = 0.35
+            assert settings.manual_emotion_pending is True
+            apply_effective_emotions(
+                settings,
+                ("Neutral", "Joy"),
+                (0.6, 0.4),
+            )
+            _assert_close(
+                settings.manual_emotions[1].value,
+                0.35,
+                label=f"{playback_state} authored Joy",
+            )
+            assert bpy.ops.a2f.load_preferred_emotion() == {"FINISHED"}
+            assert settings.manual_emotion_pending is False
+            _assert_close(
+                settings.preferred_emotions[1].value,
+                0.35,
+                label=f"{playback_state} preferred Joy",
+            )
+            apply_effective_emotions(
+                settings,
+                ("Neutral", "Joy"),
+                (0.7, 0.3),
+            )
+            _assert_close(
+                settings.manual_emotions[1].value,
+                0.3,
+                label=f"{playback_state} released Joy",
+            )
+            assert settings.playback_state == playback_state
+            assert bpy.ops.a2f.clear_preferred_emotion() == {"FINISHED"}
+        settings.playback_state = "IDLE"
 
         extra_target = _make_shape_key_target(
             scene,
             object_name="A2FSmokeExtraTarget",
+        )
+        curve_target = _make_shape_key_target(
+            scene,
+            object_name="A2FSmokeCurveTarget",
+            object_type="CURVE",
+        )
+        surface_target = _make_shape_key_target(
+            scene,
+            object_name="A2FSmokeSurfaceTarget",
+            object_type="SURFACE",
+        )
+        lattice_target = _make_shape_key_target(
+            scene,
+            object_name="A2FSmokeLatticeTarget",
+            object_type="LATTICE",
         )
         linked_target = bpy.data.objects.new("A2FSmokeLinkedTarget", target.data)
         scene.collection.objects.link(linked_target)
@@ -423,22 +489,36 @@ def main() -> None:
         )
         plain_target = bpy.data.objects.new("A2FSmokePlainTarget", plain_mesh)
         scene.collection.objects.link(plain_target)
+        unsupported_target = bpy.data.objects.new("A2FSmokeUnsupportedTarget", None)
+        scene.collection.objects.link(unsupported_target)
         bpy.ops.object.select_all(action="DESELECT")
-        target.select_set(True)
-        extra_target.select_set(True)
-        linked_target.select_set(True)
-        plain_target.select_set(True)
+        unsupported_target.select_set(True)
+        bpy.context.view_layer.objects.active = unsupported_target
+        assert not bpy.ops.a2f.add_selected_targets.poll()
+
+        bpy.ops.object.select_all(action="DESELECT")
+        expected_targets = {
+            target,
+            extra_target,
+            curve_target,
+            surface_target,
+            lattice_target,
+            linked_target,
+            plain_target,
+        }
+        for selected_target in (*expected_targets, unsupported_target):
+            selected_target.select_set(True)
         bpy.context.view_layer.objects.active = target
         assert bpy.ops.a2f.add_selected_targets() == {"FINISHED"}
-        selected_targets = {item.object for item in settings.target_meshes}
-        assert selected_targets == {target, extra_target, linked_target, plain_target}
+        selected_targets = {item.object for item in settings.target_objects}
+        assert selected_targets == expected_targets
         primary_vertices = [tuple(vertex.co) for vertex in target.data.vertices]
         extra_vertices = [tuple(vertex.co) for vertex in extra_target.data.vertices]
 
-        subscriptions = resolve_target_meshes(settings)
-        # Every mesh remains subscribed without Shape Key inspection; shared
-        # Key datablocks are deduplicated only when a frame is delivered.
-        assert len(subscriptions) == 4
+        subscriptions = resolve_target_objects(settings)
+        # Every supported object remains subscribed without Shape Key inspection;
+        # shared Key datablocks are deduplicated only when a frame is delivered.
+        assert len(subscriptions) == len(expected_targets)
         streamed_values = [0.0] * len(MODEL_CHANNELS)
         streamed_values[MODEL_CHANNELS.index("jawOpen")] = 0.625
         apply_shape_key_frame(
@@ -446,21 +526,19 @@ def main() -> None:
             tuple(MODEL_CHANNELS),
             tuple(streamed_values),
         )
-        _assert_close(
-            target.data.shape_keys.key_blocks["jawOpen"].value,
-            0.625,
-            label="primary streamed jawOpen",
-        )
-        _assert_close(
-            extra_target.data.shape_keys.key_blocks["jawOpen"].value,
-            0.625,
-            label="extra streamed jawOpen",
-        )
-        _assert_close(
-            linked_target.data.shape_keys.key_blocks["jawOpen"].value,
-            0.625,
-            label="linked streamed jawOpen",
-        )
+        for keyed_target in (
+            target,
+            extra_target,
+            curve_target,
+            surface_target,
+            lattice_target,
+            linked_target,
+        ):
+            _assert_close(
+                keyed_target.data.shape_keys.key_blocks["jawOpen"].value,
+                0.625,
+                label=f"{keyed_target.name} streamed jawOpen",
+            )
         apply_shape_key_frame(
             subscriptions,
             tuple(MODEL_CHANNELS),
@@ -498,16 +576,19 @@ def main() -> None:
                 streamed_frame,
                 [0.25, 0.75],
             )
-            _assert_close(
-                target.data.shape_keys.key_blocks["jawOpen"].value,
-                0.375,
-                label="primary live-stream jawOpen",
-            )
-            _assert_close(
-                extra_target.data.shape_keys.key_blocks["jawOpen"].value,
-                0.375,
-                label="extra live-stream jawOpen",
-            )
+            for keyed_target in (
+                target,
+                extra_target,
+                curve_target,
+                surface_target,
+                lattice_target,
+                linked_target,
+            ):
+                _assert_close(
+                    keyed_target.data.shape_keys.key_blocks["jawOpen"].value,
+                    0.375,
+                    label=f"{keyed_target.name} live-stream jawOpen",
+                )
             _assert_close(settings.stream_time, 0.0, label="negative stream time clamp")
             _assert_close(
                 settings.manual_emotions[0].value,

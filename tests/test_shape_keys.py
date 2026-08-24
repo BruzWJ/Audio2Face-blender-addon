@@ -12,15 +12,26 @@ from audio2face.frame_stream import sample_linear
 
 class _ShapeKey:
     def __init__(self) -> None:
-        self.value = 0.0
+        self._value = 0.0
+        self.write_count = 0
+
+    @property
+    def value(self) -> float:
+        return self._value
+
+    @value.setter
+    def value(self, value: float) -> None:
+        self._value = value
+        self.write_count += 1
 
 
 class _ShapeKeys:
-    def __init__(self) -> None:
+    def __init__(self, pointer: int | None = None) -> None:
         self.key_blocks = {"jawOpen": _ShapeKey()}
+        self.pointer = pointer
 
     def as_pointer(self) -> int:
-        return id(self)
+        return id(self) if self.pointer is None else self.pointer
 
 
 @pytest.fixture
@@ -66,32 +77,58 @@ def test_output_channels_require_exact_json_array_of_52_unique_names(
         shape_keys_module.validate_output_channels(channels)
 
 
-def test_all_registered_meshes_subscribe_and_missing_objects_are_ignored(
+def test_frame_writes_each_distinct_shape_key_datablock_once(
     shape_keys_module: ModuleType,
 ) -> None:
-    first_target = SimpleNamespace(
-        type="MESH",
-        data=SimpleNamespace(shape_keys=None),
-        as_pointer=lambda: 1,
+    shared = _ShapeKeys(pointer=1)
+    distinct = _ShapeKeys(pointer=2)
+    targets = (
+        SimpleNamespace(data=SimpleNamespace(shape_keys=shared)),
+        SimpleNamespace(data=SimpleNamespace(shape_keys=shared)),
+        SimpleNamespace(data=SimpleNamespace(shape_keys=distinct)),
     )
-    second_target = SimpleNamespace(
-        type="MESH",
-        data=SimpleNamespace(shape_keys=None),
-        as_pointer=lambda: 2,
+
+    shape_keys_module.apply_shape_key_frame(targets, ("jawOpen",), (0.625,))
+
+    assert shared.key_blocks["jawOpen"].value == pytest.approx(0.625)
+    assert shared.key_blocks["jawOpen"].write_count == 1
+    assert distinct.key_blocks["jawOpen"].value == pytest.approx(0.625)
+    assert distinct.key_blocks["jawOpen"].write_count == 1
+
+
+def test_resolver_accepts_exact_shape_key_capable_object_types(
+    shape_keys_module: ModuleType,
+) -> None:
+    supported = tuple(
+        SimpleNamespace(
+            type=object_type,
+            data=SimpleNamespace(shape_keys=None),
+            as_pointer=lambda pointer=pointer: pointer,
+        )
+        for pointer, object_type in enumerate(
+            ("MESH", "CURVE", "SURFACE", "LATTICE"),
+            start=1,
+        )
+    )
+    unsupported = SimpleNamespace(
+        type="EMPTY",
+        data=SimpleNamespace(shape_keys=_ShapeKeys()),
+        as_pointer=lambda: 5,
     )
     settings = SimpleNamespace(
-        target_meshes=[
-            SimpleNamespace(object=first_target),
+        target_objects=[
+            *(SimpleNamespace(object=target) for target in supported),
             SimpleNamespace(object=None),
-            SimpleNamespace(object=second_target),
+            SimpleNamespace(object=supported[0]),
+            SimpleNamespace(object=unsupported),
         ]
     )
 
-    subscriptions = shape_keys_module.resolve_target_meshes(settings)
+    subscriptions = shape_keys_module.resolve_target_objects(settings)
     shape_keys_module.apply_shape_key_frame(
         subscriptions,
         tuple(f"channel{index}" for index in range(52)),
         (0.0,) * 52,
     )
 
-    assert subscriptions == (first_target, second_target)
+    assert subscriptions == supported

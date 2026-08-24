@@ -3,7 +3,7 @@ schema_version = "1.0.0"
 id = "audio2face"
 version = "2026.8.24"
 name = "Audio2Face"
-tagline = "Drive target meshes with GPU-generated ARKit-52 values"
+tagline = "Drive Shape Key objects with GPU-generated ARKit-52 values"
 maintainer = "x.com/BruzWJ"
 type = "add-on"
 

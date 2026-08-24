@@ -10,8 +10,8 @@ obtained separately.
 
 The extension produces 52-channel ARKit coefficients from a selected WAV or
 incremental mono float32 PCM and drives existing Shape Key `value` properties
-on listed mesh targets. Inference starts automatically with WAV playback or
-incoming PCM.
+on listed Mesh, Curve, Surface, and Lattice objects. Inference starts
+automatically with WAV playback or incoming PCM.
 
 ## Requirements
 
@@ -105,7 +105,7 @@ Get Extensions**, find Audio2Face, open the down-arrow menu on its card, and
 choose **Uninstall**. Blender disables the add-on before removing its package
 and bundled runtime, so normal worker, stream, and playback cleanup runs. The
 selected external model repositories and their `network.trt` engines remain in
-place, as do selected WAV files, `.blend` files, meshes, and shared NVIDIA
+place, as do selected WAV files, `.blend` files, object data, and shared NVIDIA
 driver caches.
 
 ## Workflow
@@ -118,7 +118,8 @@ driver caches.
 3. In Selected WAV mode, choose a WAV. In Stream mode, a Blender integration
    supplies live mono f32le PCM through
    [`audio2face.streaming`](audio2face/streaming.py).
-4. Optionally select mesh objects and click **Add Selected Meshes**.
+4. Optionally select Mesh, Curve, Surface, or Lattice objects and click
+   **Add Selected Objects**.
 5. Click **Start Worker**. Blender launches the verified package-local worker,
    negotiates the protocol, and loads both selected models.
 6. The emotion sliders remain available in both modes. Leave **Auto
@@ -143,15 +144,16 @@ Selected WAV playback or an external PCM stream is active. **Start Worker** and
 **Stop Worker** control the GPU/model process lifecycle; audio playback and PCM
 arrival control inference within that lifecycle.
 
-## Mesh targets and channel delivery
+## Shape Key targets and channel delivery
 
-Every mesh in the target list receives the model channel stream, with no Shape
-Key admission check. At each frame, Blender uses each exact model-provided
-channel name to look up a Shape Key on each listed target.
-The target collection is resolved again for every delivered frame, so adding
-or removing a mesh takes effect on the next frame without restarting playback
-or inference. An empty list simply suppresses Blender writes; it does not stop
-the audio or worker stream.
+Every Mesh, Curve, Surface, or Lattice in the target list receives the model
+channel stream, with no existing-Shape-Key admission check. These are all
+object types on which Blender 5.2 supports Shape Keys. At each frame, Blender
+uses each exact model-provided channel name to look up a Shape Key on each
+listed target. The target collection is resolved again for every delivered
+frame, so adding or removing an object takes effect on the next frame without
+restarting playback or inference. An empty list simply suppresses Blender
+writes; it does not stop the audio or worker stream.
 If that key exists, its value is assigned; if it does not, that channel is
 skipped for that target. Names are never translated or remapped, and there is
 no per-target multiplier.
@@ -159,17 +161,17 @@ no per-target multiplier.
 The loaded model supplies the exact ordered 52-channel list. A target can
 contain all, some, or none of those Shape Keys. Several objects may share one
 Shape Key datablock; delivery writes that shared datablock once per frame, so
-linked objects reflect the same values. Use single-user mesh data when objects
-need independent values.
+linked objects reflect the same values. Use single-user object data when
+objects need independent values.
 
-The selected Blender mesh does not need the Audio2Face reference topology.
+The selected Blender object does not need the Audio2Face reference topology.
 The default Audio2Face-3D v3.0 model repository carries its own
 identity-specific 24,002-vertex neutral basis and 52 pose bases. Inside the
 worker, NVIDIA's GPU blendshape solver converts the model's raw geometry output
 against that internal basis into 52 scalar coefficients. Only those named
 coefficients cross into Blender, where matching target Shape Keys receive the
 values and absent names are skipped. The model basis is never used to deform a
-Blender mesh directly.
+Blender target directly.
 
 ## Audio modes and playback
 

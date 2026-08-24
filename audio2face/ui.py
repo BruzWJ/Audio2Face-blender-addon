@@ -97,7 +97,7 @@ def _draw_model_tuning(
             controls.prop(settings, name, slider=slider)
 
 
-class A2F_UL_target_meshes(bpy.types.UIList):
+class A2F_UL_target_objects(bpy.types.UIList):
     def draw_item(
         self,
         _context: bpy.types.Context,
@@ -111,10 +111,10 @@ class A2F_UL_target_meshes(bpy.types.UIList):
         _flt_flag: int = 0,
     ) -> None:
         target = item.object
-        layout.label(
-            text=target.name if target is not None else "Missing Mesh",
-            icon="OUTLINER_OB_MESH" if target is not None else "ERROR",
-        )
+        if target is None:
+            layout.label(text="Missing Object", icon="ERROR")
+        else:
+            layout.label(text=target.name, icon_value=layout.icon(target))
 
 
 class A2F_PT_main(bpy.types.Panel):
@@ -179,22 +179,22 @@ class A2F_PT_main(bpy.types.Panel):
             runtime_box.label(text="Configure in Add-on Preferences", icon="PREFERENCES")
 
         target_box = layout.box()
-        target_box.label(text="Target Meshes", icon="SHAPEKEY_DATA")
-        if not settings.target_meshes:
+        target_box.label(text="Target Objects", icon="SHAPEKEY_DATA")
+        if not settings.target_objects:
             target_box.operator(
                 "a2f.add_selected_targets",
-                text="Add Selected Meshes",
+                text="Add Selected Objects",
                 icon="ADD",
             )
         else:
             target_row = target_box.row()
             target_row.template_list(
-                "A2F_UL_target_meshes",
+                "A2F_UL_target_objects",
                 "",
                 settings,
-                "target_meshes",
+                "target_objects",
                 settings,
-                "target_mesh_index",
+                "target_object_index",
                 rows=3,
             )
             target_controls = target_row.column(align=True)
@@ -275,4 +275,4 @@ class A2F_PT_main(bpy.types.Panel):
                     slider=True,
                 )
 
-CLASSES = (A2F_UL_target_meshes, A2F_PT_main)
+CLASSES = (A2F_UL_target_objects, A2F_PT_main)

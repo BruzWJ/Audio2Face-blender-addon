@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 
 
 OUTPUT_CHANNEL_COUNT = 52
+SHAPE_KEY_OBJECT_TYPES = frozenset({"MESH", "CURVE", "SURFACE", "LATTICE"})
 
 
 class ShapeKeyStreamError(ValueError):
@@ -43,14 +44,20 @@ def validate_output_channels(channels: Any) -> tuple[str, ...]:
     return tuple(validated)
 
 
-def resolve_target_meshes(
+def supports_shape_keys(target: bpy.types.Object) -> bool:
+    """Return whether Blender 5.2 supports Shape Keys on this object type."""
+
+    return target.type in SHAPE_KEY_OBJECT_TYPES
+
+
+def resolve_target_objects(
     settings: A2FSceneSettings,
 ) -> tuple[bpy.types.Object, ...]:
-    """Resolve the meshes currently listed as live frame targets."""
+    """Resolve the Shape Key-capable objects listed as live frame targets."""
 
     targets: list[bpy.types.Object] = []
     seen: set[int] = set()
-    for item in settings.target_meshes:
+    for item in settings.target_objects:
         target = item.object
         if target is None:
             continue
@@ -58,7 +65,7 @@ def resolve_target_meshes(
             pointer = target.as_pointer()
         except ReferenceError:
             continue
-        if pointer in seen or target.type != "MESH":
+        if pointer in seen or not supports_shape_keys(target):
             continue
         seen.add(pointer)
         targets.append(target)

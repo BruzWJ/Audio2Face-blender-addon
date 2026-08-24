@@ -6,6 +6,8 @@ import hashlib
 import json
 import math
 import struct
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 import bpy
 from bpy.props import (
@@ -18,7 +20,11 @@ from bpy.props import (
     StringProperty,
 )
 
-from .shape_keys import ShapeKeyStreamError, validate_output_channels
+from .shape_keys import (
+    ShapeKeyStreamError,
+    supports_shape_keys,
+    validate_output_channels,
+)
 
 
 STATUS_ITEMS = (
@@ -95,7 +101,24 @@ _AUDIO2FACE_FLOAT_RANGES = {
     "left_eye_rot_y_offset": (-10.0, 10.0),
 }
 
-_effective_emotion_write_depth = 0
+_internal_emotion_write_depth = 0
+
+
+@contextmanager
+def _internal_emotion_write() -> Iterator[None]:
+    global _internal_emotion_write_depth
+    _internal_emotion_write_depth += 1
+    try:
+        yield
+    finally:
+        _internal_emotion_write_depth -= 1
+
+
+def _update_scene(context: bpy.types.Context) -> bpy.types.Scene | None:
+    scene = getattr(context, "scene", None)
+    if scene is None or not hasattr(scene, "audio2face"):
+        return None
+    return scene
 
 
 def _inference_setting_updated(
@@ -104,14 +127,46 @@ def _inference_setting_updated(
 ) -> None:
     """Refresh inference from one shared RNA update callback."""
 
-    if _effective_emotion_write_depth:
+    if _internal_emotion_write_depth:
         return
-    scene = getattr(context, "scene", None)
-    if scene is None or not hasattr(scene, "audio2face"):
+    scene = _update_scene(context)
+    if scene is None:
         return
     from .runtime import get_controller
 
     get_controller().refresh_inference_settings(scene)
+
+
+def _manual_emotion_updated(
+    _emotion: bpy.types.PropertyGroup,
+    context: bpy.types.Context,
+) -> None:
+    """Retain a user-authored emotion vector until it is loaded or cleared."""
+
+    if _internal_emotion_write_depth:
+        return
+    if not _emotion.path_from_id().startswith("audio2face.manual_emotions["):
+        return
+    scene = _update_scene(context)
+    if scene is None:
+        return
+    settings = scene.audio2face
+    settings.manual_emotion_pending = True
+    if settings.auto_audio2emotion:
+        return
+    from .runtime import get_controller
+
+    get_controller().refresh_inference_settings(scene)
+
+
+def _auto_audio2emotion_updated(
+    settings: bpy.types.PropertyGroup,
+    context: bpy.types.Context,
+) -> None:
+    """Hand emotion display ownership back when its inference mode changes."""
+
+    settings.manual_emotion_pending = False
+    _inference_setting_updated(settings, context)
 
 
 def _audio_path_updated(
@@ -133,13 +188,21 @@ def _audio_path_updated(
     configure_playback_position(settings, 0.0, duration)
 
 
-class A2FTargetMeshItem(bpy.types.PropertyGroup):
-    """One mesh driven by the model-provided frame stream."""
+def _target_object_poll(
+    _item: bpy.types.PropertyGroup,
+    target: bpy.types.Object,
+) -> bool:
+    return supports_shape_keys(target)
+
+
+class A2FTargetObjectItem(bpy.types.PropertyGroup):
+    """One Shape Key-capable object driven by model output."""
 
     object: PointerProperty(
-        name="Face Mesh",
-        description="Mesh whose Shape Keys receive model output values when available",
+        name="Target Object",
+        description="Object whose Shape Keys receive matching model output values",
         type=bpy.types.Object,
+        poll=_target_object_poll,
     )
 
 
@@ -159,7 +222,7 @@ class A2FEmotionValueItem(bpy.types.PropertyGroup):
         min=0.0,
         max=1.0,
         subtype="FACTOR",
-        update=_inference_setting_updated,
+        update=_manual_emotion_updated,
     )
 
 
@@ -328,9 +391,13 @@ class A2FSceneSettings(bpy.types.PropertyGroup):
         name="Auto Audio2Emotion",
         description="Infer emotion values from the input audio for this operation",
         default=False,
-        update=_inference_setting_updated,
+        update=_auto_audio2emotion_updated,
     )
     manual_emotions: CollectionProperty(type=A2FEmotionValueItem)
+    manual_emotion_pending: BoolProperty(
+        default=False,
+        options={"HIDDEN", "SKIP_SAVE"},
+    )
     preferred_emotions: CollectionProperty(
         type=A2FEmotionValueItem,
         options={"HIDDEN"},
@@ -391,8 +458,8 @@ class A2FSceneSettings(bpy.types.PropertyGroup):
     )
     model_schema_signature: StringProperty(options={"HIDDEN"})
 
-    target_meshes: CollectionProperty(type=A2FTargetMeshItem)
-    target_mesh_index: IntProperty(default=0, min=0)
+    target_objects: CollectionProperty(type=A2FTargetObjectItem)
+    target_object_index: IntProperty(default=0, min=0)
 
     playback_loop: BoolProperty(
         name="Loop",
@@ -567,6 +634,15 @@ def _preferred_emotion_values(settings: A2FSceneSettings) -> dict[str, float]:
     return _emotion_values(settings.preferred_emotions, label="preferred emotion")
 
 
+def _replace_emotion_values(items: object, values: dict[str, float]) -> None:
+    with _internal_emotion_write():
+        items.clear()
+        for name, value in values.items():
+            item = items.add()
+            item.name = name
+            item.value = value
+
+
 def apply_effective_emotions(
     settings: A2FSceneSettings,
     emotion_channels: tuple[str, ...],
@@ -591,13 +667,11 @@ def apply_effective_emotions(
             raise ValueError(f"effective emotion {name!r} must be a finite float")
         displayed.append(min(max(value, 0.0), 1.0))
 
-    global _effective_emotion_write_depth
-    _effective_emotion_write_depth += 1
-    try:
+    if settings.manual_emotion_pending:
+        return
+    with _internal_emotion_write():
         for item, value in zip(settings.manual_emotions, displayed):
             item.value = value
-    finally:
-        _effective_emotion_write_depth -= 1
 
 
 def load_preferred_emotion(settings: A2FSceneSettings) -> None:
@@ -606,17 +680,16 @@ def load_preferred_emotion(settings: A2FSceneSettings) -> None:
     values = _manual_emotion_values(settings)
     if not values:
         raise ValueError("load the Audio2Face model before loading preferred emotion")
-    settings.preferred_emotions.clear()
-    for name, value in values.items():
-        item = settings.preferred_emotions.add()
-        item.name = name
-        item.value = value
+    _replace_emotion_values(settings.preferred_emotions, values)
+    settings.manual_emotion_pending = False
 
 
 def clear_preferred_emotion(settings: A2FSceneSettings) -> None:
     """Unset the preferred emotion snapshot."""
 
-    settings.preferred_emotions.clear()
+    with _internal_emotion_write():
+        settings.preferred_emotions.clear()
+    settings.manual_emotion_pending = False
 
 
 def inference_settings(settings: A2FSceneSettings) -> dict[str, object]:
@@ -691,19 +764,21 @@ def apply_model_schema(
     if not same_schema:
         for name, default in audio2face_defaults.items():
             setattr(settings, name, default)
-        settings.preferred_emotions.clear()
-    settings.manual_emotions.clear()
-    for name, default in emotions:
-        item = settings.manual_emotions.add()
-        item.name = name
-        item.value = preserved_manual[name] if same_schema else default
+        clear_preferred_emotion(settings)
+    _replace_emotion_values(
+        settings.manual_emotions,
+        {
+            name: preserved_manual[name] if same_schema else default
+            for name, default in emotions
+        },
+    )
 
     settings.model_schema_signature = signature
     return channels
 
 
 CLASSES = (
-    A2FTargetMeshItem,
+    A2FTargetObjectItem,
     A2FEmotionValueItem,
     A2FSceneSettings,
 )

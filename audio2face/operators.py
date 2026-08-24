@@ -18,6 +18,7 @@ from .properties import (
     load_preferred_emotion,
 )
 from .runtime import RuntimeController, get_controller
+from .shape_keys import supports_shape_keys
 from .sidecar import Lifecycle, SidecarError
 
 
@@ -124,72 +125,84 @@ class A2F_OT_clear_preferred_emotion(bpy.types.Operator):
 
 class A2F_OT_add_selected_targets(bpy.types.Operator):
     bl_idname = "a2f.add_selected_targets"
-    bl_label = "Add Selected Meshes"
-    bl_description = "Add selected mesh objects to receive Audio2Face Shape Key values"
+    bl_label = "Add Selected Objects"
+    bl_description = "Add selected Shape Key-capable objects as Audio2Face targets"
     bl_options = {"REGISTER", "UNDO"}
 
     @classmethod
     def poll(cls, context: bpy.types.Context) -> bool:
-        has_selected_mesh = any(
-            obj.type == "MESH" for obj in context.selected_objects
+        has_selected_target = any(
+            supports_shape_keys(obj) for obj in context.selected_objects
         )
-        if not has_selected_mesh:
-            cls.poll_message_set("select at least one mesh object")
-        return has_selected_mesh
+        if not has_selected_target:
+            cls.poll_message_set("select a Mesh, Curve, Surface, or Lattice object")
+        return has_selected_target
 
     def execute(self, context: bpy.types.Context) -> set[str]:
         settings = context.scene.audio2face
-        selected = [obj for obj in context.selected_objects if obj.type == "MESH"]
+        selected = [
+            obj for obj in context.selected_objects if supports_shape_keys(obj)
+        ]
         if not selected:
-            self.report({"ERROR"}, "select at least one mesh object")
+            self.report(
+                {"ERROR"},
+                "select a Mesh, Curve, Surface, or Lattice object",
+            )
             return {"CANCELLED"}
 
         last_added_index: int | None = None
         existing = {
             item.object.as_pointer()
-            for item in settings.target_meshes
+            for item in settings.target_objects
             if item.object is not None
         }
         for target in selected:
             if target.as_pointer() in existing:
                 continue
-            item = settings.target_meshes.add()
+            item = settings.target_objects.add()
             item.object = target
             existing.add(target.as_pointer())
-            last_added_index = len(settings.target_meshes) - 1
+            last_added_index = len(settings.target_objects) - 1
         if last_added_index is None:
-            self.report({"INFO"}, "Selected meshes are already targets")
+            self.report({"INFO"}, "Selected objects are already targets")
             return {"FINISHED"}
-        settings.target_mesh_index = last_added_index
-        self.report({"INFO"}, "Added selected meshes as targets")
+        settings.target_object_index = last_added_index
+        self.report({"INFO"}, "Added selected objects as targets")
         return {"FINISHED"}
 
 
 class A2F_OT_remove_target(bpy.types.Operator):
     bl_idname = "a2f.remove_target"
     bl_label = "Remove Target"
-    bl_description = "Stop driving the active mesh by removing it from the target list"
+    bl_description = (
+        "Stop driving the active object by removing it from the target list"
+    )
     bl_options = {"REGISTER", "UNDO"}
 
     @classmethod
     def poll(cls, context: bpy.types.Context) -> bool:
         settings = context.scene.audio2face
-        valid_index = 0 <= settings.target_mesh_index < len(settings.target_meshes)
+        valid_index = (
+            0 <= settings.target_object_index < len(settings.target_objects)
+        )
         if not valid_index:
-            cls.poll_message_set("select a mesh target to remove")
+            cls.poll_message_set("select a target object to remove")
         return valid_index
 
     def execute(self, context: bpy.types.Context) -> set[str]:
         settings = context.scene.audio2face
-        index = settings.target_mesh_index
-        if not 0 <= index < len(settings.target_meshes):
-            self.report({"ERROR"}, "selected mesh target index is invalid")
+        index = settings.target_object_index
+        if not 0 <= index < len(settings.target_objects):
+            self.report({"ERROR"}, "selected target object index is invalid")
             return {"CANCELLED"}
-        settings.target_meshes.remove(index)
-        if settings.target_meshes:
-            settings.target_mesh_index = min(index, len(settings.target_meshes) - 1)
+        settings.target_objects.remove(index)
+        if settings.target_objects:
+            settings.target_object_index = min(
+                index,
+                len(settings.target_objects) - 1,
+            )
         else:
-            settings.target_mesh_index = 0
+            settings.target_object_index = 0
         return {"FINISHED"}
 
 

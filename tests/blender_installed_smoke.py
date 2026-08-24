@@ -86,7 +86,7 @@ def main() -> None:
         == "DIR_PATH"
     )
     scene_property_names = set(properties.A2FSceneSettings.bl_rna.properties.keys())
-    assert set(properties.A2FTargetMeshItem.__annotations__) == {"object"}
+    assert set(properties.A2FTargetObjectItem.__annotations__) == {"object"}
     missing_scene_property_names = (
         set(properties.A2FSceneSettings.__annotations__) - scene_property_names
     )

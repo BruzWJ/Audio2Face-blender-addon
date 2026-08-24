@@ -45,7 +45,7 @@ The extension owns:
   shutdown;
 - Selected WAV playback with an absolute-time seek slider, looping, and
   external PCM ingress;
-- Audio2Face and emotion controls and the registered target-mesh list;
+- Audio2Face and emotion controls and the registered target-object list;
 - strict protocol, model-schema, and stream-frame validation; and
 - audio-clocked delivery of coefficient values to Shape Keys on Blender's main
   thread.
@@ -56,23 +56,26 @@ producers advance by the worker's per-chunk dequeue-credit events, so seek prero
 cannot outrun inference. A registered Blender timer drains the queues and
 performs RNA and Shape Key updates on the main thread.
 
-### Mesh targets
+### Shape Key targets
 
-**Add Selected Meshes** accepts any selected mesh object without inspecting
-Shape Keys or topology. At delivery time, Blender iterates the model's
+**Add Selected Objects** accepts Blender Mesh, legacy Curve, Surface, and
+Lattice objects without requiring existing Shape Keys. These are the exact
+object types on which Blender 5.2 supports Shape Keys; Text, Hair Curves, Point
+Cloud, Grease Pencil, and other object types are excluded. At delivery time,
+Blender iterates the model's
 negotiated channel list and requests a Shape Key with each exact model-provided
 name from every listed target. Existing keys receive the frame values and
 absent keys are skipped.
 
 List membership is the complete delivery state and is resolved again for every
-delivered frame; target subscriptions are not cached. Adding or removing a mesh
-during playback therefore affects the next delivered frame. An empty list is a
-valid no-subscriber state: inference and audio continue, and a later-added mesh
-receives the next frame.
+delivered frame; target subscriptions are not cached. Adding or removing an
+object during playback therefore affects the next delivered frame. An empty
+list is a valid no-subscriber state: inference and audio continue, and a
+later-added object receives the next frame.
 
 Objects sharing one Shape Key datablock are deduplicated for each frame. Every
 linked object using that datablock reflects the assigned values; independent
-motion requires single-user mesh data.
+motion requires single-user object data.
 
 ## Geometry-to-ARKit solve
 
@@ -90,10 +93,10 @@ channels in that same list. Only timestamped scalar weights cross the JSONL
 boundary. Raw geometry, the 24,002-vertex basis, jaw transforms, and eye
 rotations never enter Blender.
 
-Consequently, a target mesh may have different vertex count and topology and
-may contain all, some, or none of the reported Shape Keys. Topology affects
-only how the artist authored those local Shape Keys; it is not an input to the
-Audio2Face-to-ARKit solve.
+Consequently, a target object may use geometry unrelated to the Audio2Face
+reference mesh and may contain all, some, or none of the reported Shape Keys.
+Its local geometry affects only how the artist authored those Shape Keys; it is
+not an input to the Audio2Face-to-ARKit solve.
 
 ## Audio lifecycles
 
