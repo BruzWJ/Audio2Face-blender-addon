@@ -114,6 +114,25 @@ def _inference_setting_updated(
     get_controller().refresh_inference_settings(scene)
 
 
+def _audio_path_updated(
+    settings: bpy.types.PropertyGroup,
+    _context: bpy.types.Context,
+) -> None:
+    """Make the selected WAV own its persistent seek slider."""
+
+    from .live_stream import clear_playback_position, configure_playback_position
+    from .wav_stream import WavStreamError, wav_duration_seconds
+
+    clear_playback_position(settings)
+    if not settings.audio_path:
+        return
+    try:
+        duration = wav_duration_seconds(settings.audio_path)
+    except (OSError, WavStreamError):
+        return
+    configure_playback_position(settings, 0.0, duration)
+
+
 class A2FTargetMeshItem(bpy.types.PropertyGroup):
     """One mesh driven by the model-provided frame stream."""
 
@@ -158,6 +177,7 @@ class A2FSceneSettings(bpy.types.PropertyGroup):
         name="Speech WAV",
         description="WAV played and inferred in Selected mode",
         subtype="FILE_PATH",
+        update=_audio_path_updated,
     )
     input_strength: FloatProperty(
         name="Input Strength",
@@ -395,9 +415,6 @@ class A2FSceneSettings(bpy.types.PropertyGroup):
         ),
         default="IDLE",
         options={"HIDDEN", "SKIP_SAVE"},
-    )
-    playback_duration: FloatProperty(
-        name="Playback Duration", default=0.0, min=0.0, unit="TIME", options={"SKIP_SAVE"}
     )
     stream_time: FloatProperty(
         name="Stream Time", default=0.0, min=0.0, unit="TIME", options={"SKIP_SAVE"}

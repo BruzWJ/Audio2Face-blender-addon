@@ -167,12 +167,62 @@ def test_runtime_status_box_uses_the_persistence_gate() -> None:
 
 
 def test_playback_ui_uses_an_editable_absolute_time_slider() -> None:
-    assert (
-        'seek_row.prop(settings, PLAYBACK_POSITION_PATH, text="", slider=True)'
-        in UI_SOURCE
+    assert re.search(
+        r'playback_box\.prop\(\s*settings,\s*PLAYBACK_POSITION_PATH,'
+        r'\s*text="",\s*slider=True,?\s*\)',
+        UI_SOURCE,
     )
     assert "playback_progress" not in UI_SOURCE
+    assert "playback_duration" not in UI_SOURCE
+    assert "playback_position(settings)" not in UI_SOURCE
+    assert "seek_row.enabled" not in UI_SOURCE
     assert ".progress(" not in UI_SOURCE
+
+
+def test_input_mode_switch_is_never_disabled() -> None:
+    assert 'input_box.prop(settings, "input_mode", expand=True)' in UI_SOURCE
+    assert "mode_row" not in UI_SOURCE
+
+
+def test_audio_path_update_replaces_the_selected_media_slider(
+    properties_module: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[object, ...]] = []
+    live_stream = ModuleType("audio2face.live_stream")
+    live_stream.clear_playback_position = (  # type: ignore[attr-defined]
+        lambda settings: calls.append(("clear", settings))
+    )
+    live_stream.configure_playback_position = (  # type: ignore[attr-defined]
+        lambda settings, position, duration: calls.append(
+            ("configure", settings, position, duration)
+        )
+    )
+    wav_stream = ModuleType("audio2face.wav_stream")
+    wav_stream.WavStreamError = ValueError  # type: ignore[attr-defined]
+    wav_stream.wav_duration_seconds = (  # type: ignore[attr-defined]
+        lambda path: {"first.wav": 2.0, "second.wav": 3.5}[path]
+    )
+    monkeypatch.setitem(sys.modules, live_stream.__name__, live_stream)
+    monkeypatch.setitem(sys.modules, wav_stream.__name__, wav_stream)
+    settings = SimpleNamespace(audio_path="first.wav")
+
+    properties_module._audio_path_updated(settings, SimpleNamespace())
+    settings.audio_path = "second.wav"
+    properties_module._audio_path_updated(settings, SimpleNamespace())
+    settings.audio_path = ""
+    properties_module._audio_path_updated(settings, SimpleNamespace())
+
+    assert calls == [
+        ("clear", settings),
+        ("configure", settings, 0.0, 2.0),
+        ("clear", settings),
+        ("configure", settings, 0.0, 3.5),
+        ("clear", settings),
+    ]
+    assert "update=_audio_path_updated" in (
+        properties_module.A2FSceneSettings.__annotations__["audio_path"]
+    )
 
 
 def test_shared_update_callback_refreshes_the_context_scene(

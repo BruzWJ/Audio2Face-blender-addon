@@ -19,7 +19,6 @@ class _Settings:
     stream_time: float = 7.0
     prediction_delay: float = 0.0
     playback_state: str = "IDLE"
-    playback_duration: float = 0.0
     status: str = "MODEL_READY"
     status_message: str = ""
     custom_properties: dict[str, object] = field(default_factory=dict)
@@ -45,7 +44,10 @@ class _Settings:
 
     def id_properties_ui(self, key: str) -> object:
         metadata = self.custom_property_ui.setdefault(key, {})
-        return SimpleNamespace(update=lambda **values: metadata.update(values))
+        return SimpleNamespace(
+            update=lambda **values: metadata.update(values),
+            as_dict=lambda: metadata.copy(),
+        )
 
 
 @dataclass
@@ -531,7 +533,6 @@ def test_selected_audio_waits_for_worker_terminal_after_device_stops(
     handle = Handle()
     controller._handle = handle
     controller._duration = 2.0
-    scene.audio2face.playback_duration = 2.0
     live.configure_playback_position(scene.audio2face, 0.0, 2.0)
 
     assert controller.tick() is True
@@ -546,6 +547,8 @@ def test_selected_audio_waits_for_worker_terminal_after_device_stops(
     assert controller.active is False
     assert handle.stop_calls == 1
     assert stopped == [True]
+    assert live.playback_position(scene.audio2face) == pytest.approx(2.0)
+    assert live.playback_position_maximum(scene.audio2face) == pytest.approx(2.0)
 
 
 def test_boolean_handle_status_does_not_overwrite_paused_state(
@@ -657,7 +660,6 @@ def test_seek_stop_preserves_requested_playback_presentation(
 
     assert controller.active is False
     assert scene.audio2face.playback_state == "PAUSED"
-    assert scene.audio2face.playback_duration == 2.0
     assert live.playback_position(scene.audio2face) == 1.25
     assert scene.audio2face.custom_property_ui[live.PLAYBACK_POSITION_KEY] == {
         "min": 0.0,

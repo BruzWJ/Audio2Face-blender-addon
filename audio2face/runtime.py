@@ -19,7 +19,6 @@ import bpy
 
 from .live_stream import (
     LiveStreamError,
-    clear_playback_position,
     get_live_stream_controller,
     unregister_live_stream,
     validate_stream_frame,
@@ -1126,6 +1125,65 @@ class RuntimeController:
                 cancel_worker=True,
             )
 
+    def _request_stream_cancel(
+        self,
+        scene: bpy.types.Scene,
+        stream: ActiveStream,
+    ) -> None:
+        """Cancel one media stream without unloading its model."""
+
+        stream.stop_requested = True
+        stream.refresh_deadline = None
+        if stream.wav_source is not None:
+            stream.wav_source.cancel.set()
+        try:
+            self._request(
+                scene,
+                "cancel",
+                {"operation_id": stream.operation_id},
+                model_signature=None,
+                operation_id=stream.operation_id,
+            )
+        except Exception:
+            stream.stop_requested = False
+            raise
+
+    def _reconcile_input_media(self) -> None:
+        """Detach media that no longer matches its owning scene selection."""
+
+        stream = self.active_stream
+        if stream is None:
+            return
+        scene = self._scene(stream.scene_name)
+        if scene is None or not scene.is_editable:
+            return
+        stream_mode = "SELECTED" if stream.wav_source is not None else "STREAM"
+        media_matches = scene.audio2face.input_mode == stream_mode
+        if media_matches and stream.wav_source is not None:
+            media_matches = Path(scene.audio2face.audio_path) == stream.wav_source.audio_path
+        if media_matches:
+            return
+
+        get_live_stream_controller().stop(reset=False, notify=False)
+        if stream.worker_ended:
+            self._release_active_stream(stream.operation_id)
+            if scene.audio2face.status not in {"ERROR", "IDLE", "STOPPING"}:
+                self._set_status(
+                    scene,
+                    "MODEL_READY",
+                    "Input media detached; model remains ready",
+                )
+            return
+        if stream.stop_requested:
+            return
+
+        try:
+            self._request_stream_cancel(scene, stream)
+        except (OSError, SidecarError, ValueError) as exc:
+            self._reject_worker_contract(f"could not detach input media: {exc}")
+            return
+        self._set_status(scene, "STREAM_ENDING", "Switching input media")
+
     def _clear_pcm_ingress(self) -> None:
         with self.pending_lock:
             self.pcm_ingress = None
@@ -1146,11 +1204,6 @@ class RuntimeController:
         settings = scene.audio2face
         if settings.input_mode != "STREAM":
             self._clear_pcm_ingress()
-            self._set_status(
-                scene,
-                "ERROR",
-                "switch Input Mode to Stream before sending live PCM audio",
-            )
             return
 
         stream = self.active_stream
@@ -1173,7 +1226,17 @@ class RuntimeController:
                 return
             return
 
-        if stream.scene_name != scene_name or stream.wav_source is not None:
+        if stream.scene_name != scene_name:
+            self._clear_pcm_ingress()
+            self._set_status(
+                scene,
+                "ERROR",
+                "live PCM cannot run while another audio operation is active",
+            )
+            return
+        if stream.stop_requested:
+            return
+        if stream.wav_source is not None:
             self._clear_pcm_ingress()
             self._set_status(
                 scene,
@@ -1362,20 +1425,10 @@ class RuntimeController:
         """Cancel one selected-WAV stream and retain the loaded GPU model."""
 
         self.selected_restart = (scene.name, position, paused)
-        stream.stop_requested = True
-        if stream.wav_source is not None:
-            stream.wav_source.cancel.set()
         try:
-            self._request(
-                scene,
-                "cancel",
-                {"operation_id": stream.operation_id},
-                model_signature=None,
-                operation_id=stream.operation_id,
-            )
+            self._request_stream_cancel(scene, stream)
         except Exception:
             self.selected_restart = None
-            stream.stop_requested = False
             raise
         live = get_live_stream_controller()
         try:
@@ -1435,6 +1488,10 @@ class RuntimeController:
         if scene is None or not scene.is_editable:
             self.selected_restart = None
             return
+        if scene.audio2face.input_mode != "SELECTED":
+            self.selected_restart = None
+            scene.audio2face.playback_state = "IDLE"
+            return
         if self.active_stream is not None:
             return
         with self.pending_lock:
@@ -1447,10 +1504,7 @@ class RuntimeController:
         try:
             self.start_selected_audio(scene, position=position, paused=paused)
         except (OSError, SidecarError, ValueError) as exc:
-            settings = scene.audio2face
-            settings.playback_state = "IDLE"
-            settings.playback_duration = 0.0
-            clear_playback_position(settings)
+            scene.audio2face.playback_state = "IDLE"
             self._set_status(scene, "ERROR", str(exc))
 
     def _fail_stream(
@@ -1951,6 +2005,7 @@ class RuntimeController:
 
     def poll(self) -> None:
         self._poll_optimization_events()
+        self._reconcile_input_media()
         self._poll_stream_source_events()
         self._poll_pcm_ingress()
         self.client.tick()

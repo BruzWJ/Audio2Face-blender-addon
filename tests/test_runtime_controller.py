@@ -67,7 +67,6 @@ class _Settings:
         self.input_mode = "SELECTED"
         self.playback_loop = False
         self.playback_state = "PLAYING"
-        self.playback_duration = 2.0
         self.prediction_delay = 0.0
         self.audio_path = ""
         self.stream_time = 0.0
@@ -1222,6 +1221,185 @@ def test_selected_audio_seek_preserves_ui_and_cancels_only_the_stream(
     assert stream.stop_requested is True
     assert requests == [("cancel", {"operation_id": "stream-1"})]
     assert settings.status == "STREAM_ENDING"
+
+
+def test_selected_to_stream_detaches_wav_then_uses_queued_pcm(
+    runtime_module: tuple[ModuleType, ModuleType],
+) -> None:
+    runtime, bpy = runtime_module
+    scene, settings = _local_scene(bpy)
+    settings.input_mode = "STREAM"
+    settings.status = "STREAMING"
+    controller = runtime.RuntimeController()
+    controller._require_worker_ready = lambda: None
+    controller.client._state = runtime.Lifecycle.RUNNING
+    spec = SimpleNamespace(
+        audio2face_model=Path("/models/audio2face/model.json"),
+        audio2emotion_model=Path("/models/audio2emotion/model.json"),
+    )
+    signature = controller._model_signature(spec)
+    controller.loaded_signature = signature
+    controller.model_sample_rate = 16_000
+    controller.model_schema = _model_schema()
+    controller.setup_snapshot = lambda: SimpleNamespace(
+        require_inference_spec=lambda: spec
+    )
+    selected = _activate_stream(
+        runtime,
+        controller,
+        scene,
+        audio_path=Path("voice.wav"),
+    )
+    requests: list[tuple[str, dict[str, object]]] = []
+
+    def request(method: str, params: dict[str, object]) -> str:
+        requests.append((method, params))
+        return f"request-{len(requests)}"
+
+    controller.client.request = request
+    controller._reconcile_input_media()
+
+    assert requests == [("cancel", {"operation_id": "stream-1"})]
+    assert selected.wav_source is not None and selected.wav_source.cancel.is_set()
+    assert selected.stop_requested is True
+    assert controller.active_stream is selected
+    assert runtime._test_live_controller.stop_calls == [
+        {"reset": False, "notify": False}
+    ]
+    assert controller.loaded_signature == signature
+    assert controller.model_sample_rate == 16_000
+    assert controller.model_schema == _model_schema()
+
+    payload = struct.pack("<f", 0.25)
+    controller.queue_pcm_audio(payload, scene_name=scene.name)
+    controller._poll_pcm_ingress()
+    assert list(controller.pcm_ingress.chunks) == [payload]
+    assert len(requests) == 1
+
+    controller._handle_response({"id": "request-1", "result": {}})
+    controller._handle_event(
+        {"event": "stream_ended", "operation_id": "stream-1", "data": {}}
+    )
+    controller._poll_pcm_ingress()
+
+    assert [method for method, _params in requests] == ["cancel", "stream_start"]
+    assert controller.active_stream is not None
+    assert controller.active_stream.wav_source is None
+    assert controller.pcm_ingress is not None
+    assert list(controller.pcm_ingress.chunks) == [payload]
+    assert controller.loaded_signature == signature
+
+
+def test_stream_to_selected_detaches_pcm_without_stopping_worker(
+    runtime_module: tuple[ModuleType, ModuleType],
+) -> None:
+    runtime, bpy = runtime_module
+    scene, settings = _local_scene(bpy)
+    settings.audio_path = "voice.wav"
+    settings.status = "STREAMING"
+    controller = runtime.RuntimeController()
+    controller.client._state = runtime.Lifecycle.RUNNING
+    controller.loaded_signature = ("face", "emotion")
+    controller.model_sample_rate = 16_000
+    controller.model_schema = _model_schema()
+    stream = _activate_stream(runtime, controller, scene)
+    controller.queue_pcm_audio(struct.pack("<f", 0.25), scene_name=scene.name)
+    requests: list[tuple[str, dict[str, object]]] = []
+    controller.client.request = lambda method, params: (
+        requests.append((method, params)) or "cancel-request"
+    )
+
+    controller._reconcile_input_media()
+    controller._poll_pcm_ingress()
+
+    assert requests == [("cancel", {"operation_id": "stream-1"})]
+    assert stream.stop_requested is True
+    assert controller.active_stream is stream
+    assert controller.pcm_ingress is None
+    assert settings.audio_path == "voice.wav"
+    assert controller.client.state == runtime.Lifecycle.RUNNING
+    assert controller.loaded_signature == ("face", "emotion")
+    assert controller.model_sample_rate == 16_000
+    assert controller.model_schema == _model_schema()
+    assert runtime._test_live_controller.stop_calls == [
+        {"reset": False, "notify": False}
+    ]
+
+
+def test_replacing_selected_wav_detaches_the_previous_media(
+    runtime_module: tuple[ModuleType, ModuleType],
+    tmp_path: Path,
+) -> None:
+    runtime, bpy = runtime_module
+    scene, settings = _local_scene(bpy)
+    old_path = (tmp_path / "old.wav").resolve()
+    settings.audio_path = str((tmp_path / "new.wav").resolve())
+    settings.status = "STREAMING"
+    controller = runtime.RuntimeController()
+    controller.client._state = runtime.Lifecycle.RUNNING
+    controller.loaded_signature = ("face", "emotion")
+    stream = _activate_stream(
+        runtime,
+        controller,
+        scene,
+        audio_path=old_path,
+    )
+    requests: list[tuple[str, dict[str, object]]] = []
+    controller.client.request = lambda method, params: (
+        requests.append((method, params)) or "cancel-request"
+    )
+
+    controller._reconcile_input_media()
+
+    assert requests == [("cancel", {"operation_id": "stream-1"})]
+    assert stream.stop_requested is True
+    assert controller.active_stream is stream
+    assert controller.client.state == runtime.Lifecycle.RUNNING
+    assert controller.loaded_signature == ("face", "emotion")
+    assert runtime._test_live_controller.stop_calls == [
+        {"reset": False, "notify": False}
+    ]
+
+
+def test_mode_switch_releases_an_already_terminal_stream_without_cancel(
+    runtime_module: tuple[ModuleType, ModuleType],
+) -> None:
+    runtime, bpy = runtime_module
+    scene, settings = _local_scene(bpy)
+    settings.input_mode = "STREAM"
+    settings.status = "STREAMING"
+    controller = runtime.RuntimeController()
+    controller.client._state = runtime.Lifecycle.RUNNING
+    controller.loaded_signature = ("face", "emotion")
+    controller.model_sample_rate = 16_000
+    controller.model_schema = _model_schema()
+    controller.selected_restart = (scene.name, 1.25, True)
+    _activate_stream(
+        runtime,
+        controller,
+        scene,
+        audio_path=Path("voice.wav"),
+        worker_ended=True,
+    )
+    requests: list[tuple[str, dict[str, object]]] = []
+    controller.client.request = lambda method, params: (
+        requests.append((method, params)) or "unexpected"
+    )
+
+    controller._reconcile_input_media()
+    controller._poll_selected_restart()
+
+    assert requests == []
+    assert controller.active_stream is None
+    assert controller.selected_restart is None
+    assert controller.client.state == runtime.Lifecycle.RUNNING
+    assert controller.loaded_signature == ("face", "emotion")
+    assert controller.model_sample_rate == 16_000
+    assert controller.model_schema == _model_schema()
+    assert settings.status == "MODEL_READY"
+    assert runtime._test_live_controller.stop_calls == [
+        {"reset": False, "notify": False}
+    ]
 
 
 @pytest.mark.parametrize("input_mode", ["SELECTED", "STREAM"])

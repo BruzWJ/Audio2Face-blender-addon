@@ -6,7 +6,13 @@ from typing import Callable
 
 import bpy
 
-from .live_stream import get_live_stream_controller
+from .live_stream import (
+    PLAYBACK_POSITION_KEY,
+    LiveStreamError,
+    get_live_stream_controller,
+    playback_position,
+    playback_position_maximum,
+)
 from .properties import (
     clear_preferred_emotion,
     load_preferred_emotion,
@@ -21,7 +27,7 @@ def _run_runtime(
 ) -> set[str]:
     try:
         operation(get_controller())
-    except (OSError, SidecarError, ValueError) as exc:
+    except (OSError, LiveStreamError, SidecarError, ValueError) as exc:
         operator.report({"ERROR"}, str(exc))
         return {"CANCELLED"}
     return {"FINISHED"}
@@ -202,8 +208,7 @@ class A2F_OT_play_pause(bpy.types.Operator):
             return settings.playback_state in {"PLAYING", "PAUSED"}
         runtime = get_controller()
         return bool(
-            settings.playback_state == "IDLE"
-            and settings.audio_path
+            settings.audio_path
             and runtime.client.state == Lifecycle.RUNNING
             and runtime.negotiated
             and not runtime.operation_in_progress
@@ -211,23 +216,32 @@ class A2F_OT_play_pause(bpy.types.Operator):
 
     def execute(self, context: bpy.types.Context) -> set[str]:
         settings = context.scene.audio2face
-        if settings.playback_state == "PLAYING":
-            return _run_runtime(
-                self,
-                lambda controller: controller.pause_selected_audio(context.scene),
+        live = get_live_stream_controller()
+        if live.can_seek:
+            if settings.playback_state == "PLAYING":
+                return _run_runtime(
+                    self,
+                    lambda controller: controller.pause_selected_audio(context.scene),
+                )
+            if settings.playback_state == "PAUSED":
+                return _run_runtime(
+                    self,
+                    lambda controller: controller.resume_selected_audio(context.scene),
+                )
+            self.report(
+                {"ERROR"},
+                f"invalid playback state {settings.playback_state!r}",
             )
-        if settings.playback_state == "PAUSED":
-            return _run_runtime(
-                self,
-                lambda controller: controller.resume_selected_audio(context.scene),
-            )
-        if settings.playback_state == "IDLE":
-            return _run_runtime(
-                self,
-                lambda controller: controller.start_selected_audio(context.scene),
-            )
-        self.report({"ERROR"}, f"invalid playback state {settings.playback_state!r}")
-        return {"CANCELLED"}
+            return {"CANCELLED"}
+        def start(controller: RuntimeController) -> None:
+            position = 0.0
+            if PLAYBACK_POSITION_KEY in settings:
+                position = playback_position(settings)
+                if position >= playback_position_maximum(settings):
+                    position = 0.0
+            controller.start_selected_audio(context.scene, position=position)
+
+        return _run_runtime(self, start)
 
 
 CLASSES = (

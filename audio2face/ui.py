@@ -7,9 +7,9 @@ from typing import TYPE_CHECKING
 import bpy
 
 from .live_stream import (
+    PLAYBACK_POSITION_KEY,
     PLAYBACK_POSITION_PATH,
     get_live_stream_controller,
-    playback_position,
 )
 from .properties import AUDIO2FACE_SETTING_GROUPS
 from .runtime import RuntimeController, get_controller
@@ -34,27 +34,22 @@ def _draw_audio_playback(
         playback_box.label(text="Playback", icon="SPEAKER")
         playback_row = playback_box.row(align=True)
         play_button = playback_row.row(align=True)
-        if settings.playback_state == "PLAYING":
+        if playback.can_seek and settings.playback_state == "PLAYING":
             play_button.operator(
                 "a2f.play_pause", text="Pause", icon="PAUSE"
             )
-        elif settings.playback_state in {"IDLE", "PAUSED"}:
+        else:
             play_button.operator(
                 "a2f.play_pause", text="Play", icon="PLAY"
             )
-        else:
-            raise RuntimeError(f"invalid playback state {settings.playback_state!r}")
         playback_row.prop(settings, "playback_loop", text="Loop", toggle=True)
 
-        if settings.playback_duration > 0.0:
-            seek_row = playback_box.row()
-            seek_row.enabled = playback.can_seek
-            seek_row.prop(settings, PLAYBACK_POSITION_PATH, text="", slider=True)
-            playback_box.label(
-                text=(
-                    f"{_timecode(playback_position(settings))} / "
-                    f"{_timecode(settings.playback_duration)}"
-                )
+        if PLAYBACK_POSITION_KEY in settings:
+            playback_box.prop(
+                settings,
+                PLAYBACK_POSITION_PATH,
+                text="",
+                slider=True,
             )
         playback_box.prop(settings, "prediction_delay", slider=True)
         return
@@ -62,7 +57,11 @@ def _draw_audio_playback(
     if settings.input_mode != "STREAM":
         raise RuntimeError(f"invalid input mode {settings.input_mode!r}")
     stream = controller.active_stream
-    if stream is None or stream.scene_name != scene_name:
+    if (
+        stream is None
+        or stream.scene_name != scene_name
+        or stream.wav_source is not None
+    ):
         return
     playback_box = layout.box()
     playback_box.label(text="Stream", icon="SPEAKER")
@@ -232,12 +231,7 @@ class A2F_PT_main(bpy.types.Panel):
 
         input_box = layout.box()
         input_box.label(text="Inputs", icon="SOUND")
-        mode_row = input_box.row()
-        mode_row.enabled = (
-            not controller.operation_in_progress
-            and settings.playback_state == "IDLE"
-        )
-        mode_row.prop(settings, "input_mode", expand=True)
+        input_box.prop(settings, "input_mode", expand=True)
         _draw_audio_playback(input_box, settings, controller, context.scene.name)
         if settings.input_mode == "SELECTED":
             input_box.prop(settings, "audio_path")

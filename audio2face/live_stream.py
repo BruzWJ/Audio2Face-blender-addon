@@ -45,6 +45,20 @@ def playback_position(settings: Any) -> float:
     return position
 
 
+def playback_position_maximum(settings: Any) -> float:
+    """Return the duration encoded by the selected-media slider."""
+
+    if PLAYBACK_POSITION_KEY not in settings:
+        raise LiveStreamError("selected-audio playback position is unavailable")
+    value = settings.id_properties_ui(PLAYBACK_POSITION_KEY).as_dict().get("max")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise LiveStreamError("playback position maximum must be a number")
+    maximum = float(value)
+    if not math.isfinite(maximum) or maximum <= 0.0:
+        raise LiveStreamError("playback position maximum must be finite and positive")
+    return maximum
+
+
 def configure_playback_position(
     settings: Any,
     position: float,
@@ -75,7 +89,7 @@ def configure_playback_position(
 
 
 def clear_playback_position(settings: Any) -> None:
-    """Remove the transient media position after selected playback ends."""
+    """Remove the media position when its selected WAV changes."""
 
     if PLAYBACK_POSITION_KEY in settings:
         del settings[PLAYBACK_POSITION_KEY]
@@ -382,7 +396,6 @@ class LiveStreamController:
         self._handle = handle
         self._duration = duration
         settings = scene.audio2face
-        settings.playback_duration = duration
         settings.playback_state = "PAUSED" if self._start_paused else "PLAYING"
         configure_playback_position(settings, start_position, duration)
         self._publish_position(settings, start_position)
@@ -585,10 +598,10 @@ class LiveStreamController:
                 # final inference frames.  Keep the operation registered until the
                 # matching ``stream_ended`` event arrives; otherwise that valid terminal
                 # event would look like an unknown operation and reject the worker.
+                self._publish_position(settings, self._duration)
                 if self._terminal:
                     self.stop(reset=False, notify=True, natural=True)
                     return False
-                self._publish_position(settings, self._duration)
                 return True
 
             position = min(max(0.0, float(self._handle.position)), self._duration)
@@ -636,7 +649,6 @@ class LiveStreamController:
         self.stop(reset=False, notify=False)
         settings = scene.audio2face
         settings.playback_state = "PAUSED" if paused else "PLAYING"
-        settings.playback_duration = duration
         configure_playback_position(settings, requested, duration)
 
     def stop(
@@ -660,8 +672,6 @@ class LiveStreamController:
             )
         if settings is not None:
             settings.playback_state = "IDLE"
-            settings.playback_duration = 0.0
-            clear_playback_position(settings)
             settings.stream_time = 0.0
 
         stopped_callback = self._playback_stopped if notify else None

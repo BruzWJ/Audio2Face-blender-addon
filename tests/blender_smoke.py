@@ -12,7 +12,10 @@ from __future__ import annotations
 
 import math
 import sys
+import tempfile
+import wave
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 
@@ -45,6 +48,7 @@ from audio2face.properties import (  # noqa: E402
     inference_settings,
 )
 from audio2face.ui_text import draw_wrapped_label  # noqa: E402
+from audio2face.ui import A2F_PT_main  # noqa: E402
 
 
 MODEL_CHANNELS = ["jawOpen", *(f"modelChannel{index}" for index in range(51))]
@@ -118,6 +122,35 @@ def main() -> None:
         assert bpy.app.timers.is_registered(runtime._timer_callback)
         assert runtime._load_pre_handler in bpy.app.handlers.load_pre
         assert runtime._load_post_handler in bpy.app.handlers.load_post
+        scene = bpy.context.scene
+        settings = scene.audio2face
+        settings.playback_state = "PAUSED"
+        clear_playback_position(settings)
+
+        stale_layout = Mock()
+        panel_context = SimpleNamespace(
+            scene=scene,
+            region=SimpleNamespace(width=320),
+            preferences=SimpleNamespace(
+                system=SimpleNamespace(ui_scale=1.0),
+            ),
+        )
+        A2F_PT_main.draw(SimpleNamespace(layout=stale_layout), panel_context)
+        stale_labels = {
+            call.kwargs.get("text")
+            for call in stale_layout.mock_calls
+            if call[0].endswith(".label")
+        }
+        assert {"Inputs", "Model Tuning", "Emotion"} <= stale_labels
+        visible_properties = {
+            call.args[1]
+            for call in stale_layout.mock_calls
+            if call[0].endswith(".prop") and len(call.args) > 1
+        }
+        assert {"audio_path", "input_strength", "auto_audio2emotion"} <= (
+            visible_properties
+        )
+        settings.playback_state = "IDLE"
         notice_layout = Mock()
         draw_wrapped_label(
             notice_layout,
@@ -246,6 +279,21 @@ def main() -> None:
         _assert_close(playback_ui["max"], 4.0, label="playback slider max")
         clear_playback_position(settings)
         assert PLAYBACK_POSITION_KEY not in settings
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            wav_path = Path(temporary_directory) / "selected.wav"
+            with wave.open(str(wav_path), "wb") as wav_file:
+                wav_file.setnchannels(1)
+                wav_file.setsampwidth(2)
+                wav_file.setframerate(16_000)
+                wav_file.writeframes(bytes(16_000 * 2))
+            settings.audio_path = str(wav_path)
+            assert PLAYBACK_POSITION_KEY in settings
+            playback_ui = settings.id_properties_ui(
+                PLAYBACK_POSITION_KEY
+            ).as_dict()
+            _assert_close(playback_ui["max"], 1.0, label="selected WAV duration")
+            settings.audio_path = ""
+            assert PLAYBACK_POSITION_KEY not in settings
         model_schema = {
             "channels": MODEL_CHANNELS.copy(),
             "audio2face_defaults": MODEL_DEFAULTS.copy(),
