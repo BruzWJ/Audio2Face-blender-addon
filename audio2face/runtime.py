@@ -2106,8 +2106,6 @@ def _load_post_handler(_unused: object) -> None:
 
 def register_runtime() -> None:
     get_controller()
-    for scene in RuntimeController._editable_scenes():
-        clear_playback_position(scene.audio2face)
     if _load_pre_handler not in bpy.app.handlers.load_pre:
         bpy.app.handlers.load_pre.append(_load_pre_handler)
     if _load_post_handler not in bpy.app.handlers.load_post:

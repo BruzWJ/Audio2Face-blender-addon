@@ -2433,10 +2433,6 @@ def test_runtime_survives_blend_file_replacement_with_fresh_controller(
         def close(self) -> None:
             cleanup_order.append(f"close-{self.number}")
 
-        @staticmethod
-        def _editable_scenes() -> tuple[object, ...]:
-            return ()
-
     monkeypatch.setattr(runtime, "RuntimeController", StubController)
     runtime.register_runtime()
     runtime.register_runtime()
@@ -2470,3 +2466,20 @@ def test_runtime_survives_blend_file_replacement_with_fresh_controller(
     assert bpy.app.handlers.load_pre == []
     assert bpy.app.handlers.load_post == []
     assert not bpy.app.timers.is_registered(runtime._timer_callback)
+
+
+def test_runtime_registration_does_not_access_restricted_blend_data(
+    runtime_module: tuple[ModuleType, ModuleType],
+) -> None:
+    runtime, bpy = runtime_module
+    unrestricted_data = bpy.data
+    bpy.data = object()  # type: ignore[attr-defined]
+
+    try:
+        runtime.register_runtime()
+        assert bpy.app.timers.is_registered(runtime._timer_callback)
+        assert runtime._load_pre_handler in bpy.app.handlers.load_pre
+        assert runtime._load_post_handler in bpy.app.handlers.load_post
+    finally:
+        bpy.data = unrestricted_data  # type: ignore[attr-defined]
+        runtime.unregister_runtime()

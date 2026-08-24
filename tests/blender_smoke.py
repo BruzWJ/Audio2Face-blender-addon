@@ -21,6 +21,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import bpy  # noqa: E402  (available only inside Blender)
+from _bpy_restrict_state import RestrictBlend  # noqa: E402
 
 import audio2face  # noqa: E402
 from audio2face.shape_keys import (  # noqa: E402
@@ -105,7 +106,8 @@ def main() -> None:
 
     registered = False
     try:
-        audio2face.register()
+        with RestrictBlend():
+            audio2face.register()
         registered = True
         selected = runtime.RuntimeController._selected_directory_path(
             bpy.app.tempdir,
