@@ -9,7 +9,7 @@ Selected WAV -- Play/Pause/seek/loop -- WAV decoder/resampler --+
                                                                |
 external mono f32le PCM -- first chunk auto-starts ------------+-- stream
                                                                    |
-Blender 5.2 extension -- private audio2face/5 JSONL -- native worker
+Blender 5.2 extension -- private audio2face/7 JSONL -- native worker
                                                                    |
                              +-------------------------------------+------+
                              |                                            |
@@ -19,9 +19,9 @@ Blender 5.2 extension -- private audio2face/5 JSONL -- native worker
                              |                                            |
                              +------ default-model GPU ARKit solver ------+
                                                    |
-                                  52 named scalar coefficient frames
+                         52 coefficients + effective emotion values
                                                    |
-                       Blender main-thread Shape Key delivery to targets
+               Blender main-thread Shape Keys + existing emotion sliders
 ```
 
 Blender owns the package-local worker as a child process. The worker opens no
@@ -33,7 +33,7 @@ models does not execute audio inference continuously.
 
 Both audio modes use the same `stream_start` / `stream_chunk` /
 `stream_settings` / `stream_end` worker operation and receive timestamped ARKit
-coefficient frames.
+coefficient and effective emotion frames.
 
 ## Blender extension
 
@@ -43,15 +43,18 @@ The extension owns:
   external model-root selections, model optimization, cancellation, and logs;
 - worker launch, handshake, model loading, streaming, cancellation, and
   shutdown;
-- Selected WAV playback, seeking, looping, and external PCM ingress;
+- Selected WAV playback with an absolute-time seek slider, looping, and
+  external PCM ingress;
 - Audio2Face and emotion controls and the registered target-mesh list;
 - strict protocol, model-schema, and stream-frame validation; and
 - audio-clocked delivery of coefficient values to Shape Keys on Blender's main
   thread.
 
 Worker I/O and WAV decoding run on standard-library threads. Those threads
-enqueue validated data and never mutate `bpy`. A registered Blender timer
-drains the queues and performs RNA and Shape Key updates on the main thread.
+enqueue validated data and never mutate `bpy`. Selected WAV and live PCM
+producers advance by the worker's per-chunk dequeue-credit events, so seek preroll
+cannot outrun inference. A registered Blender timer drains the queues and
+performs RNA and Shape Key updates on the main thread.
 
 ### Mesh targets
 
@@ -104,11 +107,13 @@ begins. Returned frames are buffered and sampled against Blender's audio-device
 position rather than scene FPS.
 
 The one stateful control changes between **Play** and **Pause**. Pause freezes
-both audible audio and WAV source pacing. The duration-based seek control
-cancels the current stream and restarts at the requested audio position while
-retaining the loaded worker. **Loop** performs the same restart at zero after
-natural end. **Prediction Delay** offsets frame sampling relative to the
-audible clock; it does not delay audio or keep inference running while paused.
+both audible audio and WAV source pacing. The seek control is a native Blender
+numeric slider with an absolute-seconds range from zero to the selected WAV's
+duration. While its value is changing, clock updates do not overwrite it; one
+settled position cancels and restarts the current stream while retaining the
+loaded worker. **Loop** performs the same restart at zero after natural end.
+**Prediction Delay** offsets frame sampling relative to the audible clock; it
+does not delay audio or keep inference running while paused.
 
 ### External PCM
 
@@ -140,9 +145,9 @@ paths. It returns a positive sample rate and one exact `model_schema`:
   object.
 
 Blender has no independent output-channel list, identity selector, model
-variant selector, graph-node controls, or tensor controls. It builds the manual
-emotion collection and target delivery from the loaded default model schema,
-and seeds all Audio2Face controls from the returned defaults.
+variant selector, graph-node controls, or tensor controls. It builds the emotion
+collection and target delivery from the loaded default model schema, and seeds
+all Audio2Face controls from the returned defaults.
 
 Every `stream_start` installs one complete settings snapshot containing the
 exact 18-field `audio2face` object, `auto_audio2emotion`, every advertised
@@ -161,6 +166,14 @@ Audio2Emotion and the preferred snapshot are independent controls. Both
 Selected WAV and external PCM apply control edits to their current operation by
 resetting the two executors and accumulators and replaying a bounded PCM
 context; audio transport is not restarted or discarded.
+
+Each worker frame returns the effective emotion vector sampled by Audio2Face
+after that processing, aligned with its ARKit weights. Blender samples both
+vectors on the same presentation clock and writes the effective values into the
+existing emotion sliders. NVIDIA may return finite values outside the sliders'
+factor range; Blender clamps only that displayed presentation. Worker-driven
+slider updates do not queue another settings snapshot, and the distinct
+preferred-emotion snapshot is not changed.
 
 ## Runtime and model ownership
 
@@ -218,8 +231,8 @@ misses its deadlines.
 
 ## Failure boundaries
 
-The extension accepts only protocol `audio2face/5`, worker profile
-`nvidia-a2f3-a2e3-gpu-arkit52/5`, and a non-empty worker version. Envelopes
+The extension accepts only protocol `audio2face/7`, worker profile
+`nvidia-a2f3-a2e3-gpu-arkit52/7`, and a non-empty worker version. Envelopes
 reject missing or unknown fields, duplicate JSON keys, non-finite numbers,
 invalid IDs, unknown methods or events, malformed UTF-8, and payloads over
 1 MiB. Malformed or misrouted output is a terminal contract violation: Blender
@@ -230,7 +243,7 @@ Each PCM chunk is non-empty, finite little-endian float32 mono at the model
 rate and covers at most one second. The worker bounds its queued PCM to four
 seconds, and Blender also bounds pending acknowledgements and pre-start ingress.
 Operation IDs, timestamps, sample rates, channel layouts, and every coefficient
-row are validated before Blender state changes.
+and effective-emotion row are validated before Blender state changes.
 
 Unregistering the extension stops audio presentation, cancels WAV sourcing and
 model optimization, unregisters its timer, and closes the worker before

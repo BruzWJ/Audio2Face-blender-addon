@@ -106,7 +106,6 @@ def main() -> None:
     }
     assert {
         "prediction_delay",
-        "playback_progress",
         "auto_audio2emotion",
         "manual_emotions",
         "preferred_emotions",

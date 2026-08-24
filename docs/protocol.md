@@ -1,4 +1,4 @@
-# Worker protocol `audio2face/5`
+# Worker protocol `audio2face/7`
 
 ## Transport and envelopes
 
@@ -15,33 +15,34 @@ rejected.
 A request contains exactly:
 
 ```json
-{"protocol":"audio2face/5","type":"request","id":"1","method":"hello","params":{}}
+{"protocol":"audio2face/7","type":"request","id":"1","method":"hello","params":{}}
 ```
 
 `id` is a non-empty string of at most 128 characters. A successful response
 repeats it and contains an object `result`:
 
 ```json
-{"protocol":"audio2face/5","type":"response","id":"1","result":{}}
+{"protocol":"audio2face/7","type":"response","id":"1","result":{}}
 ```
 
 A request error contains exact `code`, `message`, and `details` fields. `id` is
 included only when it could be recovered safely:
 
 ```json
-{"protocol":"audio2face/5","type":"error","id":"1","error":{"code":"invalid_params","message":"invalid request","details":{}}}
+{"protocol":"audio2face/7","type":"error","id":"1","error":{"code":"invalid_params","message":"invalid request","details":{}}}
 ```
 
 An asynchronous event contains exact `event`, `operation_id`, and object `data`
 fields in addition to `protocol` and `type`:
 
 ```json
-{"protocol":"audio2face/5","type":"event","event":"stream_ended","operation_id":"stream-1","data":{}}
+{"protocol":"audio2face/7","type":"event","event":"stream_ended","operation_id":"stream-1","data":{}}
 ```
 
 The only request methods are `hello`, `load_model`, `stream_start`,
 `stream_chunk`, `stream_settings`, `stream_end`, `cancel`, and `shutdown`. The
-only events are `stream_frame`, `stream_reset`, `stream_ended`, and `error`.
+only events are `stream_credit`, `stream_frame`, `stream_reset`, `stream_ended`,
+and `error`.
 The worker accepts one active stream. A request response is emitted before any
 event unlocked by that request.
 
@@ -54,7 +55,7 @@ methods.
 Parameters are exactly `{}`. The result is exactly:
 
 ```json
-{"worker_profile":"nvidia-a2f3-a2e3-gpu-arkit52/5","worker_version":"0.1.0"}
+{"worker_profile":"nvidia-a2f3-a2e3-gpu-arkit52/7","worker_version":"0.1.0"}
 ```
 
 Blender requires that exact profile and a non-empty worker version. `hello`
@@ -195,24 +196,43 @@ covers at most one model-rate second. The ID must name the active stream, no
 chunks are accepted after `stream_end` is queued, and the worker bounds queued
 PCM to four seconds.
 
-The worker replies `{}` before publishing any frame unlocked by that chunk. A
-frame event has exact data fields `timestamp_sample` and `weights`:
+The worker replies `{}` when it accepts the chunk. After dequeuing that chunk
+for inference, and before publishing any frame unlocked by it, the worker emits
+one capacity credit:
+
+```json
+{"protocol":"audio2face/7","type":"event","event":"stream_credit","operation_id":"stream-1","data":{}}
+```
+
+A serial producer waits for that credit before submitting the next chunk, so
+it cannot fill the bounded worker queue. Cancellation may end a stream without
+a credit for its final queued chunk. A frame event has exact data fields
+`timestamp_sample`, `weights`, and `emotions`:
 
 ```json
 {
-  "protocol": "audio2face/5",
+  "protocol": "audio2face/7",
   "type": "event",
   "event": "stream_frame",
   "operation_id": "stream-1",
-  "data": {"timestamp_sample": 0, "weights": [0.0]}
+  "data": {"timestamp_sample": 0, "weights": [0.0], "emotions": [0.0]}
 }
 ```
 
 The abbreviated `weights` array contains exactly 52 finite values in
-`[0.0, 1.0]`, ordered by `model_schema.channels`. `timestamp_sample` is a
-signed 64-bit position at the model sample rate. It is strictly increasing
-from `stream_start`, and strictly increasing again after every `stream_reset`.
-Events do not repeat channel names.
+`[0.0, 1.0]`, ordered by `model_schema.channels`. The abbreviated `emotions`
+array contains exactly one finite value for each entry in
+`model_schema.emotion_channels`, in that order. These are the effective values
+sampled by Audio2Face after Audio2Emotion post-processing and optional preferred
+emotion mixing, not the raw classifier output. NVIDIA's SDK does not constrain
+effective emotions to `[0.0, 1.0]`, so the transport preserves every finite
+value. Blender's existing factor sliders may clamp their displayed presentation,
+but not the buffered transport value. Both arrays describe the same Audio2Face
+frame and timestamp.
+
+`timestamp_sample` is a signed 64-bit position at the model sample rate. It is
+strictly increasing from `stream_start`, and strictly increasing again after
+every `stream_reset`. Events do not repeat channel names.
 
 ## `stream_settings`
 
@@ -239,15 +259,16 @@ starts from reset emotion state.
 Before any replayed frame, the worker emits exactly:
 
 ```json
-{"protocol":"audio2face/5","type":"event","event":"stream_reset","operation_id":"stream-1","data":{}}
+{"protocol":"audio2face/7","type":"event","event":"stream_reset","operation_id":"stream-1","data":{}}
 ```
 
-`stream_reset {}` means Blender must discard its entire buffered frame timeline
-for that operation and reset its frame-order check. Clearing the whole buffer
-is deliberate: diffusion can emit lead-in frames with negative SDK-local
-timestamps, so a cutoff inferred only from the retained PCM start would be
-unsafe. Replayed frame timestamps are still absolute: the worker adds the
-retained history's operation-relative start sample to each SDK-local timestamp.
+`stream_reset {}` means Blender must discard its entire buffered weight and
+emotion timeline for that operation and reset its frame-order check. Clearing
+the whole buffer is deliberate: diffusion can emit lead-in frames with
+negative SDK-local timestamps, so a cutoff inferred only from the retained PCM
+start would be unsafe. Replayed frame timestamps are still absolute: the worker
+adds the retained history's operation-relative start sample to each SDK-local
+timestamp.
 They are strictly increasing after the reset event. PCM commands already queued
 after `stream_settings` are neither canceled nor discarded.
 
@@ -258,7 +279,7 @@ closes input, drains padded tail frames, waits for scheduled GPU work, and then
 emits:
 
 ```json
-{"protocol":"audio2face/5","type":"event","event":"stream_ended","operation_id":"stream-1","data":{}}
+{"protocol":"audio2face/7","type":"event","event":"stream_ended","operation_id":"stream-1","data":{}}
 ```
 
 Every final `stream_frame` precedes `stream_ended`. Both models remain loaded,
@@ -288,7 +309,7 @@ An asynchronous inference failure uses an `error` event with exact `code` and
 `message` data:
 
 ```json
-{"protocol":"audio2face/5","type":"event","event":"error","operation_id":"stream-1","data":{"code":"inference_failed","message":"operation failed"}}
+{"protocol":"audio2face/7","type":"event","event":"error","operation_id":"stream-1","data":{"code":"inference_failed","message":"operation failed"}}
 ```
 
 Request validation failures use the request error envelope. Worker error codes

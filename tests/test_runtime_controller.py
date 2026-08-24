@@ -12,6 +12,7 @@ import pytest
 
 
 MODEL_CHANNELS = tuple(f"modelChannel{index}" for index in range(52))
+MODEL_EMOTIONS = [0.75]
 AUDIO2FACE_DEFAULTS: dict[str, float | int] = {
     "input_strength": 1.0,
     "lower_face_smoothing": 0.006,
@@ -67,7 +68,6 @@ class _Settings:
         self.playback_loop = False
         self.playback_state = "PLAYING"
         self.playback_duration = 2.0
-        self.playback_progress = 0.5
         self.prediction_delay = 0.0
         self.audio_path = ""
         self.stream_time = 0.0
@@ -227,6 +227,7 @@ def runtime_module(monkeypatch: pytest.MonkeyPatch) -> tuple[ModuleType, ModuleT
     live_controller = _LiveController()
     live_stream = ModuleType("audio2face.live_stream")
     live_stream.LiveStreamError = ValueError  # type: ignore[attr-defined]
+    live_stream.clear_playback_position = lambda _settings: None  # type: ignore[attr-defined]
     live_stream.get_live_stream_controller = lambda: live_controller  # type: ignore[attr-defined]
     live_stream.unregister_live_stream = lambda: None  # type: ignore[attr-defined]
     live_stream.validate_stream_frame = lambda *_args: ()  # type: ignore[attr-defined]
@@ -286,10 +287,110 @@ def _activate_stream(
     )
     if wav_source is not None:
         wav_source.playing.set()
+    stream.chunk_credit.set()
     controller.active_stream = stream
     runtime._test_live_controller.operation_id = operation_id
     runtime._test_live_controller.is_active = True
     return stream
+
+
+def test_short_lived_status_notice_never_becomes_visible(
+    runtime_module: tuple[ModuleType, ModuleType],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, bpy = runtime_module
+    scene, _settings = _local_scene(bpy)
+    controller = runtime.RuntimeController()
+    now = [10.0]
+    redraws: list[None] = []
+    monkeypatch.setattr(runtime.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(
+        controller,
+        "_tag_runtime_setup_redraw",
+        lambda: redraws.append(None),
+    )
+
+    controller._set_status(scene, "STREAM_STARTING", "Preparing audio inference")
+    assert controller.status_notice(scene) is None
+
+    now[0] += runtime._STATUS_NOTICE_DELAY_SECONDS / 2.0
+    controller._set_status(scene, "STREAMING", "PCM stream is ready")
+    redraws.clear()
+    now[0] += runtime._STATUS_NOTICE_DELAY_SECONDS
+    controller._poll_status_notices()
+
+    assert controller.status_notice(scene) is None
+    assert redraws == []
+
+
+def test_status_notice_appears_once_after_persistence_delay(
+    runtime_module: tuple[ModuleType, ModuleType],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, bpy = runtime_module
+    scene, _settings = _local_scene(bpy)
+    controller = runtime.RuntimeController()
+    now = [20.0]
+    redraws: list[None] = []
+    monkeypatch.setattr(runtime.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(
+        controller,
+        "_tag_runtime_setup_redraw",
+        lambda: redraws.append(None),
+    )
+
+    controller._set_status(scene, "LOADING_MODEL", "Loading models")
+    redraws.clear()
+    now[0] += runtime._STATUS_NOTICE_DELAY_SECONDS - 0.001
+    controller._poll_status_notices()
+    assert controller.status_notice(scene) is None
+    assert redraws == []
+
+    now[0] += 0.001
+    controller._poll_status_notices()
+    assert controller.status_notice(scene) == ("LOADING_MODEL", "Loading models")
+    assert redraws == [None]
+
+    controller._poll_status_notices()
+    assert redraws == [None]
+
+
+def test_status_message_change_preserves_notice_persistence(
+    runtime_module: tuple[ModuleType, ModuleType],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, bpy = runtime_module
+    scene, _settings = _local_scene(bpy)
+    controller = runtime.RuntimeController()
+    now = [30.0]
+    monkeypatch.setattr(runtime.time, "monotonic", lambda: now[0])
+
+    controller._set_status(scene, "STARTING", "Starting worker")
+    now[0] += runtime._STATUS_NOTICE_DELAY_SECONDS / 2.0
+    controller._set_status(scene, "STARTING", "Loading playback data")
+    now[0] += runtime._STATUS_NOTICE_DELAY_SECONDS / 2.0
+    controller._poll_status_notices()
+
+    assert controller.status_notice(scene) == (
+        "STARTING",
+        "Loading playback data",
+    )
+
+    controller._set_status(scene, "STARTING", "Loading audio")
+    assert controller.status_notice(scene) == ("STARTING", "Loading audio")
+
+
+def test_error_status_notice_is_immediate_without_tracking_state(
+    runtime_module: tuple[ModuleType, ModuleType],
+) -> None:
+    runtime, bpy = runtime_module
+    scene, settings = _local_scene(bpy)
+    controller = runtime.RuntimeController()
+
+    settings.status = "ERROR"
+    settings.status_message = "Audio device failed"
+
+    assert controller.status_notice(scene) == ("ERROR", "Audio device failed")
 
 
 def test_log_directory_rejects_a_filesystem_alias(
@@ -833,6 +934,7 @@ def test_event_routing_rejects_an_unknown_operation_id(
             "data": {
                 "timestamp_sample": 0,
                 "weights": [0.0] * len(MODEL_CHANNELS),
+                "emotions": MODEL_EMOTIONS.copy(),
             },
         }
     )
@@ -895,6 +997,7 @@ def test_rejected_worker_controls_cannot_revive_scene_state(
             "data": {
                 "timestamp_sample": 0,
                 "weights": [0.0] * len(MODEL_CHANNELS),
+                "emotions": MODEL_EMOTIONS.copy(),
             },
         }
     )
@@ -1055,6 +1158,7 @@ def test_selected_wav_play_starts_streaming_inference(
     assert controller.active_stream.operation_id == operation_id
     assert controller.active_stream.wav_source is not None
     assert controller.active_stream.wav_source.audio_path == audio_path.resolve()
+    assert runtime._test_live_controller.prepare_calls[0][0][4] == ["Joy"]
     assert settings.status == "STREAM_STARTING"
 
 
@@ -1580,9 +1684,13 @@ def test_selected_wav_source_honors_worker_prebuffer_without_local_override(
     stream.wav_source.playback_started = playback_gate
     submitted: list[bytes] = []
     ended: list[str] = []
-    controller._send_stream_audio = (
-        lambda payload, *, operation_id: submitted.append(payload) or "chunk"
-    )
+    def send(payload: bytes, *, operation_id: str) -> str:
+        stream.chunk_credit.clear()
+        submitted.append(payload)
+        stream.chunk_credit.set()
+        return "chunk"
+
+    controller._send_stream_audio = send
     controller._queue_stream_end = lambda operation_id: ended.append(operation_id) or "end"
     monkeypatch.setattr(runtime, "WavStreamSource", Source)
 
@@ -1600,6 +1708,176 @@ def test_selected_wav_source_honors_worker_prebuffer_without_local_override(
     assert playback_gate.wait_calls == 1
     assert submitted == [struct.pack("<f", 0.0), struct.pack("<f", 0.0)]
     assert ended == ["stream-1"]
+
+
+def test_selected_wav_source_waits_for_each_worker_chunk_credit(
+    runtime_module: tuple[ModuleType, ModuleType],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, bpy = runtime_module
+    scene, _settings = _local_scene(bpy)
+    controller = runtime.RuntimeController()
+    controller.model_sample_rate = 16_000
+    stream = _activate_stream(
+        runtime,
+        controller,
+        scene,
+        audio_path=Path("voice.wav"),
+    )
+    assert stream.wav_source is not None
+    stream.wav_source.playback_started.set()
+
+    chunks = (struct.pack("<f", 0.1), struct.pack("<f", 0.2))
+
+    class Source:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> Source:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def __iter__(self) -> object:
+            return iter(chunks)
+
+    submitted: list[bytes] = []
+    first_sent = threading.Event()
+    second_sent = threading.Event()
+    ended: list[str] = []
+
+    def send(payload: bytes, *, operation_id: str) -> str:
+        assert operation_id == "stream-1"
+        stream.chunk_credit.clear()
+        submitted.append(payload)
+        (first_sent if len(submitted) == 1 else second_sent).set()
+        return f"chunk-{len(submitted)}"
+
+    controller._send_stream_audio = send
+    controller._queue_stream_end = lambda operation_id: ended.append(operation_id) or "end"
+    monkeypatch.setattr(runtime, "WavStreamSource", Source)
+
+    controller._start_wav_stream_source(
+        scene,
+        "stream-1",
+        stream.wav_source,
+        16_000,
+        prebuffer_samples=0,
+    )
+    assert stream.wav_source.thread is not None
+    assert first_sent.wait(1.0)
+    assert submitted == [chunks[0]]
+    assert not second_sent.is_set()
+
+    stream.chunk_credit.set()
+    assert second_sent.wait(1.0)
+    assert submitted == list(chunks)
+    assert ended == []
+
+    stream.chunk_credit.set()
+    stream.wav_source.thread.join(timeout=1.0)
+    assert not stream.wav_source.thread.is_alive()
+    assert ended == ["stream-1"]
+
+
+def test_cancel_interrupts_a_selected_wav_waiting_for_chunk_credit(
+    runtime_module: tuple[ModuleType, ModuleType],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, bpy = runtime_module
+    scene, _settings = _local_scene(bpy)
+    controller = runtime.RuntimeController()
+    controller.model_sample_rate = 16_000
+    stream = _activate_stream(
+        runtime,
+        controller,
+        scene,
+        audio_path=Path("voice.wav"),
+    )
+    assert stream.wav_source is not None
+    stream.wav_source.playback_started.set()
+
+    class Source:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> Source:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def __iter__(self) -> object:
+            return iter((struct.pack("<f", 0.1),))
+
+    sent = threading.Event()
+    ended: list[str] = []
+    def send(_payload: bytes, *, operation_id: str) -> str:
+        assert operation_id == "stream-1"
+        stream.chunk_credit.clear()
+        sent.set()
+        return "chunk-1"
+
+    controller._send_stream_audio = send
+    controller._queue_stream_end = lambda operation_id: ended.append(operation_id) or "end"
+    monkeypatch.setattr(runtime, "WavStreamSource", Source)
+
+    controller._start_wav_stream_source(
+        scene,
+        "stream-1",
+        stream.wav_source,
+        16_000,
+        prebuffer_samples=0,
+    )
+    assert stream.wav_source.thread is not None
+    assert sent.wait(1.0)
+    stream.wav_source.cancel.set()
+    stream.wav_source.thread.join(timeout=1.0)
+
+    assert not stream.wav_source.thread.is_alive()
+    assert ended == []
+
+
+def test_live_pcm_waits_for_the_previous_worker_chunk_credit(
+    runtime_module: tuple[ModuleType, ModuleType],
+) -> None:
+    runtime, bpy = runtime_module
+    scene, settings = _local_scene(bpy)
+    settings.input_mode = "STREAM"
+    controller = runtime.RuntimeController()
+    controller.model_sample_rate = 16_000
+    _activate_stream(runtime, controller, scene, prebuffer_samples=0)
+    first = struct.pack("<f", 0.1)
+    second = struct.pack("<f", 0.2)
+    controller.queue_pcm_audio(first, scene_name=scene.name)
+    controller.queue_pcm_audio(second, scene_name=scene.name)
+    requests: list[tuple[str, dict[str, object]]] = []
+
+    def request(method: str, params: dict[str, object]) -> str:
+        requests.append((method, params))
+        return f"request-{len(requests)}"
+
+    controller.client.request = request
+    controller._poll_pcm_ingress()
+    controller._poll_pcm_ingress()
+
+    assert [method for method, _params in requests] == ["stream_chunk"]
+    assert controller.pcm_ingress is not None
+    assert list(controller.pcm_ingress.chunks) == [second]
+
+    controller._handle_response({"id": "request-1", "result": {}})
+    controller._handle_event(
+        {"event": "stream_credit", "operation_id": "stream-1", "data": {}}
+    )
+    controller._poll_pcm_ingress()
+
+    assert [method for method, _params in requests] == [
+        "stream_chunk",
+        "stream_chunk",
+    ]
+    assert controller.pcm_ingress is not None
+    assert list(controller.pcm_ingress.chunks) == []
 
 
 def test_stream_start_response_rejects_noninteger_sample_rate(
@@ -1663,12 +1941,16 @@ def test_exact_stream_frame_routes_negative_timestamp_and_arkit52(
         {
             "event": "stream_frame",
             "operation_id": "stream-1",
-            "data": {"timestamp_sample": -320, "weights": weights},
+            "data": {
+                "timestamp_sample": -320,
+                "weights": weights,
+                "emotions": MODEL_EMOTIONS.copy(),
+            },
         }
     )
 
     assert runtime._test_live_controller.receive_calls == [
-        ("stream-1", -320, weights)
+        ("stream-1", -320, weights, MODEL_EMOTIONS)
     ]
     assert settings.status == "STREAMING"
 
@@ -1695,6 +1977,7 @@ def test_late_frame_from_a_canceling_stream_is_drained_without_delivery(
             "data": {
                 "timestamp_sample": 0,
                 "weights": [0.0] * len(MODEL_CHANNELS),
+                "emotions": MODEL_EMOTIONS.copy(),
             },
         }
     )
@@ -1849,6 +2132,7 @@ def test_malformed_stream_frame_terminates_the_active_stream(
             "data": {
                 "timestamp_sample": 0,
                 "weights": [0.0] * len(MODEL_CHANNELS),
+                "emotions": MODEL_EMOTIONS.copy(),
                 "unexpected": True,
             },
         }
@@ -2148,6 +2432,10 @@ def test_runtime_survives_blend_file_replacement_with_fresh_controller(
 
         def close(self) -> None:
             cleanup_order.append(f"close-{self.number}")
+
+        @staticmethod
+        def _editable_scenes() -> tuple[object, ...]:
+            return ()
 
     monkeypatch.setattr(runtime, "RuntimeController", StubController)
     runtime.register_runtime()

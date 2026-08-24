@@ -11,7 +11,7 @@ import struct
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
@@ -19,6 +19,7 @@ import bpy
 
 from .live_stream import (
     LiveStreamError,
+    clear_playback_position,
     get_live_stream_controller,
     unregister_live_stream,
     validate_stream_frame,
@@ -52,6 +53,10 @@ from .sidecar import (
     SidecarError,
 )
 from .wav_stream import WavStreamSource
+
+
+def _model_emotion_channels(model_schema: dict[str, Any]) -> list[str]:
+    return [descriptor["name"] for descriptor in model_schema["emotion_channels"]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,6 +156,7 @@ class ActiveStream:
     operation_id: str
     scene_name: str
     wav_source: SelectedWavSource | None
+    chunk_credit: threading.Event = field(default_factory=threading.Event)
     prebuffer_samples: int | None = None
     end_sent: bool = False
     stop_requested: bool = False
@@ -158,13 +164,32 @@ class ActiveStream:
     refresh_deadline: float | None = None
 
 
+@dataclass(slots=True)
+class _StatusNotice:
+    """Presentation timing for one operational status, separate from RNA state."""
+
+    status: str
+    started_at: float
+    visible: bool = False
+
+
 POLL_INTERVAL_SECONDS = 0.10
 PLAYBACK_INTERVAL_SECONDS = 1.0 / 60.0
 INFERENCE_REFRESH_DELAY_SECONDS = 0.05
+_STATUS_NOTICE_DELAY_SECONDS = 0.25
 SHUTDOWN_TIMEOUT_SECONDS = 2.0
 HANDSHAKE_TIMEOUT_SECONDS = 15.0
 MAX_STREAM_CHUNK_BYTES = 256 * 1024
 MAX_PENDING_STREAM_CHUNKS = 64
+_STATUS_NOTICE_VALUES = frozenset(
+    {
+        "STARTING",
+        "LOADING_MODEL",
+        "STREAM_STARTING",
+        "STREAM_ENDING",
+        "STOPPING",
+    }
+)
 
 
 class RuntimeController:
@@ -199,6 +224,7 @@ class RuntimeController:
         self.active_stream: ActiveStream | None = None
         self.selected_restart: tuple[str, float, bool] | None = None
         self.pcm_ingress: PCMIngress | None = None
+        self._status_notices: dict[int, _StatusNotice] = {}
 
     def _scene(self, name: str | None) -> bpy.types.Scene | None:
         return bpy.data.scenes.get(name) if name else None
@@ -245,8 +271,8 @@ class RuntimeController:
         if not scene.is_editable:
             raise SidecarError("Audio2Face requires an editable local or library-override scene")
 
-    @staticmethod
     def _set_status(
+        self,
         scene: bpy.types.Scene,
         status: str,
         message: str,
@@ -254,11 +280,63 @@ class RuntimeController:
         if not scene.is_editable:
             return
         settings = scene.audio2face
+        previous_status = settings.status
         changed = settings.status != status or settings.status_message != message
         settings.status = status
         settings.status_message = message
         if changed:
-            RuntimeController._tag_runtime_setup_redraw()
+            scene_key = int(scene.as_pointer())
+            current = self._status_notices.get(scene_key)
+            if status in _STATUS_NOTICE_VALUES:
+                if previous_status != status or current is None:
+                    self._status_notices[scene_key] = _StatusNotice(
+                        status=status,
+                        started_at=time.monotonic(),
+                    )
+            else:
+                self._status_notices.pop(scene_key, None)
+            self._tag_runtime_setup_redraw()
+
+    def status_notice(
+        self,
+        scene: bpy.types.Scene,
+    ) -> tuple[str, str] | None:
+        """Return only an error or an informational status that has persisted."""
+
+        settings = scene.audio2face
+        if settings.status == "ERROR":
+            return settings.status, settings.status_message
+        notice = self._status_notices.get(int(scene.as_pointer()))
+        if (
+            notice is None
+            or not notice.visible
+            or notice.status != settings.status
+        ):
+            return None
+        return settings.status, settings.status_message
+
+    def _poll_status_notices(self) -> None:
+        """Reveal a still-current informational status after one stable delay."""
+
+        scenes = {
+            int(scene.as_pointer()): scene
+            for scene in self._editable_scenes()
+        }
+        now = time.monotonic()
+        redraw = False
+        for scene_key, notice in tuple(self._status_notices.items()):
+            scene = scenes.get(scene_key)
+            if scene is None or scene.audio2face.status != notice.status:
+                redraw = redraw or notice.visible
+                del self._status_notices[scene_key]
+            elif (
+                not notice.visible
+                and now - notice.started_at >= _STATUS_NOTICE_DELAY_SECONDS
+            ):
+                notice.visible = True
+                redraw = True
+        if redraw:
+            self._tag_runtime_setup_redraw()
 
     @staticmethod
     def _selected_path(value: str, description: str) -> Path:
@@ -675,6 +753,7 @@ class RuntimeController:
                 operation_id,
                 sample_rate,
                 model_schema["channels"],
+                _model_emotion_channels(model_schema),
                 audio_path=audio_path,
                 audio_start_position=audio_start_position,
                 start_paused=start_paused,
@@ -725,11 +804,13 @@ class RuntimeController:
             raise
 
         scene.audio2face.stream_time = 0.0
-        self.active_stream = ActiveStream(
+        stream = ActiveStream(
             operation_id=operation_id,
             scene_name=scene.name,
             wav_source=wav_source,
         )
+        stream.chunk_credit.set()
+        self.active_stream = stream
         self._set_status(scene, "STREAM_STARTING", "Preparing audio inference")
         return operation_id
 
@@ -806,23 +887,23 @@ class RuntimeController:
         if stream is None or stream.operation_id != operation_id:
             raise SidecarError("the requested PCM stream is not active")
         with self.pending_lock:
-            pending_chunks = sum(
-                pending.method == "stream_chunk" for pending in self.pending.values()
-            )
-            if pending_chunks >= MAX_PENDING_STREAM_CHUNKS:
-                raise SidecarError(
-                    "stream audio queue is full; the source is outrunning inference"
+            if not stream.chunk_credit.is_set():
+                raise SidecarError("wait for the worker's next PCM chunk credit")
+            stream.chunk_credit.clear()
+            try:
+                return self._request_locked(
+                    stream.scene_name,
+                    "stream_chunk",
+                    {
+                        "operation_id": operation_id,
+                        "audio_f32le_base64": base64.b64encode(audio_f32le).decode("ascii"),
+                    },
+                    model_signature=None,
+                    operation_id=operation_id,
                 )
-            return self._request_locked(
-                stream.scene_name,
-                "stream_chunk",
-                {
-                    "operation_id": operation_id,
-                    "audio_f32le_base64": base64.b64encode(audio_f32le).decode("ascii"),
-                },
-                model_signature=None,
-                operation_id=operation_id,
-            )
+            except Exception:
+                stream.chunk_credit.set()
+                raise
 
     def queue_pcm_audio(self, audio_f32le: bytes, *, scene_name: str) -> None:
         """Buffer live PCM; the main-thread poller opens the stream on first audio."""
@@ -940,6 +1021,10 @@ class RuntimeController:
             + prebuffer_samples
             + prediction_lead
         )
+        stream = self.active_stream
+        if stream is None or stream.operation_id != operation_id:
+            raise SidecarError("the selected-WAV stream is no longer active")
+        chunk_credit = stream.chunk_credit
 
         def run_source() -> None:
             try:
@@ -985,6 +1070,11 @@ class RuntimeController:
                                 if wav_source.cancel.wait(min(0.05, delay)):
                                     return
                         self._send_stream_audio(chunk, operation_id=operation_id)
+                        while not chunk_credit.wait(0.05):
+                            if wav_source.cancel.is_set():
+                                return
+                        if wav_source.cancel.is_set():
+                            return
                         samples_sent += len(chunk) // 4
                 if wav_source.cancel.is_set():
                     return
@@ -1095,50 +1185,49 @@ class RuntimeController:
             return
         operation_id = stream.operation_id
 
-        for _unused in range(8):
-            with self.pending_lock:
-                current = self.pcm_ingress
-                if current is not ingress:
-                    return
-                chunk = current.chunks.popleft() if current.chunks else None
-                should_end = (
-                    chunk is None
-                    and current.ending
-                    and not stream.end_sent
+        with self.pending_lock:
+            current = self.pcm_ingress
+            if current is not ingress:
+                return
+            if not stream.chunk_credit.is_set():
+                return
+            chunk = current.chunks.popleft() if current.chunks else None
+            should_end = (
+                chunk is None
+                and current.ending
+                and not stream.end_sent
+            )
+        if chunk is not None:
+            try:
+                self._send_stream_audio(chunk, operation_id=operation_id)
+            except SidecarError as exc:
+                with self.pending_lock:
+                    current = self.pcm_ingress
+                    if current is ingress:
+                        current.chunks.appendleft(chunk)
+                self._fail_stream(
+                    scene,
+                    operation_id,
+                    str(exc),
+                    cancel_worker=True,
                 )
-            if chunk is not None:
-                try:
-                    self._send_stream_audio(chunk, operation_id=operation_id)
-                except SidecarError as exc:
-                    with self.pending_lock:
-                        current = self.pcm_ingress
-                        if current is ingress:
-                            current.chunks.appendleft(chunk)
-                    self._fail_stream(
-                        scene,
-                        operation_id,
-                        str(exc),
-                        cancel_worker=True,
-                    )
-                    return
-                continue
-            if should_end:
-                try:
-                    self._queue_stream_end(operation_id)
-                except SidecarError as exc:
-                    self._fail_stream(
-                        scene,
-                        operation_id,
-                        str(exc),
-                        cancel_worker=True,
-                    )
-                else:
-                    self._set_status(
-                        scene,
-                        "STREAM_ENDING",
-                        "Draining final live audio frames",
-                    )
             return
+        if should_end:
+            try:
+                self._queue_stream_end(operation_id)
+            except SidecarError as exc:
+                self._fail_stream(
+                    scene,
+                    operation_id,
+                    str(exc),
+                    cancel_worker=True,
+                )
+            else:
+                self._set_status(
+                    scene,
+                    "STREAM_ENDING",
+                    "Draining final live audio frames",
+                )
 
     def _release_active_stream(self, operation_id: str | None = None) -> None:
         stream = self.active_stream
@@ -1274,6 +1363,8 @@ class RuntimeController:
 
         self.selected_restart = (scene.name, position, paused)
         stream.stop_requested = True
+        if stream.wav_source is not None:
+            stream.wav_source.cancel.set()
         try:
             self._request(
                 scene,
@@ -1286,8 +1377,6 @@ class RuntimeController:
             self.selected_restart = None
             stream.stop_requested = False
             raise
-        if stream.wav_source is not None:
-            stream.wav_source.cancel.set()
         live = get_live_stream_controller()
         try:
             live.stop_for_seek(position, paused=paused)
@@ -1361,7 +1450,7 @@ class RuntimeController:
             settings = scene.audio2face
             settings.playback_state = "IDLE"
             settings.playback_duration = 0.0
-            settings.playback_progress = 0.0
+            clear_playback_position(settings)
             self._set_status(scene, "ERROR", str(exc))
 
     def _fail_stream(
@@ -1687,7 +1776,15 @@ class RuntimeController:
             return
         settings = scene.audio2face
 
-        if event == "stream_reset":
+        if event == "stream_credit":
+            if data:
+                self._reject_worker_contract(
+                    "stream-credit event data must be empty",
+                )
+                return
+            if not stream.stop_requested:
+                stream.chunk_credit.set()
+        elif event == "stream_reset":
             if data:
                 self._reject_worker_contract(
                     "stream-reset event data must be empty",
@@ -1700,7 +1797,7 @@ class RuntimeController:
             except LiveStreamError as exc:
                 self._reject_worker_contract(str(exc))
         elif event == "stream_frame":
-            if set(data) != {"timestamp_sample", "weights"}:
+            if set(data) != {"timestamp_sample", "weights", "emotions"}:
                 self._reject_worker_contract(
                     "worker returned invalid stream-frame data",
                 )
@@ -1715,8 +1812,10 @@ class RuntimeController:
                 try:
                     validate_stream_frame(
                         tuple(model_schema["channels"]),
+                        tuple(_model_emotion_channels(model_schema)),
                         data["timestamp_sample"],
                         data["weights"],
+                        data["emotions"],
                     )
                 except (LiveStreamError, TypeError, ValueError) as exc:
                     self._reject_worker_contract(str(exc))
@@ -1733,17 +1832,18 @@ class RuntimeController:
                     operation_id,
                     timestamp,
                     data["weights"],
+                    data["emotions"],
                 )
             except (LiveStreamError, TypeError, ValueError) as exc:
                 self._reject_worker_contract(str(exc))
                 return
             if stream.end_sent:
-                settings.status_message = "Draining final streamed ARKit-52 frames"
+                settings.status_message = "Draining final Audio2Face frames"
             else:
                 self._set_status(
                     scene,
                     "STREAMING",
-                    "Streaming ARKit-52 Shape Key values",
+                    "Streaming ARKit-52 and emotion values",
                 )
         elif event == "stream_ended":
             if data:
@@ -1770,7 +1870,7 @@ class RuntimeController:
                     self._set_status(
                         scene,
                         "STREAMING",
-                        "Finishing buffered streamed audio and ARKit-52 values",
+                        "Finishing buffered streamed audio and Audio2Face values",
                     )
                 else:
                     self._set_status(
@@ -1794,6 +1894,8 @@ class RuntimeController:
                 message = "worker returned invalid operation error data"
                 self._reject_worker_contract(message)
                 return
+            if stream.wav_source is not None:
+                stream.wav_source.cancel.set()
             message = f"{code}: {worker_message}"
             self._fail_stream(
                 scene,
@@ -1908,6 +2010,8 @@ class RuntimeController:
             message = f"Audio2Face worker handshake timed out{detail}"
             self._reject_worker_contract(message)
 
+        self._poll_status_notices()
+
     def close(self) -> None:
         if self.optimization_cancel is not None:
             with self.optimization_commit_lock:
@@ -1938,6 +2042,7 @@ class RuntimeController:
         self.optimization_progress = 0.0
         self._release_active_stream()
         self.selected_restart = None
+        self._status_notices.clear()
         with self.optimization_progress_lock:
             self.optimization_latest_progress = None
 
@@ -1953,16 +2058,17 @@ def get_controller() -> RuntimeController:
 
 
 def _timer_callback() -> float | None:
-    if _CONTROLLER is None:
+    controller = _CONTROLLER
+    if controller is None:
         return None
     try:
-        _CONTROLLER.poll()
+        controller.poll()
         stream_active = get_live_stream_controller().tick()
     except Exception as exc:  # Keep timer alive, but surface the main-thread failure.
         stream_active = False
         scene = bpy.context.scene
         if scene is not None and hasattr(scene, "audio2face"):
-            RuntimeController._set_status(scene, "ERROR", str(exc))
+            controller._set_status(scene, "ERROR", str(exc))
     return PLAYBACK_INTERVAL_SECONDS if stream_active else POLL_INTERVAL_SECONDS
 
 
@@ -2000,6 +2106,8 @@ def _load_post_handler(_unused: object) -> None:
 
 def register_runtime() -> None:
     get_controller()
+    for scene in RuntimeController._editable_scenes():
+        clear_playback_position(scene.audio2face)
     if _load_pre_handler not in bpy.app.handlers.load_pre:
         bpy.app.handlers.load_pre.append(_load_pre_handler)
     if _load_post_handler not in bpy.app.handlers.load_post:

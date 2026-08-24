@@ -30,7 +30,7 @@ WorkerError::WorkerError(std::string code, std::string message, json details)
 
 namespace {
 
-constexpr const char* kProtocol = "audio2face/5";
+constexpr const char* kProtocol = "audio2face/7";
 constexpr std::size_t kMaximumRequestBytes = 1024U * 1024U;
 constexpr std::size_t kStreamQueueSeconds = 4;
 
@@ -341,7 +341,7 @@ class Server {
     if (method == "hello") {
       require_exact_keys(params, {});
       emitter_.response(
-          id, {{"worker_profile", "nvidia-a2f3-a2e3-gpu-arkit52/5"},
+          id, {{"worker_profile", "nvidia-a2f3-a2e3-gpu-arkit52/7"},
                {"worker_version", A2F_WORKER_VERSION}});
       negotiated_ = true;
       return;
@@ -571,7 +571,8 @@ class Server {
       emit_active_stream_event(
           operation_id, "stream_frame",
           {{"timestamp_sample", frame.timestamp_sample},
-           {"weights", frame.weights}});
+           {"weights", frame.weights},
+           {"emotions", frame.emotions}});
     };
     const auto emit_reset = [this, &operation_id]() {
       emit_active_stream_event(operation_id, "stream_reset", json::object());
@@ -593,6 +594,7 @@ class Server {
         command.response_gate.get();
         if (canceled_.load(std::memory_order_acquire)) break;
         if (command.kind == StreamCommand::Kind::Chunk) {
+          emit_active_stream_event(operation_id, "stream_credit", json::object());
           backend_.stream_chunk(command.audio, canceled_, emit_frame);
           continue;
         }

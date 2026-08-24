@@ -155,14 +155,15 @@ external model root or its generated engine.
 ## Runtime contract
 
 The process is silent until `hello {}` and communicates only through strict
-`audio2face/5` UTF-8 JSON Lines on stdin/stdout. It reports worker profile
-`nvidia-a2f3-a2e3-gpu-arkit52/5`.
+`audio2face/7` UTF-8 JSON Lines on stdin/stdout. It reports worker profile
+`nvidia-a2f3-a2e3-gpu-arkit52/7`.
 
 One non-interactive diffusion/device-blendshape executor and one Audio2Emotion
 executor serve both input modes on CUDA device 0. The worker reports the
 model-owned channel, emotion, and Audio2Face defaults; accepts ordered streaming
-audio and complete settings snapshots; and emits incremental model-channel
-frames. It opens no socket, and an idle loaded model does not run inference.
+audio and complete settings snapshots; and emits incremental frames containing
+aligned ARKit weights and effective post-processed emotion values. It opens no
+socket, and an idle loaded model does not run inference.
 
 The exact transport, settings, model schema, streaming, cancellation, and
 shutdown contracts are in [`docs/protocol.md`](../docs/protocol.md). Process

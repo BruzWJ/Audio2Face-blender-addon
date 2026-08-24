@@ -62,7 +62,7 @@ def _make_invalid_utf8_worker(tmp_path: Path) -> Path:
             #!/usr/bin/env python3
             import sys
 
-            sys.stdout.buffer.write(b'{"protocol":"audio2face/5","type":"response","id":"x","result":{"value":"\\xff"}}\\n')
+            sys.stdout.buffer.write(b'{"protocol":"audio2face/7","type":"response","id":"x","result":{"value":"\\xff"}}\\n')
             sys.stdout.buffer.flush()
             for _line in sys.stdin:
                 pass

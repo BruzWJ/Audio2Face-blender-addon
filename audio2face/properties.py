@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import struct
 
 import bpy
 from bpy.props import (
@@ -94,6 +95,8 @@ _AUDIO2FACE_FLOAT_RANGES = {
     "left_eye_rot_y_offset": (-10.0, 10.0),
 }
 
+_effective_emotion_write_depth = 0
+
 
 def _inference_setting_updated(
     _settings: bpy.types.PropertyGroup,
@@ -101,6 +104,8 @@ def _inference_setting_updated(
 ) -> None:
     """Refresh inference from one shared RNA update callback."""
 
+    if _effective_emotion_write_depth:
+        return
     scene = getattr(context, "scene", None)
     if scene is None or not hasattr(scene, "audio2face"):
         return
@@ -394,15 +399,6 @@ class A2FSceneSettings(bpy.types.PropertyGroup):
     playback_duration: FloatProperty(
         name="Playback Duration", default=0.0, min=0.0, unit="TIME", options={"SKIP_SAVE"}
     )
-    playback_progress: FloatProperty(
-        name="Playback Position",
-        description="Seek within the selected audio playback",
-        default=0.0,
-        min=0.0,
-        max=1.0,
-        subtype="FACTOR",
-        options={"SKIP_SAVE"},
-    )
     stream_time: FloatProperty(
         name="Stream Time", default=0.0, min=0.0, unit="TIME", options={"SKIP_SAVE"}
     )
@@ -433,6 +429,13 @@ def _finite_float_in_range(
     if type(value) is not float or not math.isfinite(value):
         raise ValueError(f"{label} must be a finite float")
     result = value
+    # Blender RNA and NVIDIA's SDK store these values as IEEE-754 binary32.
+    storage_minimum = struct.unpack("=f", struct.pack("=f", minimum))[0]
+    storage_maximum = struct.unpack("=f", struct.pack("=f", maximum))[0]
+    if result == storage_minimum:
+        result = minimum
+    elif result == storage_maximum:
+        result = maximum
     if result < minimum or result > maximum:
         raise ValueError(f"{label} must be in [{minimum:g}, {maximum:g}]")
     return result
@@ -545,6 +548,39 @@ def _manual_emotion_values(settings: A2FSceneSettings) -> dict[str, float]:
 
 def _preferred_emotion_values(settings: A2FSceneSettings) -> dict[str, float]:
     return _emotion_values(settings.preferred_emotions, label="preferred emotion")
+
+
+def apply_effective_emotions(
+    settings: A2FSceneSettings,
+    emotion_channels: tuple[str, ...],
+    values: tuple[float, ...],
+) -> None:
+    """Publish one worker frame into the model-defined emotion controls."""
+
+    if type(emotion_channels) is not tuple:
+        raise ValueError("effective emotion channels must be a tuple")
+    current_channels = tuple(item.name for item in settings.manual_emotions)
+    if emotion_channels != current_channels:
+        raise ValueError(
+            "effective emotion channels do not match the loaded model schema"
+        )
+    if type(values) is not tuple or len(values) != len(emotion_channels):
+        raise ValueError(
+            "effective emotion values do not match the loaded model schema"
+        )
+    displayed: list[float] = []
+    for name, value in zip(emotion_channels, values):
+        if type(value) is not float or not math.isfinite(value):
+            raise ValueError(f"effective emotion {name!r} must be a finite float")
+        displayed.append(min(max(value, 0.0), 1.0))
+
+    global _effective_emotion_write_depth
+    _effective_emotion_write_depth += 1
+    try:
+        for item, value in zip(settings.manual_emotions, displayed):
+            item.value = value
+    finally:
+        _effective_emotion_write_depth -= 1
 
 
 def load_preferred_emotion(settings: A2FSceneSettings) -> None:

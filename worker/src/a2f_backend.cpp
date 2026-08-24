@@ -426,6 +426,9 @@ class Backend::Impl final {
       sdk_check(nva2f::SetExecutorGeometryResultsCallback(
                     executor, &Impl::geometry_callback, this),
                 "Installing geometry callback");
+      sdk_check(executor.SetEmotionsCallback(
+                    &Impl::face_emotions_callback, this),
+                "Installing effective emotion callback");
       sdk_check(executor.SetResultsCallback(&Impl::weights_callback, this),
                 "Installing device blendshape callback");
 
@@ -600,11 +603,13 @@ class Backend::Impl final {
     std::int64_t next_timestamp{0};
     SdkPtr<nva2x::IHostTensorFloat> weights;
     SdkPtr<nva2x::IHostTensorFloat> eyes;
+    SdkPtr<nva2x::IHostTensorFloat> emotions;
   };
 
   struct Capture {
     std::atomic_bool* canceled{nullptr};
     std::size_t weight_count{0};
+    std::size_t emotion_count{0};
     std::map<std::int64_t, PendingFrame> frames;
     const char* failure{nullptr};
   };
@@ -619,6 +624,12 @@ class Backend::Impl final {
 
   static void fail_capture(Capture& capture, const char* message) noexcept {
     capture.failure = message;
+  }
+
+  static bool pending_timestamp_matches(
+      const PendingFrame& frame, std::int64_t next_timestamp) noexcept {
+    return (!frame.weights && !frame.eyes && !frame.emotions) ||
+           frame.next_timestamp == next_timestamp;
   }
 
   static bool emotion_callback(
@@ -645,6 +656,47 @@ class Backend::Impl final {
     return true;
   }
 
+  static void face_emotions_callback(
+      void* userdata, const nva2f::IFaceExecutor::Emotions& results) {
+    auto& owner = *static_cast<Impl*>(userdata);
+    if (owner.active_capture_ == nullptr) return;
+    auto& capture = *owner.active_capture_;
+    if (capture.canceled->load(std::memory_order_acquire)) return;
+    try {
+      if (results.trackIndex != 0) {
+        fail_capture(capture,
+                     "Face emotion callback returned an unexpected track");
+        return;
+      }
+      if (results.emotions.Size() != capture.emotion_count) {
+        fail_capture(
+            capture,
+            "Face emotion callback returned an unexpected value count");
+        return;
+      }
+      auto& frame = capture.frames[results.timeStampCurrentFrame];
+      if (frame.emotions ||
+          !pending_timestamp_matches(frame, results.timeStampNextFrame)) {
+        fail_capture(
+            capture,
+            "Face emotion callback returned a duplicate or inconsistent frame");
+        return;
+      }
+      frame.next_timestamp = results.timeStampNextFrame;
+      frame.emotions = require_sdk_ptr(
+          nva2x::CreateHostPinnedTensorFloat(capture.emotion_count),
+          "Allocating pinned emotion result buffer", "gpu_error");
+      const auto error = nva2x::CopyDeviceToHost(
+          frame.emotions->View(0, capture.emotion_count),
+          results.emotions, results.cudaStream);
+      if (error) {
+        fail_capture(capture, "Copying effective emotions failed");
+      }
+    } catch (...) {
+      fail_capture(capture, "Face emotion callback failed");
+    }
+  }
+
   static bool geometry_callback(
       void* userdata, const nva2f::IGeometryExecutor::Results& results) {
     auto& owner = *static_cast<Impl*>(userdata);
@@ -663,8 +715,7 @@ class Backend::Impl final {
       }
       auto& frame = capture.frames[results.timeStampCurrentFrame];
       if (frame.eyes ||
-          (frame.weights &&
-           frame.next_timestamp != results.timeStampNextFrame)) {
+          !pending_timestamp_matches(frame, results.timeStampNextFrame)) {
         fail_capture(capture,
                      "Geometry callback returned a duplicate or inconsistent frame");
         return false;
@@ -706,7 +757,7 @@ class Backend::Impl final {
       }
       auto& frame = capture.frames[results.timeStampCurrentFrame];
       if (frame.weights ||
-          (frame.eyes && frame.next_timestamp != results.timeStampNextFrame)) {
+          !pending_timestamp_matches(frame, results.timeStampNextFrame)) {
         fail_capture(
             capture,
             "Blendshape callback returned a duplicate or inconsistent frame");
@@ -939,6 +990,7 @@ class Backend::Impl final {
     Capture capture;
     capture.canceled = &canceled;
     capture.weight_count = executor().GetWeightCount();
+    capture.emotion_count = emotion_channels_.size();
     active_capture_ = &capture;
     std::error_code execute_error;
     try {
@@ -960,7 +1012,7 @@ class Backend::Impl final {
 
     for (const auto& [timestamp, pending] : capture.frames) {
       const std::int64_t stream_timestamp = absolute_timestamp(timestamp);
-      if (!pending.weights || !pending.eyes) {
+      if (!pending.weights || !pending.eyes || !pending.emotions) {
         throw WorkerError("inference_failed",
                           "SDK callbacks returned an incomplete frame",
                           {{"timestamp", stream_timestamp}});
@@ -992,6 +1044,19 @@ class Backend::Impl final {
                              {"component", index}});
         }
       }
+      std::vector<float> emotions;
+      emotions.reserve(pending.emotions->Size());
+      for (std::size_t index = 0; index < pending.emotions->Size(); ++index) {
+        const float value = pending.emotions->Data()[index];
+        if (!std::isfinite(value)) {
+          throw WorkerError(
+              "inference_failed",
+              "SDK produced a non-finite emotion",
+              {{"timestamp", stream_timestamp}, {"channel", index},
+               {"value", value}});
+        }
+        emotions.push_back(value);
+      }
       resolve_arkit_eye_look(arkit, pending.eyes->Data(), eye_look_indices_);
       for (float& value : arkit) {
         if (!std::isfinite(value)) {
@@ -1005,7 +1070,8 @@ class Backend::Impl final {
         throw WorkerError("canceled", "Operation was stopped");
       }
       previous_timestamp_ = stream_timestamp;
-      frame_callback(StreamFrame{stream_timestamp, std::move(arkit)});
+      frame_callback(StreamFrame{stream_timestamp, std::move(arkit),
+                                 std::move(emotions)});
     }
   }
 

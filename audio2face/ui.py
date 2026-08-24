@@ -6,7 +6,11 @@ from typing import TYPE_CHECKING
 
 import bpy
 
-from .live_stream import get_live_stream_controller
+from .live_stream import (
+    PLAYBACK_POSITION_PATH,
+    get_live_stream_controller,
+    playback_position,
+)
 from .properties import AUDIO2FACE_SETTING_GROUPS
 from .runtime import RuntimeController, get_controller
 from .sidecar import Lifecycle
@@ -45,14 +49,14 @@ def _draw_audio_playback(
         if settings.playback_duration > 0.0:
             seek_row = playback_box.row()
             seek_row.enabled = playback.can_seek
-            seek_row.prop(settings, "playback_progress", text="", slider=True)
+            seek_row.prop(settings, PLAYBACK_POSITION_PATH, text="", slider=True)
             playback_box.label(
                 text=(
-                    f"{_timecode(settings.playback_progress * settings.playback_duration)} / "
+                    f"{_timecode(playback_position(settings))} / "
                     f"{_timecode(settings.playback_duration)}"
                 )
             )
-        playback_box.prop(settings, "prediction_delay")
+        playback_box.prop(settings, "prediction_delay", slider=True)
         return
 
     if settings.input_mode != "STREAM":
@@ -145,22 +149,16 @@ class A2F_PT_main(bpy.types.Panel):
         elif not setup.engine_status.ready:
             runtime_message = setup.engine_status.message
 
-        visible_statuses = {
-            "STARTING",
-            "LOADING_MODEL",
-            "STREAM_STARTING",
-            "STREAM_ENDING",
-            "STOPPING",
-            "ERROR",
-        }
-        if settings.status in visible_statuses:
+        status_notice = controller.status_notice(context.scene)
+        if status_notice is not None:
+            status, message = status_notice
             status_box = layout.box()
-            status_box.alert = settings.status == "ERROR"
+            status_box.alert = status == "ERROR"
             draw_wrapped_label(
                 status_box,
-                settings.status_message,
+                message,
                 width=text_width,
-                icon="ERROR" if settings.status == "ERROR" else "TIME",
+                icon="ERROR" if status == "ERROR" else "TIME",
             )
         if controller.optimization_in_progress:
             runtime_box = layout.box()
@@ -251,11 +249,11 @@ class A2F_PT_main(bpy.types.Panel):
         emotion_controls = emotion_box.column(align=True)
         emotion_controls.prop(settings, "auto_audio2emotion")
         auto_controls = emotion_controls.column(align=True)
-        auto_controls.prop(settings, "a2e_emotion_strength")
-        auto_controls.prop(settings, "a2e_max_emotions")
-        auto_controls.prop(settings, "a2e_emotion_contrast")
-        auto_controls.prop(settings, "a2e_live_blend_coef")
-        auto_controls.prop(settings, "a2e_transition_smoothing")
+        auto_controls.prop(settings, "a2e_emotion_strength", slider=True)
+        auto_controls.prop(settings, "a2e_max_emotions", slider=True)
+        auto_controls.prop(settings, "a2e_emotion_contrast", slider=True)
+        auto_controls.prop(settings, "a2e_live_blend_coef", slider=True)
+        auto_controls.prop(settings, "a2e_transition_smoothing", slider=True)
         preferred_row = auto_controls.row(align=True)
         preferred_row.label(
             text=(
@@ -266,11 +264,14 @@ class A2F_PT_main(bpy.types.Panel):
         )
         preferred_row.operator("a2f.load_preferred_emotion", text="Load")
         preferred_row.operator("a2f.clear_preferred_emotion", text="Clear")
-        auto_controls.prop(settings, "a2e_preferred_emotion_strength")
+        auto_controls.prop(
+            settings,
+            "a2e_preferred_emotion_strength",
+            slider=True,
+        )
 
         if settings.manual_emotions:
             emotion_controls.separator()
-            emotion_controls.label(text="Manual Emotion")
             for emotion in settings.manual_emotions:
                 emotion_controls.prop(
                     emotion,

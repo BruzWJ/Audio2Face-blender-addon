@@ -121,10 +121,11 @@ driver caches.
 4. Optionally select mesh objects and click **Add Selected Meshes**.
 5. Click **Start Worker**. Blender launches the verified package-local worker,
    negotiates the protocol, and loads both selected models.
-6. The manual emotion sliders remain available in both modes. Leave **Auto
-   Audio2Emotion** off to apply the current manual emotion vector directly. Enable
-   it to infer emotion from the same audio. **Load** under **Preferred Emotion**
-   captures the current manual sliders for mixing with generated emotion;
+6. The emotion sliders remain available in both modes. Leave **Auto
+   Audio2Emotion** off to apply the current emotion vector directly. Enable it
+   to infer emotion from the same audio and display the effective values on
+   those sliders. **Load** under **Preferred Emotion** captures the current
+   slider values for mixing with generated emotion;
    **Clear** removes that captured preference.
 7. In Selected WAV mode, press **Play**. Playback automatically starts
    incremental inference and drives matching Shape Keys as frames arrive.
@@ -179,7 +180,9 @@ after the worker's required input lead is queued. ARKit frames are sampled
 against Blender's audio-device clock as they arrive. **Pause** freezes both
 audio and WAV pacing. **Loop** and the duration-based seek control
 restart that stream at the requested audio position while keeping the worker
-and models loaded. The elapsed / duration timecode and **Prediction Delay**
+and models loaded. The seek control is an editable Blender slider whose native
+range is `0` through the selected WAV's duration, not a normalized progress
+display. The elapsed / duration timecode and **Prediction Delay**
 from `-1.0` to `1.0` seconds remain playback controls. Positive delay advances
 facial motion relative to audible audio; negative delay makes it lag.
 
@@ -203,7 +206,7 @@ synchronization.
 
 `load_model` returns a self-describing `model_schema` with exactly `channels`,
 `emotion_channels`, and `audio2face_defaults`. Blender builds target-channel
-delivery and manual emotion controls from the first two values and seeds its
+delivery and emotion controls from the first two values and seeds its
 fixed Audio2Face controls from the model-reported defaults. It does not define
 an independent output or emotion name list. The worker uses the Audio2Face
 model's default identity at SDK index `0` internally; Blender has no identity
@@ -212,7 +215,7 @@ selector or identity state.
 `stream_start` installs one exact initial settings snapshot containing the fixed
 18-field `audio2face` object, `auto_audio2emotion`, all model-described
 `manual_emotions`, and the `audio2emotion` object. Audio2Emotion controls remain
-available regardless of the **Auto Audio2Emotion** toggle, and the manual
+available regardless of the **Auto Audio2Emotion** toggle, and the same emotion
 sliders remain visible in both modes. These are the Audio2Emotion defaults:
 
 ```json
@@ -227,13 +230,17 @@ sliders remain visible in both modes. These are the Audio2Emotion defaults:
 }
 ```
 
-With automatic emotion off, the current manual snapshot is the direct,
-constant emotion driver. With it on, Audio2Emotion generates timestamped
-values and applies strength, contrast, retained-emotion count, temporal blend,
-and transition controls through NVIDIA's SDK post-processor. **Load** copies
-the current manual emotion values into a distinct preferred-emotion snapshot;
-later manual-slider changes do not mutate it. **Clear** unsets that snapshot.
-The loaded snapshot is saved with the Blender scene.
+With automatic emotion off, the current slider values are the direct, constant
+emotion driver. With it on, Audio2Emotion generates timestamped values and
+applies strength, contrast, retained-emotion count, temporal blend, and
+transition controls through NVIDIA's SDK post-processor. Each returned frame
+contains the effective emotion values sampled by Audio2Face, aligned with its
+ARKit weights; Blender presents those values on the existing factor sliders at
+the same time, clamping only their display when NVIDIA returns a finite value
+outside the factor range. **Load** copies the current emotion values into a
+distinct preferred-emotion snapshot; later slider changes do not mutate it.
+**Clear** unsets that snapshot. The loaded snapshot is saved with the Blender
+scene.
 When a preferred snapshot is loaded, for preferred-mix weight `p` the SDK
 computes `p * preferred + (1 - p) * generated`, then applies the overall
 emotion strength. Auto Audio2Emotion and the Preferred Emotion snapshot are
@@ -242,7 +249,7 @@ independent controls.
 The same complete settings contract applies to Selected WAV and Stream. A
 control edit queues one complete replacement snapshot on the active operation.
 The worker resets only its inference state, replays a bounded recent PCM
-context, and publishes replacement ARKit frames on the same timeline. The
+context, and publishes replacement face frames on the same timeline. The
 operation ID, audible playback, play/pause state, external PCM ingress, loaded
 models, and worker process remain unchanged. The exact fields, types, ranges,
 and replay boundary are defined in
@@ -254,10 +261,12 @@ and tensors are not controls.
 The worker reports the default v3 model's exact 52 unique channel names in
 model order. It resolves eye-look values into the corresponding model-provided
 channel slots without reordering the list. Both modes receive incremental
-`stream_frame` records in that negotiated order. Coefficients are finite and
-within `[0.0, 1.0]`; timestamps are integer audio-sample positions. Raw
-geometry, jaw transforms, eye rotations, and internal solver meshes never
-leave the worker.
+`stream_frame` records in that negotiated order. Each record also carries one
+effective, post-processed emotion value per `emotion_channels` entry in model
+order. Coefficients are finite and within `[0.0, 1.0]`; effective emotions are
+finite but are not clamped by NVIDIA's SDK. Both vectors share one integer
+audio-sample timestamp. Raw geometry, jaw transforms, eye rotations, and
+internal solver meshes never leave the worker.
 
 See [architecture](docs/architecture.md), [protocol](docs/protocol.md), and the
 [worker build guide](worker/README.md) for the full contracts.

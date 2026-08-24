@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import copy
 import importlib.util
+import re
+import struct
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -129,6 +131,7 @@ def _schema() -> dict[str, object]:
 
 def test_emotion_configuration_is_not_hidden_by_auto_mode() -> None:
     assert "if settings.auto_audio2emotion:" not in UI_SOURCE
+    assert 'text="Manual Emotion"' not in UI_SOURCE
     for name in (
         "a2e_preferred_emotion_strength",
         "a2e_emotion_strength",
@@ -137,15 +140,39 @@ def test_emotion_configuration_is_not_hidden_by_auto_mode() -> None:
         "a2e_live_blend_coef",
         "a2e_transition_smoothing",
     ):
-        assert f'auto_controls.prop(settings, "{name}")' in UI_SOURCE
+        assert re.search(
+            rf'auto_controls\.prop\(\s*settings,\s*"{name}",\s*slider=True,?\s*\)',
+            UI_SOURCE,
+        )
     assert '"a2f.load_preferred_emotion"' in UI_SOURCE
     assert '"a2f.clear_preferred_emotion"' in UI_SOURCE
+
+
+def test_prediction_delay_uses_a_range_slider() -> None:
+    assert (
+        'playback_box.prop(settings, "prediction_delay", slider=True)'
+        in UI_SOURCE
+    )
 
 
 def test_model_tuning_ui_exposes_only_the_fixed_audio2face_contract() -> None:
     assert 'text="Model Tuning"' in UI_SOURCE
     assert "AUDIO2FACE_SETTING_GROUPS" in UI_SOURCE
     assert "emotion_controls.enabled" not in UI_SOURCE
+
+
+def test_runtime_status_box_uses_the_persistence_gate() -> None:
+    assert "controller.status_notice(context.scene)" in UI_SOURCE
+    assert "visible_statuses" not in UI_SOURCE
+
+
+def test_playback_ui_uses_an_editable_absolute_time_slider() -> None:
+    assert (
+        'seek_row.prop(settings, PLAYBACK_POSITION_PATH, text="", slider=True)'
+        in UI_SOURCE
+    )
+    assert "playback_progress" not in UI_SOURCE
+    assert ".progress(" not in UI_SOURCE
 
 
 def test_shared_update_callback_refreshes_the_context_scene(
@@ -164,6 +191,109 @@ def test_shared_update_callback_refreshes_the_context_scene(
     properties_module._inference_setting_updated(None, SimpleNamespace(scene=scene))
 
     assert calls == [scene]
+
+
+def test_effective_emotions_update_visible_values_without_mutating_preferred(
+    properties_module: ModuleType,
+) -> None:
+    settings = _settings()
+    properties_module.apply_model_schema(settings, _schema(), MODEL_SIGNATURE)
+    properties_module.load_preferred_emotion(settings)
+
+    properties_module.apply_effective_emotions(
+        settings,
+        ("Neutral", "Joy"),
+        (0.1, 0.9),
+    )
+
+    assert [(item.name, item.value) for item in settings.manual_emotions] == [
+        ("Neutral", 0.1),
+        ("Joy", 0.9),
+    ]
+    assert [(item.name, item.value) for item in settings.preferred_emotions] == [
+        ("Neutral", 0.5),
+        ("Joy", 0.2),
+    ]
+
+
+def test_effective_emotion_writes_suppress_only_the_worker_refresh(
+    properties_module: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[object] = []
+    controller = SimpleNamespace(
+        refresh_inference_settings=lambda scene: calls.append(scene)
+    )
+    runtime = ModuleType("audio2face.runtime")
+    runtime.get_controller = lambda: controller  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "audio2face.runtime", runtime)
+    scene = SimpleNamespace(audio2face=object())
+    context = SimpleNamespace(scene=scene)
+
+    class CallbackItem:
+        def __init__(self, name: str) -> None:
+            self.name = name
+            self._value = 0.0
+
+        @property
+        def value(self) -> float:
+            return self._value
+
+        @value.setter
+        def value(self, value: float) -> None:
+            self._value = value
+            properties_module._inference_setting_updated(None, context)
+
+    settings = SimpleNamespace(
+        manual_emotions=[CallbackItem("Neutral"), CallbackItem("Joy")]
+    )
+
+    properties_module.apply_effective_emotions(
+        settings,
+        ("Neutral", "Joy"),
+        (0.25, 0.75),
+    )
+    assert calls == []
+
+    settings.manual_emotions[1].value = 0.5
+    assert calls == [scene]
+
+
+@pytest.mark.parametrize(
+    ("channels", "values"),
+    (
+        (("Joy", "Neutral"), (0.1, 0.9)),
+        (("Neutral", "Joy"), (0.1,)),
+        (("Neutral", "Joy"), (0.1, float("nan"))),
+    ),
+)
+def test_effective_emotions_require_the_exact_loaded_schema(
+    properties_module: ModuleType,
+    channels: tuple[str, ...],
+    values: tuple[float, ...],
+) -> None:
+    settings = _settings()
+    properties_module.apply_model_schema(settings, _schema(), MODEL_SIGNATURE)
+
+    with pytest.raises(ValueError):
+        properties_module.apply_effective_emotions(settings, channels, values)
+
+
+def test_effective_emotion_display_clamps_without_mutating_preferred(
+    properties_module: ModuleType,
+) -> None:
+    settings = _settings()
+    properties_module.apply_model_schema(settings, _schema(), MODEL_SIGNATURE)
+    properties_module.load_preferred_emotion(settings)
+
+    properties_module.apply_effective_emotions(
+        settings,
+        ("Neutral", "Joy"),
+        (-0.5, 1.5),
+    )
+
+    assert [item.value for item in settings.manual_emotions] == [0.0, 1.0]
+    assert [item.value for item in settings.preferred_emotions] == [0.5, 0.2]
 
 
 def test_prediction_delay_does_not_reset_inference(
@@ -492,4 +622,32 @@ def test_inference_settings_rejects_exact_malformed_audio2face_controls(
     setattr(settings, name, value)
 
     with pytest.raises(ValueError, match=message):
+        properties_module.inference_settings(settings)
+
+
+def test_inference_settings_accepts_declared_and_blender_float_endpoints(
+    properties_module: ModuleType,
+) -> None:
+    for name, bounds in properties_module._AUDIO2FACE_FLOAT_RANGES.items():
+        for endpoint in bounds:
+            stored = struct.unpack("=f", struct.pack("=f", endpoint))[0]
+            for value in (endpoint, stored):
+                settings = _settings()
+                setattr(settings, name, value)
+
+                payload = properties_module.inference_settings(settings)
+
+                assert payload["audio2face"][name] == endpoint
+
+
+def test_inference_settings_rejects_next_float_above_endpoint(
+    properties_module: ModuleType,
+) -> None:
+    settings = _settings()
+    endpoint_bits = struct.unpack("=I", struct.pack("=f", 0.2))[0]
+    settings.lip_open_offset = struct.unpack(
+        "=f", struct.pack("=I", endpoint_bits + 1)
+    )[0]
+
+    with pytest.raises(ValueError, match=r"lip_open_offset must be in"):
         properties_module.inference_settings(settings)

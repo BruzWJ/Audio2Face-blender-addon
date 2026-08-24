@@ -27,7 +27,13 @@ from audio2face.shape_keys import (  # noqa: E402
     apply_shape_key_frame,
     resolve_target_meshes,
 )
-from audio2face.live_stream import LiveStreamController  # noqa: E402
+from audio2face.live_stream import (  # noqa: E402
+    PLAYBACK_POSITION_KEY,
+    LiveStreamController,
+    clear_playback_position,
+    configure_playback_position,
+    playback_position,
+)
 from audio2face import runtime  # noqa: E402
 from audio2face.preferences import A2FAddonPreferences  # noqa: E402
 from audio2face.properties import (  # noqa: E402
@@ -164,7 +170,6 @@ def main() -> None:
         )
         assert {
             "prediction_delay",
-            "playback_progress",
             "auto_audio2emotion",
             "manual_emotions",
             "preferred_emotions",
@@ -227,6 +232,18 @@ def main() -> None:
         target = _make_shape_key_target(scene)
 
         settings = scene.audio2face
+        configure_playback_position(settings, 1.25, 4.0)
+        _assert_close(
+            playback_position(settings),
+            1.25,
+            label="absolute playback position",
+        )
+        playback_ui = settings.id_properties_ui(PLAYBACK_POSITION_KEY).as_dict()
+        assert playback_ui["subtype"] == "TIME"
+        _assert_close(playback_ui["min"], 0.0, label="playback slider min")
+        _assert_close(playback_ui["max"], 4.0, label="playback slider max")
+        clear_playback_position(settings)
+        assert PLAYBACK_POSITION_KEY not in settings
         model_schema = {
             "channels": MODEL_CHANNELS.copy(),
             "audio2face_defaults": MODEL_DEFAULTS.copy(),
@@ -246,6 +263,15 @@ def main() -> None:
             ("Neutral", 1.0),
             ("Joy", 0.0),
         ]
+        for name, bounds in expected_model_ranges.items():
+            if name == "eye_saccade_seed":
+                continue
+            original = getattr(settings, name)
+            for endpoint in bounds:
+                setattr(settings, name, endpoint)
+                payload = inference_settings(settings)
+                _assert_close(payload["audio2face"][name], endpoint, label=name)
+            setattr(settings, name, original)
         settings.manual_emotions[1].value = 0.75
         settings.input_strength = 2.0
         settings.blink_strength = 1.5
@@ -405,6 +431,7 @@ def main() -> None:
                 "blender-smoke-stream",
                 16_000,
                 MODEL_CHANNELS.copy(),
+                ["Neutral", "Joy"],
                 audio_path=None,
                 playback_started=None,
                 playback_stopped=None,
@@ -413,7 +440,12 @@ def main() -> None:
             streamed_frame[MODEL_CHANNELS.index("jawOpen")] = 0.375
             # The current SDK can emit receptive-field frames before sample zero.
             # They must be accepted and applied directly without animation data.
-            live.receive("blender-smoke-stream", -160, streamed_frame)
+            live.receive(
+                "blender-smoke-stream",
+                -160,
+                streamed_frame,
+                [0.25, 0.75],
+            )
             _assert_close(
                 target.data.shape_keys.key_blocks["jawOpen"].value,
                 0.375,
@@ -425,6 +457,16 @@ def main() -> None:
                 label="extra live-stream jawOpen",
             )
             _assert_close(settings.stream_time, 0.0, label="negative stream time clamp")
+            _assert_close(
+                settings.manual_emotions[0].value,
+                0.25,
+                label="effective Neutral",
+            )
+            _assert_close(
+                settings.manual_emotions[1].value,
+                0.75,
+                label="effective Joy",
+            )
             assert [tuple(vertex.co) for vertex in target.data.vertices] == primary_vertices
             assert [tuple(vertex.co) for vertex in extra_target.data.vertices] == extra_vertices
             assert target.data.shape_keys.animation_data is None

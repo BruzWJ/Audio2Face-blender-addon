@@ -10,8 +10,8 @@ from typing import Any
 from .strict_json import duplicate_key_hook, invalid_constant_hook
 
 
-PROTOCOL_VERSION = "audio2face/5"
-WORKER_PROFILE = "nvidia-a2f3-a2e3-gpu-arkit52/5"
+PROTOCOL_VERSION = "audio2face/7"
+WORKER_PROFILE = "nvidia-a2f3-a2e3-gpu-arkit52/7"
 MAX_CONTROL_LINE_BYTES = 1_048_576
 _CONTROL_TYPES = frozenset({"request", "response", "error", "event"})
 _REQUEST_METHODS = frozenset(
@@ -27,7 +27,7 @@ _REQUEST_METHODS = frozenset(
     }
 )
 _EVENT_NAMES = frozenset(
-    {"stream_frame", "stream_reset", "stream_ended", "error"}
+    {"stream_credit", "stream_frame", "stream_reset", "stream_ended", "error"}
 )
 _NAME_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
 

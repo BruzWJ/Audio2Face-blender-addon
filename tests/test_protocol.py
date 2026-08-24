@@ -38,7 +38,7 @@ def test_windows_native_transport_uses_binary_stdio() -> None:
 
 
 def test_native_worker_mirrors_the_python_wire_identity() -> None:
-    assert WORKER_PROFILE.rpartition("/")[2] == "5"
+    assert WORKER_PROFILE.rpartition("/")[2] == "7"
     assert f'constexpr const char* kProtocol = "{PROTOCOL_VERSION}";' in (
         WORKER_PROTOCOL_SOURCE
     )
@@ -47,6 +47,7 @@ def test_native_worker_mirrors_the_python_wire_identity() -> None:
         WORKER_PROTOCOL_SOURCE
     )
     assert MAX_CONTROL_LINE_BYTES == 1024 * 1024
+    assert '{"emotions", frame.emotions}' in WORKER_PROTOCOL_SOURCE
 
 
 def test_request_round_trip_is_compact_utf8_and_one_record() -> None:
@@ -71,12 +72,12 @@ def test_request_round_trip_is_compact_utf8_and_one_record() -> None:
     "line",
     [
         "{}\n",
-        '{"protocol":"audio2face/5","type":"response","id":"1","result":{}}',
+        '{"protocol":"audio2face/7","type":"response","id":"1","result":{}}',
         '{"protocol":"audio2face/999","type":"response","id":"1","result":{}}\n',
-        '{"protocol":"audio2face/5","type":"response","id":"1","result":{}}\n{}\n',
-        '{"protocol":"audio2face/5","type":"response","id":"1","result":{}}\n\n',
+        '{"protocol":"audio2face/7","type":"response","id":"1","result":{}}\n{}\n',
+        '{"protocol":"audio2face/7","type":"response","id":"1","result":{}}\n\n',
         b"\xff\n",
-        '{"protocol":"audio2face/5","type":"response","id":"1","id":"2","result":{}}\n',
+        '{"protocol":"audio2face/7","type":"response","id":"1","id":"2","result":{}}\n',
     ],
 )
 def test_decode_rejects_malformed_noncanonical_records(line: str | bytes) -> None:
@@ -105,7 +106,11 @@ def test_decode_rejects_malformed_noncanonical_records(line: str | bytes) -> Non
             "type": "event",
             "event": "stream_frame",
             "operation_id": 7,
-            "data": {},
+            "data": {
+                "timestamp_sample": 0,
+                "weights": [0.0],
+                "emotions": [0.0],
+            },
         },
     ],
 )
@@ -138,14 +143,19 @@ def test_request_rejects_empty_id_unknown_method_and_extra_fields() -> None:
 
 
 def test_canonical_stream_event_requires_operation_id_and_exact_fields() -> None:
+    data = {
+        "timestamp_sample": 0,
+        "weights": [0.0],
+        "emotions": [0.0],
+    }
     event = {
         "protocol": PROTOCOL_VERSION,
         "type": "event",
         "event": "stream_frame",
         "operation_id": "operation-1",
-        "data": {},
+        "data": data,
     }
-    assert decode_message(encode_message(event))["data"] == {}
+    assert decode_message(encode_message(event))["data"] == data
 
     without_operation = dict(event)
     without_operation.pop("operation_id")
@@ -157,13 +167,27 @@ def test_stream_methods_and_events_are_canonical_protocol_members() -> None:
         request = make_request(method, {})
         assert decode_message(encode_message(request)) == request
 
-    for event_name in ("stream_frame", "stream_reset", "stream_ended"):
+    for event_name in (
+        "stream_credit",
+        "stream_frame",
+        "stream_reset",
+        "stream_ended",
+    ):
+        data = (
+            {
+                "timestamp_sample": 0,
+                "weights": [0.0],
+                "emotions": [0.0],
+            }
+            if event_name == "stream_frame"
+            else {}
+        )
         event = {
             "protocol": PROTOCOL_VERSION,
             "type": "event",
             "event": event_name,
             "operation_id": "stream-1",
-            "data": {},
+            "data": data,
         }
         assert decode_message(encode_message(event)) == event
 
@@ -173,6 +197,30 @@ def test_native_stream_settings_is_one_ordered_queue_command() -> None:
     assert 'require_exact_keys(params, {"operation_id", "settings"});' in (
         WORKER_PROTOCOL_SOURCE
     )
+
+
+def test_native_stream_chunk_emits_one_dequeue_credit() -> None:
+    enqueue_start = WORKER_PROTOCOL_SOURCE.index("  void enqueue_stream_chunk(")
+    enqueue_end = WORKER_PROTOCOL_SOURCE.index(
+        "  void enqueue_stream_settings(", enqueue_start
+    )
+    enqueue_source = WORKER_PROTOCOL_SOURCE[enqueue_start:enqueue_end]
+    assert "respond_and_release(request_id, response_gate);" in enqueue_source
+
+    loop_start = WORKER_PROTOCOL_SOURCE.index("  void stream_loop(")
+    loop_end = WORKER_PROTOCOL_SOURCE.index(
+        "  void emit_stream_ended(", loop_start
+    )
+    loop_source = WORKER_PROTOCOL_SOURCE[loop_start:loop_end]
+    pop = loop_source.index("stream_queue_.pop_front();")
+    response_gate = loop_source.index("command.response_gate.get();")
+    credit = loop_source.index(
+        'emit_active_stream_event(operation_id, "stream_credit", json::object());'
+    )
+    inference = loop_source.index(
+        "backend_.stream_chunk(command.audio, canceled_, emit_frame);"
+    )
+    assert pop < response_gate < credit < inference
     assert "StreamCommand::Kind::Settings" in WORKER_PROTOCOL_SOURCE
     assert "stream_queue_.push_back(std::move(command));" in WORKER_PROTOCOL_SOURCE
     assert "backend_.stream_settings(command.settings" in (
@@ -256,7 +304,7 @@ def test_protocol_normalizes_non_utf8_text_errors() -> None:
         encode_message(message)
 
     line = (
-        '{"protocol":"audio2face/5","type":"response","id":"1",'
+        '{"protocol":"audio2face/7","type":"response","id":"1",'
         '"result":{"value":"\ud800"}}\n'
     )
     with pytest.raises(ProtocolError, match="UTF-8"):

@@ -191,9 +191,14 @@ def test_output_keeps_model_order_and_named_eye_resolution() -> None:
 def test_stream_frames_carry_the_model_channel_order() -> None:
     assert '{"channels", std::move(output_channels)}' in SOURCE
     assert "capture.weight_count = executor().GetWeightCount()" in SOURCE
+    assert "capture.emotion_count = emotion_channels_.size()" in SOURCE
     assert "pending.weights->Data()[channel]" in SOURCE
+    assert "pending.emotions->Data()[index]" in SOURCE
     assert (
-        "frame_callback(StreamFrame{stream_timestamp, std::move(arkit)})" in SOURCE
+        "frame_callback(StreamFrame{stream_timestamp, std::move(arkit)," in SOURCE
+    )
+    assert (
+        "std::move(emotions)})" in SOURCE
     )
 
 
@@ -208,11 +213,14 @@ def test_arkit_solve_uses_the_model_owned_default_identity() -> None:
 def test_callbacks_follow_the_sdk_result_stream_contract() -> None:
     restore = SOURCE.index("geometry.SetExecutionOption(execution_option)")
     geometry_callback = SOURCE.index("SetExecutorGeometryResultsCallback(")
+    emotions_callback = SOURCE.index("executor.SetEmotionsCallback(")
     weights_callback = SOURCE.index("executor.SetResultsCallback(")
-    assert restore < geometry_callback < weights_callback
+    assert restore < geometry_callback < emotions_callback < weights_callback
     assert "results.eyesRotation, results.eyesCudaStream" in SOURCE
+    assert "results.emotions, results.cudaStream" in SOURCE
     assert "results.weights, results.cudaStream" in SOURCE
     assert "results.eyesCudaStream !=" not in SOURCE
+    assert "results.emotions.Size() != capture.emotion_count" in SOURCE
     assert "results.cudaStream !=" not in SOURCE
 
 

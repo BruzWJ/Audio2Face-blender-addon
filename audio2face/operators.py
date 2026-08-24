@@ -190,7 +190,7 @@ class A2F_OT_remove_target(bpy.types.Operator):
 class A2F_OT_play_pause(bpy.types.Operator):
     bl_idname = "a2f.play_pause"
     bl_label = "Play/Pause Audio2Face"
-    bl_description = "Play or pause selected audio and its live ARKit-52 stream"
+    bl_description = "Play or pause selected audio and its live Audio2Face stream"
 
     @classmethod
     def poll(cls, context: bpy.types.Context) -> bool:

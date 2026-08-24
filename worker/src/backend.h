@@ -39,6 +39,7 @@ struct StreamRequest {
 struct StreamFrame {
   std::int64_t timestamp_sample;
   std::vector<float> weights;
+  std::vector<float> emotions;
 };
 
 using StreamFrameCallback = std::function<void(const StreamFrame& frame)>;
