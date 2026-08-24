@@ -65,6 +65,15 @@ def test_worker_reports_exact_model_owned_audio2face_defaults() -> None:
         serializer.group(0)
     )
 
+    defaults = SOURCE[SOURCE.index("Audio2FaceSettings audio2face_defaults;") :]
+    defaults = defaults[: defaults.index("audio2face_defaults_ = audio2face_defaults;")]
+    for getter in (
+        "GetExecutorInputStrength",
+        "GetExecutorSkinParameters",
+        "GetExecutorEyesParameters",
+    ):
+        assert re.search(rf"{getter}\(\s*geometry,", defaults)
+
 
 def test_stream_snapshot_validates_and_applies_exact_skin_eyes_controls() -> None:
     parser = re.search(
@@ -142,6 +151,8 @@ def test_stream_snapshot_validates_and_applies_exact_skin_eyes_controls() -> Non
         "nva2f::SetExecutorEyesParameters(",
     ):
         assert setter in configure.group(0)
+    assert "auto& geometry = geometry_executor();" in configure.group(0)
+    assert not re.search(r"SetExecutor\w+Parameters\(executor\(\)", configure.group(0))
     assert "SetExecutorTongueParameters" not in SOURCE
     assert "SetExecutorTeethParameters" not in SOURCE
 
@@ -187,7 +198,7 @@ def test_arkit_solve_uses_the_model_owned_default_identity() -> None:
 
 
 def test_callbacks_follow_the_sdk_result_stream_contract() -> None:
-    restore = SOURCE.index("geometry->SetExecutionOption(execution_option)")
+    restore = SOURCE.index("geometry.SetExecutionOption(execution_option)")
     geometry_callback = SOURCE.index("SetExecutorGeometryResultsCallback(")
     weights_callback = SOURCE.index("executor.SetResultsCallback(")
     assert restore < geometry_callback < weights_callback

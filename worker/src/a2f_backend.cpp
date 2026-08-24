@@ -408,24 +408,19 @@ class Backend::Impl final {
              {"reported_weights", executor.GetWeightCount()},
              {"expected_weights", output_channels.size()}});
       }
-      nva2f::IGeometryExecutor* geometry = nullptr;
-      sdk_check(nva2f::GetExecutorGeometryExecutor(executor, &geometry),
-                "Retrieving geometry executor");
-      if (geometry == nullptr) {
-        throw WorkerError("sdk_error", "Geometry executor is null");
-      }
+      auto& geometry = geometry_executor();
       // BlendshapeSolveExecutor::Init() in SDK 1.0.0 reapplies an execution
       // option derived only from its skin/tongue solvers. Restore the eye
       // output requested above before installing the callbacks.
-      sdk_check(geometry->SetExecutionOption(execution_option),
+      sdk_check(geometry.SetExecutionOption(execution_option),
                 "Enabling skin and eye geometry outputs");
-      if (geometry->GetExecutionOption() != execution_option) {
+      if (geometry.GetExecutionOption() != execution_option) {
         throw WorkerError(
             "sdk_error", "Geometry executor did not enable skin and eye outputs");
       }
-      if (geometry->GetEyesRotationSize() != kEyesRotationCount) {
+      if (geometry.GetEyesRotationSize() != kEyesRotationCount) {
         throw WorkerError("model_invalid", "Unsupported SDK eyes rotation size",
-                          {{"reported", geometry->GetEyesRotationSize()},
+                          {{"reported", geometry.GetEyesRotationSize()},
                            {"expected", kEyesRotationCount}});
       }
       sdk_check(nva2f::SetExecutorGeometryResultsCallback(
@@ -436,13 +431,13 @@ class Backend::Impl final {
 
       Audio2FaceSettings audio2face_defaults;
       sdk_check(nva2f::GetExecutorInputStrength(
-                    executor, audio2face_defaults.input_strength),
+                    geometry, audio2face_defaults.input_strength),
                 "Reading Audio2Face input strength");
       sdk_check(nva2f::GetExecutorSkinParameters(
-                    executor, 0, audio2face_defaults.skin),
+                    geometry, 0, audio2face_defaults.skin),
                 "Reading Audio2Face skin parameters");
       sdk_check(nva2f::GetExecutorEyesParameters(
-                    executor, 0, audio2face_defaults.eyes),
+                    geometry, 0, audio2face_defaults.eyes),
                 "Reading Audio2Face eyes parameters");
       validate_audio2face_settings(audio2face_defaults, "model_invalid",
                                    "Audio2Face model tuning default ");
@@ -747,6 +742,16 @@ class Backend::Impl final {
   }
 
   nva2f::IBlendshapeExecutor& executor() { return bundle_->GetExecutor(); }
+
+  nva2f::IGeometryExecutor& geometry_executor() {
+    nva2f::IGeometryExecutor* geometry = nullptr;
+    sdk_check(nva2f::GetExecutorGeometryExecutor(executor(), &geometry),
+              "Retrieving geometry executor");
+    if (geometry == nullptr) {
+      throw WorkerError("sdk_error", "Geometry executor is null");
+    }
+    return *geometry;
+  }
 
   void require_model_locked() const {
     if (bundle_ == nullptr) {
@@ -1087,12 +1092,13 @@ class Backend::Impl final {
   }
 
   void configure_audio2face(const Audio2FaceSettings& settings) {
-    sdk_check(nva2f::SetExecutorInputStrength(executor(),
+    auto& geometry = geometry_executor();
+    sdk_check(nva2f::SetExecutorInputStrength(geometry,
                                               settings.input_strength),
               "Configuring Audio2Face input strength");
-    sdk_check(nva2f::SetExecutorSkinParameters(executor(), 0, settings.skin),
+    sdk_check(nva2f::SetExecutorSkinParameters(geometry, 0, settings.skin),
               "Configuring Audio2Face skin parameters");
-    sdk_check(nva2f::SetExecutorEyesParameters(executor(), 0, settings.eyes),
+    sdk_check(nva2f::SetExecutorEyesParameters(geometry, 0, settings.eyes),
               "Configuring Audio2Face eyes parameters");
   }
 
