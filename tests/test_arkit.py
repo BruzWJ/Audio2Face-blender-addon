@@ -75,6 +75,14 @@ def test_worker_reports_exact_model_owned_audio2face_defaults() -> None:
         assert re.search(rf"{getter}\(\s*geometry,", defaults)
 
 
+def test_audio2emotion_compatibility_uses_postprocessed_output() -> None:
+    setup = SOURCE[SOURCE.index("const auto emotion_model_info") :]
+    setup = setup[: setup.index("Installing Audio2Emotion callback")]
+    assert "GetNetworkInfo().GetEmotionsCount()" not in setup
+    assert "emotion_executor_->GetEmotionsSize() != emotion_channels_.size()" in setup
+    assert "results.emotions.Size() != capture.emotion_count" in SOURCE
+
+
 def test_stream_snapshot_validates_and_applies_exact_skin_eyes_controls() -> None:
     parser = re.search(
         r"  Audio2FaceSettings parse_audio2face_settings\(.*?"

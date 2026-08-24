@@ -461,17 +461,6 @@ class Backend::Impl final {
           nva2e::ReadClassifierModelInfo(
               request.audio2emotion_model_path.c_str()),
           "Reading Audio2Emotion classifier model", "model_invalid");
-      const std::size_t audio2emotion_classifier_count =
-          emotion_model_info->GetNetworkInfo().GetEmotionsCount();
-      if (audio2emotion_classifier_count == 0 ||
-          audio2emotion_classifier_count != emotion_channels_.size()) {
-        throw WorkerError(
-            "model_invalid",
-            "Audio2Emotion model output is incompatible with Audio2Face",
-            {{"audio2face_emotion_count", emotion_channels_.size()},
-             {"audio2emotion_output_count",
-              audio2emotion_classifier_count}});
-      }
       std::size_t frame_rate_numerator = 0;
       std::size_t frame_rate_denominator = 0;
       executor.GetFrameRate(frame_rate_numerator, frame_rate_denominator);
