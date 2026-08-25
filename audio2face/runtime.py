@@ -2119,6 +2119,8 @@ def _timer_callback() -> float | None:
     try:
         controller.poll()
         stream_active = get_live_stream_controller().tick()
+        if stream_active:
+            controller._tag_runtime_setup_redraw()
     except Exception as exc:  # Keep timer alive, but surface the main-thread failure.
         stream_active = False
         scene = bpy.context.scene

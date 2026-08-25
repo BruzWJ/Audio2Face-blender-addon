@@ -141,7 +141,7 @@ def _manual_emotion_updated(
     _emotion: bpy.types.PropertyGroup,
     context: bpy.types.Context,
 ) -> None:
-    """Retain a user-authored emotion vector until it is loaded or cleared."""
+    """Retain an authored channel long enough to load it as preferred emotion."""
 
     if _internal_emotion_write_depth:
         return
@@ -151,8 +151,8 @@ def _manual_emotion_updated(
     if scene is None:
         return
     settings = scene.audio2face
-    settings.manual_emotion_pending = True
     if settings.auto_audio2emotion:
+        _emotion.user_edited = True
         return
     from .runtime import get_controller
 
@@ -163,9 +163,9 @@ def _auto_audio2emotion_updated(
     settings: bpy.types.PropertyGroup,
     context: bpy.types.Context,
 ) -> None:
-    """Hand emotion display ownership back when its inference mode changes."""
+    """Release authored display channels when automatic inference is toggled."""
 
-    settings.manual_emotion_pending = False
+    _clear_emotion_edits(settings)
     _inference_setting_updated(settings, context)
 
 
@@ -223,6 +223,10 @@ class A2FEmotionValueItem(bpy.types.PropertyGroup):
         max=1.0,
         subtype="FACTOR",
         update=_manual_emotion_updated,
+    )
+    user_edited: BoolProperty(
+        default=False,
+        options={"HIDDEN", "SKIP_SAVE"},
     )
 
 
@@ -394,10 +398,6 @@ class A2FSceneSettings(bpy.types.PropertyGroup):
         update=_auto_audio2emotion_updated,
     )
     manual_emotions: CollectionProperty(type=A2FEmotionValueItem)
-    manual_emotion_pending: BoolProperty(
-        default=False,
-        options={"HIDDEN", "SKIP_SAVE"},
-    )
     preferred_emotions: CollectionProperty(
         type=A2FEmotionValueItem,
         options={"HIDDEN"},
@@ -646,12 +646,17 @@ def _replace_emotion_values(items: object, values: dict[str, float]) -> None:
             item.value = value
 
 
+def _clear_emotion_edits(settings: A2FSceneSettings) -> None:
+    for item in settings.manual_emotions:
+        item.user_edited = False
+
+
 def apply_effective_emotions(
     settings: A2FSceneSettings,
     emotion_channels: tuple[str, ...],
     values: tuple[float, ...],
 ) -> None:
-    """Publish one worker frame into the model-defined emotion controls."""
+    """Publish automatic worker output into the model-defined emotion controls."""
 
     if type(emotion_channels) is not tuple:
         raise ValueError("effective emotion channels must be a tuple")
@@ -670,11 +675,12 @@ def apply_effective_emotions(
             raise ValueError(f"effective emotion {name!r} must be a finite float")
         displayed.append(min(max(value, 0.0), 1.0))
 
-    if settings.manual_emotion_pending:
+    if not settings.auto_audio2emotion:
         return
     with _internal_emotion_write():
         for item, value in zip(settings.manual_emotions, displayed):
-            item.value = value
+            if not item.user_edited:
+                item.value = value
 
 
 def load_preferred_emotion(settings: A2FSceneSettings) -> None:
@@ -684,7 +690,7 @@ def load_preferred_emotion(settings: A2FSceneSettings) -> None:
     if not values:
         raise ValueError("load the Audio2Face model before loading preferred emotion")
     _replace_emotion_values(settings.preferred_emotions, values)
-    settings.manual_emotion_pending = False
+    _clear_emotion_edits(settings)
 
 
 def clear_preferred_emotion(settings: A2FSceneSettings) -> None:
@@ -692,7 +698,7 @@ def clear_preferred_emotion(settings: A2FSceneSettings) -> None:
 
     with _internal_emotion_write():
         settings.preferred_emotions.clear()
-    settings.manual_emotion_pending = False
+    _clear_emotion_edits(settings)
 
 
 def inference_settings(settings: A2FSceneSettings) -> dict[str, object]:

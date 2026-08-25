@@ -127,7 +127,10 @@ driver caches.
    to infer emotion from the same audio and display the effective values on
    those sliders. **Load** under **Preferred Emotion** captures the current
    slider values for mixing with generated emotion;
-   **Clear** removes that captured preference.
+   **Clear** removes that captured preference. While playback or streaming is
+   active, an edited channel remains authored until Load or Clear while the
+   other sliders continue displaying generated values. Load applies the visible
+   snapshot and returns every slider to the live mixed output.
 7. In Selected WAV mode, press **Play**. Playback automatically starts
    incremental inference and drives matching Shape Keys as frames arrive.
    **Pause** freezes both audio and source pacing; seek and loop restart

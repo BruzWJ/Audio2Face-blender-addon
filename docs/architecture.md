@@ -174,6 +174,14 @@ Selected WAV and external PCM apply control edits to their current operation by
 resetting the two executors and accumulators and replaying a bounded PCM
 context; audio transport is not restarted or discarded.
 
+The emotion sliders are user-owned while Auto Audio2Emotion is disabled. With
+Auto enabled, untouched channels display effective worker output. Editing a
+channel gives that channel temporary UI ownership so playback cannot overwrite
+the value before Load captures the visible preferred-emotion snapshot. Load,
+Clear, and toggling Auto release that temporary ownership; the other channels
+remain live throughout. The playback timer explicitly redraws the sidebar so
+timer-driven RNA values remain visibly synchronized with sampled frames.
+
 Each worker frame returns the effective emotion vector sampled by Audio2Face
 after that processing, aligned with its ARKit weights. Blender samples both
 vectors on the same presentation clock and writes the effective values into the

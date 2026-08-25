@@ -18,16 +18,16 @@ AppliedFrame = tuple[tuple[str, ...], tuple[float, ...]]
 class _Settings:
     stream_time: float = 7.0
     prediction_delay: float = 0.0
+    auto_audio2emotion: bool = True
     playback_state: str = "IDLE"
     status: str = "MODEL_READY"
     status_message: str = ""
-    manual_emotion_pending: bool = False
     custom_properties: dict[str, object] = field(default_factory=dict)
     custom_property_ui: dict[str, dict[str, object]] = field(default_factory=dict)
     manual_emotions: tuple[SimpleNamespace, ...] = field(
         default_factory=lambda: (
-            SimpleNamespace(name="Neutral", value=0.0),
-            SimpleNamespace(name="Joy", value=0.0),
+            SimpleNamespace(name="Neutral", value=0.0, user_edited=False),
+            SimpleNamespace(name="Joy", value=0.0, user_edited=False),
         )
     )
 
@@ -107,10 +107,11 @@ def live_module(
         values: tuple[float, ...],
     ) -> None:
         assert channels == tuple(item.name for item in settings.manual_emotions)
-        if settings.manual_emotion_pending:
+        if not settings.auto_audio2emotion:
             return
         for item, value in zip(settings.manual_emotions, values):
-            item.value = min(max(value, 0.0), 1.0)
+            if not item.user_edited:
+                item.value = min(max(value, 0.0), 1.0)
 
     properties.apply_effective_emotions = apply_effective_emotions  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, properties.__name__, properties)
@@ -269,7 +270,7 @@ def test_live_frames_resolve_the_current_object_targets(
     ]
 
 
-def test_paused_selected_audio_preserves_emotion_edits_and_current_object_targets(
+def test_selected_audio_preserves_authored_emotion_channels_and_current_targets(
     live_module: tuple[ModuleType, _Scene, list[AppliedFrame]],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -315,18 +316,17 @@ def test_paused_selected_audio_preserves_emotion_edits_and_current_object_target
     )
     assert [item.value for item in scene.audio2face.manual_emotions] == [0.0, 0.0]
 
-    scene.audio2face.manual_emotions[0].value = 0.35
     scene.audio2face.manual_emotions[1].value = 0.65
-    scene.audio2face.manual_emotion_pending = True
+    scene.audio2face.manual_emotions[1].user_edited = True
     controller.tick()
-    assert [item.value for item in scene.audio2face.manual_emotions] == [0.35, 0.65]
+    assert [item.value for item in scene.audio2face.manual_emotions] == [0.75, 0.65]
     current_targets[0] = (second_target,)
     controller.tick()
 
     assert delivered_targets == [(first_target,), (second_target,)]
-    assert [item.value for item in scene.audio2face.manual_emotions] == [0.35, 0.65]
+    assert [item.value for item in scene.audio2face.manual_emotions] == [0.75, 0.65]
 
-    scene.audio2face.manual_emotion_pending = False
+    scene.audio2face.manual_emotions[1].user_edited = False
     scene.audio2face.playback_state = "PLAYING"
     controller.tick()
 

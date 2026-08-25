@@ -2646,6 +2646,26 @@ def test_runtime_survives_blend_file_replacement_with_fresh_controller(
     assert not bpy.app.timers.is_registered(runtime._timer_callback)
 
 
+def test_runtime_timer_redraws_the_sidebar_while_frames_are_presented(
+    runtime_module: tuple[ModuleType, ModuleType],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, _bpy = runtime_module
+    calls: list[str] = []
+    runtime._CONTROLLER = SimpleNamespace(
+        poll=lambda: calls.append("poll"),
+        _tag_runtime_setup_redraw=lambda: calls.append("redraw"),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "get_live_stream_controller",
+        lambda: SimpleNamespace(tick=lambda: True),
+    )
+
+    assert runtime._timer_callback() == runtime.PLAYBACK_INTERVAL_SECONDS
+    assert calls == ["poll", "redraw"]
+
+
 def test_runtime_registration_does_not_access_restricted_blend_data(
     runtime_module: tuple[ModuleType, ModuleType],
 ) -> None:

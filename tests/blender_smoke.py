@@ -435,13 +435,18 @@ def main() -> None:
                 ("Neutral", "Joy"),
                 (0.2, 0.8),
             )
-            assert settings.manual_emotion_pending is False
+            assert not any(item.user_edited for item in settings.manual_emotions)
             settings.manual_emotions[1].value = 0.35
-            assert settings.manual_emotion_pending is True
+            assert settings.manual_emotions[1].user_edited is True
             apply_effective_emotions(
                 settings,
                 ("Neutral", "Joy"),
                 (0.6, 0.4),
+            )
+            _assert_close(
+                settings.manual_emotions[0].value,
+                0.6,
+                label=f"{playback_state} automatic Neutral",
             )
             _assert_close(
                 settings.manual_emotions[1].value,
@@ -449,7 +454,7 @@ def main() -> None:
                 label=f"{playback_state} authored Joy",
             )
             assert bpy.ops.a2f.load_preferred_emotion() == {"FINISHED"}
-            assert settings.manual_emotion_pending is False
+            assert not any(item.user_edited for item in settings.manual_emotions)
             _assert_close(
                 settings.preferred_emotions[1].value,
                 0.35,
@@ -465,9 +470,22 @@ def main() -> None:
                 0.3,
                 label=f"{playback_state} released Joy",
             )
-            assert settings.playback_state == playback_state
             assert bpy.ops.a2f.clear_preferred_emotion() == {"FINISHED"}
         settings.playback_state = "IDLE"
+
+        settings.auto_audio2emotion = False
+        settings.manual_emotions[1].value = 0.65
+        apply_effective_emotions(
+            settings,
+            ("Neutral", "Joy"),
+            (0.1, 0.9),
+        )
+        _assert_close(
+            settings.manual_emotions[1].value,
+            0.65,
+            label="manual Joy",
+        )
+        settings.auto_audio2emotion = True
 
         extra_target = _make_shape_key_target(
             scene,

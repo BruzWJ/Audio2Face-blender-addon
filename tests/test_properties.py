@@ -105,10 +105,11 @@ def _settings() -> SimpleNamespace:
         model_schema_signature="",
         **AUDIO2FACE_DEFAULTS,
         auto_audio2emotion=False,
-        manual_emotion_pending=False,
-        manual_emotions=_Collection(lambda: SimpleNamespace(name="", value=0.0)),
+        manual_emotions=_Collection(
+            lambda: SimpleNamespace(name="", value=0.0, user_edited=False)
+        ),
         preferred_emotions=_Collection(
-            lambda: SimpleNamespace(name="", value=0.0)
+            lambda: SimpleNamespace(name="", value=0.0, user_edited=False)
         ),
         a2e_emotion_strength=0.6,
         a2e_emotion_contrast=1.0,
@@ -269,6 +270,7 @@ def test_effective_emotions_update_visible_values_without_mutating_preferred(
     settings = _settings()
     properties_module.apply_model_schema(settings, _schema(), MODEL_SIGNATURE)
     properties_module.load_preferred_emotion(settings)
+    settings.auto_audio2emotion = True
 
     properties_module.apply_effective_emotions(
         settings,
@@ -288,7 +290,7 @@ def test_effective_emotions_update_visible_values_without_mutating_preferred(
 
 @pytest.mark.parametrize("playback_state", ("PLAYING", "PAUSED"))
 @pytest.mark.parametrize("auto_audio2emotion", (False, True))
-def test_user_emotion_edit_survives_effective_frames_until_preferred_load(
+def test_emotion_value_ownership_matches_manual_or_automatic_mode(
     properties_module: ModuleType,
     monkeypatch: pytest.MonkeyPatch,
     playback_state: str,
@@ -311,6 +313,7 @@ def test_user_emotion_edit_survives_effective_frames_until_preferred_load(
             self.name = name
             self.path = path
             self._value = 0.0
+            self.user_edited = False
 
         def path_from_id(self) -> str:
             return self.path
@@ -326,11 +329,10 @@ def test_user_emotion_edit_survives_effective_frames_until_preferred_load(
 
     settings = SimpleNamespace(
         auto_audio2emotion=auto_audio2emotion,
-        manual_emotion_pending=False,
         manual_emotions=[CallbackItem("Neutral"), CallbackItem("Joy")],
         playback_state=playback_state,
         preferred_emotions=_Collection(
-            lambda: SimpleNamespace(name="", value=0.0)
+            lambda: SimpleNamespace(name="", value=0.0, user_edited=False)
         ),
     )
     scene = SimpleNamespace(audio2face=settings)
@@ -342,31 +344,38 @@ def test_user_emotion_edit_survives_effective_frames_until_preferred_load(
         (0.25, 0.75),
     )
     assert calls == []
-    assert settings.manual_emotion_pending is False
+    assert [item.value for item in settings.manual_emotions] == (
+        [0.25, 0.75] if auto_audio2emotion else [0.0, 0.0]
+    )
 
     settings.manual_emotions[1].value = 0.35
     assert calls == ([] if auto_audio2emotion else [scene])
-    assert settings.manual_emotion_pending is True
+    assert settings.manual_emotions[1].user_edited is auto_audio2emotion
 
     properties_module.apply_effective_emotions(
         settings,
         ("Neutral", "Joy"),
         (0.6, 0.4),
     )
-    assert [item.value for item in settings.manual_emotions] == [0.25, 0.35]
+    assert [item.value for item in settings.manual_emotions] == (
+        [0.6, 0.35] if auto_audio2emotion else [0.0, 0.35]
+    )
     assert settings.playback_state == playback_state
 
     properties_module.load_preferred_emotion(settings)
-    assert settings.manual_emotion_pending is False
-    assert [item.value for item in settings.preferred_emotions] == [0.25, 0.35]
+    expected_preferred = [0.6, 0.35] if auto_audio2emotion else [0.0, 0.35]
+    assert [item.value for item in settings.preferred_emotions] == expected_preferred
+    assert not any(item.user_edited for item in settings.manual_emotions)
 
     properties_module.apply_effective_emotions(
         settings,
         ("Neutral", "Joy"),
         (0.7, 0.3),
     )
-    assert [item.value for item in settings.manual_emotions] == [0.7, 0.3]
-    assert [item.value for item in settings.preferred_emotions] == [0.25, 0.35]
+    assert [item.value for item in settings.manual_emotions] == (
+        [0.7, 0.3] if auto_audio2emotion else [0.0, 0.35]
+    )
+    assert [item.value for item in settings.preferred_emotions] == expected_preferred
     assert settings.playback_state == playback_state
 
     calls_before = calls.copy()
@@ -374,12 +383,13 @@ def test_user_emotion_edit_survives_effective_frames_until_preferred_load(
         CallbackItem("Joy", "audio2face.preferred_emotions[0]"),
         context,
     )
-    assert settings.manual_emotion_pending is False
     assert calls == calls_before
-
-    settings.manual_emotion_pending = True
-    properties_module._auto_audio2emotion_updated(settings, context)
-    assert settings.manual_emotion_pending is False
+    settings.manual_emotions[0].user_edited = True
+    properties_module._auto_audio2emotion_updated(
+        settings,
+        context,
+    )
+    assert not any(item.user_edited for item in settings.manual_emotions)
     assert calls == [*calls_before, scene]
 
 
@@ -409,6 +419,7 @@ def test_effective_emotion_display_clamps_without_mutating_preferred(
     settings = _settings()
     properties_module.apply_model_schema(settings, _schema(), MODEL_SIGNATURE)
     properties_module.load_preferred_emotion(settings)
+    settings.auto_audio2emotion = True
 
     properties_module.apply_effective_emotions(
         settings,
