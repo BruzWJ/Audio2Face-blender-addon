@@ -38,16 +38,17 @@ AUDIO2FACE_DEFAULTS: dict[str, float | int] = {
 def _inference_settings_payload() -> dict[str, object]:
     return {
         "audio2face": AUDIO2FACE_DEFAULTS.copy(),
-        "auto_audio2emotion": True,
-        "manual_emotions": {"Joy": 0.75},
-        "audio2emotion": {
+        "emotion_driver": {
+            "mode": "automatic",
             "emotion_strength": 0.6,
             "emotion_contrast": 1.0,
             "max_emotions": 6,
             "live_blend_coef": 0.7,
             "transition_smoothing": 0.5,
-            "preferred_emotion": {"Joy": 0.75},
-            "preferred_emotion_strength": 0.35,
+            "preferred": {
+                "values": {"Joy": 0.75},
+                "strength": 0.35,
+            },
         },
     }
 
@@ -931,7 +932,7 @@ def test_event_routing_rejects_an_unknown_operation_id(
             "data": {
                 "timestamp_sample": 0,
                 "weights": [0.0] * len(MODEL_CHANNELS),
-                "emotions": MODEL_EMOTIONS.copy(),
+                "effective_emotions": MODEL_EMOTIONS.copy(),
             },
         }
     )
@@ -994,7 +995,7 @@ def test_rejected_worker_controls_cannot_revive_scene_state(
             "data": {
                 "timestamp_sample": 0,
                 "weights": [0.0] * len(MODEL_CHANNELS),
-                "emotions": MODEL_EMOTIONS.copy(),
+                "effective_emotions": MODEL_EMOTIONS.copy(),
             },
         }
     )
@@ -2150,7 +2151,7 @@ def test_exact_stream_frame_routes_negative_timestamp_and_arkit52(
             "data": {
                 "timestamp_sample": -320,
                 "weights": weights,
-                "emotions": MODEL_EMOTIONS.copy(),
+                "effective_emotions": MODEL_EMOTIONS.copy(),
             },
         }
     )
@@ -2183,7 +2184,7 @@ def test_late_frame_from_a_canceling_stream_is_drained_without_delivery(
             "data": {
                 "timestamp_sample": 0,
                 "weights": [0.0] * len(MODEL_CHANNELS),
-                "emotions": MODEL_EMOTIONS.copy(),
+                "effective_emotions": MODEL_EMOTIONS.copy(),
             },
         }
     )
@@ -2338,7 +2339,7 @@ def test_malformed_stream_frame_terminates_the_active_stream(
             "data": {
                 "timestamp_sample": 0,
                 "weights": [0.0] * len(MODEL_CHANNELS),
-                "emotions": MODEL_EMOTIONS.copy(),
+                "effective_emotions": MODEL_EMOTIONS.copy(),
                 "unexpected": True,
             },
         }

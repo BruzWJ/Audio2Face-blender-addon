@@ -9,7 +9,7 @@ Selected WAV -- Play/Pause/seek/loop -- WAV decoder/resampler --+
                                                                |
 external mono f32le PCM -- first chunk auto-starts ------------+-- stream
                                                                    |
-Blender 5.2 extension -- private audio2face/7 JSONL -- native worker
+Blender 5.2 extension -- private audio2face/8 JSONL -- native worker
                                                                    |
                              +-------------------------------------+------+
                              |                                            |
@@ -154,41 +154,47 @@ delivery, from the loaded default model schema, and seeds all Audio2Face
 controls from the returned defaults.
 
 Every `stream_start` installs one complete settings snapshot containing the
-exact 18-field `audio2face` object, `auto_audio2emotion`, every advertised
-`manual_emotions` value, and the seven-field `audio2emotion` object. The field
-names, types, and ranges are defined by the
+exact 18-field `audio2face` object and one strict `emotion_driver` tagged
+union. Its mutually exclusive mode is either `manual`, with one complete
+authored emotion vector, or `automatic`, with Audio2Emotion controls and an
+optional loaded Preferred snapshot. The field names, types, and ranges are
+defined by the
 [protocol](protocol.md#settings-document). `stream_settings` replaces that
 whole snapshot at an ordered boundary; partial setting updates do not exist.
 
-The editable Preferred Emotion collection is the only authored emotion vector.
-With `auto_audio2emotion` false, its saved values populate `manual_emotions` and
-form a constant emotion driver. With it true, Audio2Emotion analyzes the same
-PCM and NVIDIA's post-processor applies strength, contrast, retained-emotion
-count, temporal blend, transition smoothing, and optional preferred-emotion
-mixing. When that mix is enabled, the same authored values populate
-`audio2emotion.preferred_emotion`.
+The saved, editable Preferred Emotion collection is the only authored emotion
+vector. In manual mode it is the constant driver. In automatic mode,
+Audio2Emotion analyzes the PCM and NVIDIA's post-processor applies strength,
+contrast, retained-emotion count, temporal blend, transition smoothing, and an
+optional loaded Preferred mix.
 Emotion Strength is the post-processor's final uniform multiplier and ranges
 from `0.0` to `2.0`; values above `1.0` amplify the automatic result without
 changing Audio2Face Skin Strength. It does not equalize the model's learned
 response to different emotion channels.
 
-Direct Preferred Emotion edits enable preferred mixing and immediately queue a
-complete settings replacement. **Load** enables preferred mixing with the
-current authored Preferred Emotion values. **Clear** disables the mix without
-changing those values. Preferred Emotion persists with the scene; changing Auto
-Audio2Emotion does not overwrite it. Both Selected WAV and external PCM apply
-these control edits to their current operation by
-resetting the two executors and accumulators and replaying a bounded PCM
-context; audio transport is not restarted or discarded.
+Preferred and Mixed have disjoint ownership. Editing Preferred while it is not
+loaded changes only the saved editor state and cannot refresh or influence the
+automatic driver. The single **Load/Clear** button either supplies those
+authored values to automatic inference or removes that input; it never copies
+from Mixed and Clear never erases the authored values. While loaded, an edit
+queues one complete settings replacement. In manual mode, an edit updates the
+direct manual driver. Changing Auto Audio2Emotion never rewrites either
+collection.
+
+Selected WAV and external PCM apply an effective control change by resetting
+the two executors and accumulators and replaying bounded PCM context; audio
+transport is not restarted or discarded.
 
 Each worker frame returns the effective emotion vector sampled by Audio2Face
 after that processing, aligned with its ARKit weights. Blender samples both
 vectors on the same presentation clock and writes the effective values only to
 the read-only, transient Mixed Emotion collection. NVIDIA may return finite
-values outside the controls' factor range; Blender clamps only that displayed
-presentation. Mixed Emotion is not saved and never feeds an inference settings
-snapshot, so worker output cannot mutate Preferred Emotion or recursively queue
-another `stream_settings` request.
+values outside the authored controls' factor range; Blender preserves those
+values in the read-only display. Mixed Emotion is not saved and does not feed
+inference during frame delivery, so worker output cannot mutate Preferred
+Emotion or recursively queue another `stream_settings` request. A new model
+schema, stream, or replay resets every Mixed channel to zero before fresh
+worker frames repopulate it; Preferred values remain independent.
 
 ## Runtime and model ownership
 
@@ -246,8 +252,8 @@ misses its deadlines.
 
 ## Failure boundaries
 
-The extension accepts only protocol `audio2face/7`, worker profile
-`nvidia-a2f3-a2e3-gpu-arkit52/7`, and a non-empty worker version. Envelopes
+The extension accepts only protocol `audio2face/8`, worker profile
+`nvidia-a2f3-a2e3-gpu-arkit52/8`, and a non-empty worker version. Envelopes
 reject missing or unknown fields, duplicate JSON keys, non-finite numbers,
 invalid IDs, unknown methods or events, malformed UTF-8, and payloads over
 1 MiB. Malformed or misrouted output is a terminal contract violation: Blender

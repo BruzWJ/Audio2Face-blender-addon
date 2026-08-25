@@ -17,7 +17,7 @@ def build_runtime(platform_id: str, work_root: Path) -> Path:
         from build_windows_runtime import build_windows_runtime
 
         return build_windows_runtime(work_root)
-    elif platform_id == "linux-x64":
+    if platform_id == "linux-x64":
         from build_linux_runtime import build_linux_runtime
 
         return build_linux_runtime(work_root)

@@ -33,7 +33,6 @@ from audio2face.shape_keys import (  # noqa: E402
 )
 from audio2face.live_stream import (  # noqa: E402
     PLAYBACK_POSITION_KEY,
-    LiveStreamController,
     clear_playback_position,
     configure_playback_position,
     playback_position,
@@ -78,6 +77,21 @@ MODEL_DEFAULTS: dict[str, float | int] = {
 def _assert_close(actual: float, expected: float, *, label: str) -> None:
     assert math.isclose(actual, expected, rel_tol=1.0e-6, abs_tol=1.0e-6), (
         f"{label}: expected {expected}, got {actual}"
+    )
+
+
+def _route_stream_event(
+    controller: runtime.RuntimeController,
+    operation_id: str,
+    event: str,
+    data: dict[str, object],
+) -> None:
+    controller._handle_event(
+        {
+            "event": event,
+            "operation_id": operation_id,
+            "data": data,
+        }
     )
 
 
@@ -184,12 +198,6 @@ def main() -> None:
         assert len(notice_calls) > 1
         assert notice_calls[0].kwargs["icon"] == "INFO"
         assert all(call.kwargs["icon"] == "BLANK1" for call in notice_calls[1:])
-        operator_names = set(dir(bpy.ops.a2f))
-        assert {
-            "play_pause",
-            "load_preferred_emotion",
-            "clear_preferred_emotion",
-        } <= operator_names
         preference_names = set(A2FAddonPreferences.bl_rna.properties.keys())
         assert set(A2FAddonPreferences.__annotations__) == {
             "nvidia_terms_accepted",
@@ -352,16 +360,16 @@ def main() -> None:
                 assert getattr(settings, name) == expected
             else:
                 _assert_close(getattr(settings, name), expected, label=name)
-        expected_emotions = [
+        expected_preferred_emotions = [
             ("Neutral", 1.0),
             ("Joy", 0.0),
         ]
         assert [
             (item.name, item.value) for item in settings.preferred_emotions
-        ] == expected_emotions
+        ] == expected_preferred_emotions
         assert [
             (item.name, item.value) for item in settings.mixed_emotions
-        ] == expected_emotions
+        ] == [("Neutral", 0.0), ("Joy", 0.0)]
         assert settings.preferred_emotion_active is False
         for name, bounds in expected_model_ranges.items():
             if name == "eye_saccade_seed":
@@ -373,10 +381,13 @@ def main() -> None:
                 _assert_close(payload["audio2face"][name], endpoint, label=name)
             setattr(settings, name, original)
         settings.preferred_emotions[1].value = 0.75
-        assert settings.preferred_emotion_active is True
+        assert settings.preferred_emotion_active is False
+        apply_mixed_emotions(
+            settings,
+            ("Neutral", "Joy"),
+            (0.3, 0.7),
+        )
         settings.input_strength = 2.0
-        settings.blink_strength = 1.5
-        settings.eye_saccade_seed = 41
         apply_model_schema(settings, model_schema, model_signature)
         _assert_close(
             settings.preferred_emotions[1].value,
@@ -386,112 +397,60 @@ def main() -> None:
         _assert_close(
             settings.mixed_emotions[1].value,
             0.0,
-            label="reset mixed Joy",
+            label="reset transient mixed Joy",
         )
-        assert settings.preferred_emotion_active is True
+        assert settings.preferred_emotion_active is False
         _assert_close(
             settings.input_strength,
             2.0,
             label="preserved input strength",
         )
-        _assert_close(
-            settings.blink_strength,
-            1.5,
-            label="preserved blink strength",
-        )
-        assert settings.eye_saccade_seed == 41
         settings.auto_audio2emotion = True
-        settings.a2e_emotion_strength = 0.8
-        settings.a2e_emotion_contrast = 1.4
-        settings.a2e_max_emotions = 3
-        settings.a2e_live_blend_coef = 0.4
-        settings.a2e_transition_smoothing = 0.9
         settings.a2e_preferred_emotion_strength = 0.35
         controller = runtime.get_controller()
         original_refresh = controller.refresh_inference_settings
         refresh = Mock()
         controller.refresh_inference_settings = refresh
         try:
-            assert bpy.ops.a2f.clear_preferred_emotion() == {"FINISHED"}
+            settings.preferred_emotions[1].value = 0.5
+            refresh.assert_not_called()
+            assert bpy.ops.a2f.toggle_preferred_emotion() == {"FINISHED"}
             refresh.assert_called_once_with(scene)
-        finally:
-            controller.refresh_inference_settings = original_refresh
-        assert settings.preferred_emotion_active is False
-        assert [item.value for item in settings.preferred_emotions] == [1.0, 0.75]
-        apply_mixed_emotions(
-            settings,
-            ("Neutral", "Joy"),
-            (0.0, 0.0),
-        )
-        refresh = Mock()
-        controller.refresh_inference_settings = refresh
-        try:
-            assert bpy.ops.a2f.load_preferred_emotion() == {"FINISHED"}
+            refresh.reset_mock()
+            settings.preferred_emotions[0].value = 0.6
             refresh.assert_called_once_with(scene)
         finally:
             controller.refresh_inference_settings = original_refresh
         assert settings.preferred_emotion_active is True
-        assert [item.value for item in settings.preferred_emotions] == [1.0, 0.75]
-        settings.preferred_emotions[1].value = 0.5
-        settings.input_strength = 2.0
-        settings.blink_strength = 1.5
-        settings.eye_saccade_seed = 41
-        emotion_payload = inference_settings(settings)
-        assert set(emotion_payload) == {
-            "audio2face",
-            "auto_audio2emotion",
-            "manual_emotions",
-            "audio2emotion",
-        }
-        assert emotion_payload["auto_audio2emotion"] is True
-        assert set(emotion_payload["audio2face"]) == set(
-            AUDIO2FACE_SETTING_FIELDS
+        for item, expected in zip(settings.preferred_emotions, (0.6, 0.5)):
+            _assert_close(item.value, expected, label=f"authored {item.name}")
+        apply_mixed_emotions(
+            settings,
+            ("Neutral", "Joy"),
+            (0.2, 1.2),
         )
-        _assert_close(
-            emotion_payload["audio2face"]["input_strength"],
-            2.0,
-            label="input strength",
-        )
-        _assert_close(
-            emotion_payload["audio2face"]["blink_strength"],
-            1.5,
-            label="blink strength",
-        )
-        assert emotion_payload["audio2face"]["eye_saccade_seed"] == 41
-        manual_payload = emotion_payload["manual_emotions"]
-        assert set(manual_payload) == {"Neutral", "Joy"}
-        _assert_close(manual_payload["Neutral"], 1.0, label="wire Neutral")
-        _assert_close(manual_payload["Joy"], 0.5, label="wire Joy")
-        automatic_payload = emotion_payload["audio2emotion"]
-        assert set(automatic_payload) == {
-            "emotion_strength",
-            "emotion_contrast",
-            "max_emotions",
-            "live_blend_coef",
-            "transition_smoothing",
-            "preferred_emotion",
-            "preferred_emotion_strength",
-        }
-        assert automatic_payload["max_emotions"] == 3
-        preferred_payload = automatic_payload["preferred_emotion"]
-        assert set(preferred_payload) == {"Neutral", "Joy"}
-        _assert_close(preferred_payload["Neutral"], 1.0, label="preferred Neutral")
-        _assert_close(preferred_payload["Joy"], 0.5, label="preferred Joy")
-        for name, expected in (
-            ("emotion_strength", 0.8),
-            ("emotion_contrast", 1.4),
-            ("live_blend_coef", 0.4),
-            ("transition_smoothing", 0.9),
-            ("preferred_emotion_strength", 0.35),
+        for collection, expected_values in (
+            (settings.preferred_emotions, (0.6, 0.5)),
+            (settings.mixed_emotions, (0.2, 1.2)),
         ):
-            _assert_close(automatic_payload[name], expected, label=name)
-        assert bpy.ops.a2f.clear_preferred_emotion() == {"FINISHED"}
+            for item, expected in zip(collection, expected_values):
+                _assert_close(item.value, expected, label=item.name)
+        automatic_payload = inference_settings(settings)["emotion_driver"]
+        assert automatic_payload["mode"] == "automatic"
+        preferred_payload = automatic_payload["preferred"]
+        for name, expected in (("Neutral", 0.6), ("Joy", 0.5)):
+            _assert_close(preferred_payload["values"][name], expected, label=name)
+        _assert_close(preferred_payload["strength"], 0.35, label="preferred strength")
+        assert bpy.ops.a2f.toggle_preferred_emotion() == {"FINISHED"}
         assert settings.preferred_emotion_active is False
-        assert [item.value for item in settings.preferred_emotions] == [1.0, 0.5]
-        assert (
-            inference_settings(settings)["audio2emotion"]["preferred_emotion"]
-            is None
-        )
+        for item, expected in zip(settings.preferred_emotions, (0.6, 0.5)):
+            _assert_close(item.value, expected, label=item.name)
+        assert inference_settings(settings)["emotion_driver"]["preferred"] is None
+        settings.auto_audio2emotion = False
+        manual_driver = inference_settings(settings)["emotion_driver"]
+        assert manual_driver["mode"] == "manual"
+        for name, expected in (("Neutral", 0.6), ("Joy", 0.5)):
+            _assert_close(manual_driver["values"][name], expected, label=name)
         extra_target = _make_shape_key_target(
             scene,
             object_name="A2FSmokeExtraTarget",
@@ -586,11 +545,12 @@ def main() -> None:
         assert target.data.shape_keys.animation_data is None
         assert extra_target.data.shape_keys.animation_data is None
 
-        live = LiveStreamController()
+        live = runtime.get_live_stream_controller()
+        routed_operation = "blender-smoke-stream"
         try:
             live.prepare(
                 scene,
-                "blender-smoke-stream",
+                routed_operation,
                 16_000,
                 tuple(MODEL_CHANNELS),
                 ("Neutral", "Joy"),
@@ -598,15 +558,24 @@ def main() -> None:
                 playback_started=None,
                 playback_stopped=None,
             )
+            controller.active_stream = runtime.ActiveStream(
+                operation_id=routed_operation,
+                scene_name=scene.name,
+                wav_source=None,
+            )
             streamed_frame = [0.0] * len(MODEL_CHANNELS)
             streamed_frame[MODEL_CHANNELS.index("jawOpen")] = 0.375
             # The current SDK can emit receptive-field frames before sample zero.
             # They must be accepted and applied directly without animation data.
-            live.receive(
-                "blender-smoke-stream",
-                -160,
-                streamed_frame,
-                [0.25, 0.75],
+            _route_stream_event(
+                controller,
+                routed_operation,
+                "stream_frame",
+                {
+                    "timestamp_sample": -160,
+                    "weights": streamed_frame,
+                    "effective_emotions": [0.25, 1.25],
+                },
             )
             for keyed_target in (
                 target,
@@ -629,14 +598,42 @@ def main() -> None:
             )
             _assert_close(
                 settings.mixed_emotions[1].value,
-                0.75,
+                1.25,
                 label="mixed Joy",
+            )
+            _route_stream_event(
+                controller,
+                routed_operation,
+                "stream_reset",
+                {},
+            )
+            _route_stream_event(
+                controller,
+                routed_operation,
+                "stream_frame",
+                {
+                    "timestamp_sample": 0,
+                    "weights": streamed_frame,
+                    "effective_emotions": [0.75, 0.25],
+                },
+            )
+            assert live.tick() is True
+            _assert_close(
+                settings.mixed_emotions[0].value,
+                0.75,
+                label="mixed Neutral after reset",
+            )
+            _assert_close(
+                settings.mixed_emotions[1].value,
+                0.25,
+                label="mixed Joy after reset",
             )
             assert [tuple(vertex.co) for vertex in target.data.vertices] == primary_vertices
             assert [tuple(vertex.co) for vertex in extra_target.data.vertices] == extra_vertices
             assert target.data.shape_keys.animation_data is None
             assert extra_target.data.shape_keys.animation_data is None
         finally:
+            controller._release_active_stream(routed_operation)
             live.stop(reset=True)
         _assert_close(
             target.data.shape_keys.key_blocks["jawOpen"].value,

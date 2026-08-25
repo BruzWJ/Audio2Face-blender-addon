@@ -11,7 +11,7 @@ from typing import Any
 import bpy
 
 from .frame_stream import sample_linear
-from .properties import apply_mixed_emotions
+from .properties import apply_mixed_emotions, reset_mixed_emotions
 from .shape_keys import (
     apply_shape_key_frame,
     resolve_target_objects,
@@ -97,7 +97,7 @@ def validate_stream_frame(
     emotion_channels: tuple[str, ...],
     timestamp_sample: object,
     weights: object,
-    emotions: object,
+    effective_emotions: object,
 ) -> tuple[tuple[float, ...], tuple[float, ...]]:
     """Validate one worker frame independently of its delivery state."""
 
@@ -147,8 +147,8 @@ def validate_stream_frame(
         ),
         validate_values(
             emotion_channels,
-            emotions,
-            field="emotions",
+            effective_emotions,
+            field="effective_emotions",
             channel_kind="emotion",
             bounded=False,
         ),
@@ -166,7 +166,7 @@ class LiveStreamController:
         self._emotion_channels: tuple[str, ...] = ()
         self._timestamps: list[int] = []
         self._weights: list[tuple[float, ...]] = []
-        self._emotions: list[tuple[float, ...]] = []
+        self._effective_emotions: list[tuple[float, ...]] = []
         self._audio_path: Path | None = None
         self._audio_start_position = 0.0
         self._start_paused = False
@@ -224,6 +224,7 @@ class LiveStreamController:
         """Prepare one stream while resolving its target objects at delivery time."""
 
         self.stop(reset=True, notify=False)
+        reset_mixed_emotions(scene.audio2face)
         self._scene_name = scene.name
         self._operation_id = operation_id
         self._sample_rate = sample_rate
@@ -343,29 +344,49 @@ class LiveStreamController:
         operation_id: str,
         timestamp_sample: int,
         weights: list[float],
-        emotions: list[float],
+        effective_emotions: list[float],
     ) -> None:
         """Accept one worker frame and apply or buffer it."""
 
         if operation_id != self._operation_id or not self.active:
             raise LiveStreamError("received a frame for an inactive stream")
-        frame_weights, frame_emotions = validate_stream_frame(
+        frame_weights, frame_effective_emotions = validate_stream_frame(
             self._channels,
             self._emotion_channels,
             timestamp_sample,
             weights,
-            emotions,
+            effective_emotions,
         )
         if self._timestamps and timestamp_sample <= self._timestamps[-1]:
             raise LiveStreamError("stream frame timestamps must be strictly increasing")
         self._timestamps.append(timestamp_sample)
         self._weights.append(frame_weights)
-        self._emotions.append(frame_emotions)
+        self._effective_emotions.append(frame_effective_emotions)
 
         scene = bpy.data.scenes.get(self._scene_name)
         if scene is None or not scene.is_editable:
             raise LiveStreamError("stream scene is no longer editable")
         settings = scene.audio2face
+        sample_position: float | None = None
+        delay = float(settings.prediction_delay)
+        if not math.isfinite(delay):
+            raise LiveStreamError("prediction delay must be finite")
+        if self._audio_path is None and self._stream_clock_started is not None:
+            sample_position = (
+                self._stream_sample_position() + delay * self._sample_rate
+            )
+        elif self._handle is not None:
+            sample_position = (self._published_position + delay) * self._sample_rate
+        if sample_position is not None:
+            apply_mixed_emotions(
+                settings,
+                self._emotion_channels,
+                sample_linear(
+                    self._timestamps,
+                    self._effective_emotions,
+                    sample_position,
+                ),
+            )
         if self._audio_path is None:
             if self._stream_clock_started is None:
                 self._stream_clock_started = time.monotonic()
@@ -398,8 +419,12 @@ class LiveStreamController:
             raise LiveStreamError("received a frame reset for an inactive stream")
         self._timestamps.clear()
         self._weights.clear()
-        self._emotions.clear()
+        self._effective_emotions.clear()
         self._terminal = False
+        scene = bpy.data.scenes.get(self._scene_name)
+        if scene is None or not scene.is_editable:
+            raise LiveStreamError("stream scene is no longer editable")
+        reset_mixed_emotions(scene.audio2face)
 
     def pause(self) -> None:
         scene = bpy.data.scenes.get(self._scene_name)
@@ -461,7 +486,7 @@ class LiveStreamController:
         if remove:
             del self._timestamps[:remove]
             del self._weights[:remove]
-            del self._emotions[:remove]
+            del self._effective_emotions[:remove]
 
     def _apply_sampled_frame(self, settings: Any, sample_position: float) -> None:
         apply_shape_key_frame(
@@ -478,7 +503,7 @@ class LiveStreamController:
             self._emotion_channels,
             sample_linear(
                 self._timestamps,
-                self._emotions,
+                self._effective_emotions,
                 sample_position,
             ),
         )
@@ -613,7 +638,7 @@ class LiveStreamController:
         self._emotion_channels = ()
         self._timestamps.clear()
         self._weights.clear()
-        self._emotions.clear()
+        self._effective_emotions.clear()
         self._audio_path = None
         self._audio_start_position = 0.0
         self._start_paused = False

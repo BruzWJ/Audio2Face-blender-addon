@@ -252,8 +252,11 @@ class A2F_PT_main(bpy.types.Panel):
             default_closed=True,
         )
         preferred_header.label(text="Preferred Emotion", icon="DRIVER")
-        preferred_header.operator("a2f.load_preferred_emotion", text="Load")
-        preferred_header.operator("a2f.clear_preferred_emotion", text="Clear")
+        preferred_header.operator(
+            "a2f.toggle_preferred_emotion",
+            text="Clear" if settings.preferred_emotion_active else "Load",
+            icon="X" if settings.preferred_emotion_active else "IMPORT",
+        )
         if preferred_body is not None:
             preferred_body.prop(
                 settings,

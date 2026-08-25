@@ -52,8 +52,7 @@ def main() -> None:
     operator_names = set(dir(bpy.ops.a2f))
     assert {
         "play_pause",
-        "load_preferred_emotion",
-        "clear_preferred_emotion",
+        "toggle_preferred_emotion",
     } <= operator_names
     runtime.get_controller().poll()
     assert bpy.context.scene.audio2face.status == "IDLE"
@@ -158,16 +157,9 @@ def main() -> None:
     )
     assert properties.inference_settings(settings) == {
         "audio2face": tuned_audio2face,
-        "auto_audio2emotion": False,
-        "manual_emotions": {},
-        "audio2emotion": {
-            "emotion_strength": 0.6,
-            "emotion_contrast": 1.0,
-            "max_emotions": 6,
-            "live_blend_coef": 0.7,
-            "transition_smoothing": 0.5,
-            "preferred_emotion": None,
-            "preferred_emotion_strength": 0.5,
+        "emotion_driver": {
+            "mode": "manual",
+            "values": {},
         },
     }
 

@@ -30,7 +30,7 @@ WorkerError::WorkerError(std::string code, std::string message, json details)
 
 namespace {
 
-constexpr const char* kProtocol = "audio2face/7";
+constexpr const char* kProtocol = "audio2face/8";
 constexpr std::size_t kMaximumRequestBytes = 1024U * 1024U;
 constexpr std::size_t kStreamQueueSeconds = 4;
 
@@ -341,7 +341,7 @@ class Server {
     if (method == "hello") {
       require_exact_keys(params, {});
       emitter_.response(
-          id, {{"worker_profile", "nvidia-a2f3-a2e3-gpu-arkit52/7"},
+          id, {{"worker_profile", "nvidia-a2f3-a2e3-gpu-arkit52/8"},
                {"worker_version", A2F_WORKER_VERSION}});
       negotiated_ = true;
       return;
@@ -572,7 +572,7 @@ class Server {
           operation_id, "stream_frame",
           {{"timestamp_sample", frame.timestamp_sample},
            {"weights", frame.weights},
-           {"emotions", frame.emotions}});
+           {"effective_emotions", frame.effective_emotions}});
     };
     const auto emit_reset = [this, &operation_id]() {
       emit_active_stream_event(operation_id, "stream_reset", json::object());

@@ -1840,7 +1840,11 @@ class RuntimeController:
             except LiveStreamError as exc:
                 self._reject_worker_contract(str(exc))
         elif event == "stream_frame":
-            if set(data) != {"timestamp_sample", "weights", "emotions"}:
+            if set(data) != {
+                "timestamp_sample",
+                "weights",
+                "effective_emotions",
+            }:
                 self._reject_worker_contract(
                     "worker returned invalid stream-frame data",
                 )
@@ -1858,7 +1862,7 @@ class RuntimeController:
                         _model_emotion_channels(model_schema),
                         data["timestamp_sample"],
                         data["weights"],
-                        data["emotions"],
+                        data["effective_emotions"],
                     )
                 except (LiveStreamError, TypeError, ValueError) as exc:
                     self._reject_worker_contract(str(exc))
@@ -1875,7 +1879,7 @@ class RuntimeController:
                     operation_id,
                     timestamp,
                     data["weights"],
-                    data["emotions"],
+                    data["effective_emotions"],
                 )
             except (LiveStreamError, TypeError, ValueError) as exc:
                 self._reject_worker_contract(str(exc))

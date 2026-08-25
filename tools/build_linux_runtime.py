@@ -1073,40 +1073,26 @@ def write_provenance(
     trtexec: Path,
     work_root: Path,
 ) -> Path:
-    notices = work_root / "notices"
-    notices.mkdir(parents=True, exist_ok=True)
-    lock_digest = common.file_sha256(common.LOCK_PATH)
-    provenance = notices / "trtexec-PROVENANCE.txt"
     linux_packages = lock["tensorrt"]["linux_packages"]
     trtexec_package = linux_packages["packages"]["trtexec"]
     trtexec_entry = trtexec_package["files"][
         common.runtime_contract(PLATFORM_ID).trtexec
     ]
-    record: dict[str, Any] = {
-        "schema": "audio2face-trtexec-provenance/1",
-        "platform": PLATFORM_ID,
-        "runtime_lock_sha256": lock_digest,
-        "tensorrt_binary": {
-            "version": lock["tensorrt"]["version"],
-            "cuda": lock["tensorrt"]["cuda"],
-            "input": {
-                "base_url": linux_packages["base_url"],
-                "source_rpm": linux_packages["source_rpm"],
-                "packages": linux_packages["packages"],
-            },
+    return common.write_trtexec_provenance(
+        lock,
+        PLATFORM_ID,
+        trtexec,
+        work_root,
+        binary_input={
+            "base_url": linux_packages["base_url"],
+            "source_rpm": linux_packages["source_rpm"],
+            "packages": linux_packages["packages"],
         },
-        "trtexec": {
+        trtexec_input={
             "rpm": trtexec_package["artifact"]["relative_path"],
             "rpm_member": trtexec_entry["member"],
-            "size": trtexec.stat().st_size,
-            "sha256": common.file_sha256(trtexec),
         },
-    }
-    provenance.write_text(
-        json.dumps(record, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
     )
-    return provenance
 
 
 def _validate_elf64_x86_64(path: Path) -> None:
@@ -1391,24 +1377,13 @@ def build_linux_runtime(work_root: Path) -> Path:
     lock = common.load_lock()
     host_runner = common.CommandRunner()
     environment = release_environment(work_root)
-    git = common.require_host_program("git", environment)
-
-    sdk_source = work_root / "source" / "audio2face-sdk"
-    common.checkout_exact(
+    sdk_source, cmake_root, cuda_root = common.materialize_build_inputs(
         host_runner,
-        git,
-        lock["audio2face_sdk"]["repository"],
-        lock["audio2face_sdk"]["commit"],
-        sdk_source,
-        env=environment,
-    )
-    cmake_root = common.materialize_archive_root(
-        lock["cmake"]["artifacts"][PLATFORM_ID],
-        "cmake",
+        lock,
         PLATFORM_ID,
         work_root,
+        environment,
     )
-    cuda_root = common.materialize_cuda(lock, PLATFORM_ID, work_root)
     finalize_linux_cuda_toolkit(cuda_root)
     tensorrt_root = materialize_linux_tensorrt(lock, work_root)
     trtexec = common.pinned_trtexec(tensorrt_root, PLATFORM_ID)
@@ -1429,11 +1404,7 @@ def build_linux_runtime(work_root: Path) -> Path:
     ) as runner:
         compiler = validate_native_compiler(runner, lock, environment)
         cmake = common.validate_cmake(
-            runner,
-            cmake_root,
-            PLATFORM_ID,
-            lock["cmake"]["version"],
-            environment,
+            runner, cmake_root, PLATFORM_ID, lock, environment
         )
         build_environment = private_build_environment(
             environment,
@@ -1448,17 +1419,9 @@ def build_linux_runtime(work_root: Path) -> Path:
             trtexec,
             work_root,
         )
-        runtime = work_root / "runtime" / PLATFORM_ID
-        if runtime.exists() or runtime.is_symlink():
-            raise BuildError(f"runtime package output already exists: {runtime}")
-        contract = common.runtime_contract(PLATFORM_ID)
-        bundle_manifest = work_root / "notices" / "bundle.json"
-        bundle_manifest.write_text(
-            json.dumps(contract.manifest(), indent=2) + "\n", encoding="utf-8"
-        )
-        external_files = common.runtime_package_map(
-            contract,
-            bundle_manifest=bundle_manifest,
+        runtime, contract, external_files = common.initialize_runtime_package(
+            PLATFORM_ID,
+            work_root,
             sdk_source=sdk_source,
             cuda_runtime=(cuda_root / common.LINUX_CUDA_LIBRARY_DIRECTORY),
             tensorrt_runtime=tensorrt_root / "lib",
@@ -1493,7 +1456,6 @@ def build_linux_runtime(work_root: Path) -> Path:
                 ("CMAKE_CUDA_FLAGS", cuda_flags),
             ),
         )
-        common.validate_runtime_package(runtime, PLATFORM_ID)
         audit_linux_dependencies(
             runner,
             runtime,

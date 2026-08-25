@@ -20,6 +20,7 @@
 #include <optional>
 #include <system_error>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace a2f_worker {
@@ -43,15 +44,26 @@ struct ArkitEyeLookIndices {
   std::size_t up_right;
 };
 
-struct AutomaticEmotionSettings {
+struct PreferredEmotionSettings {
+  std::vector<float> values;
+  float strength{};
+};
+
+struct ManualEmotionDriver {
+  std::vector<float> values;
+};
+
+struct AutomaticEmotionDriver {
   float emotion_strength{};
   float emotion_contrast{};
   std::size_t max_emotions{};
   float live_blend_coefficient{};
   float transition_smoothing{};
-  std::optional<std::vector<float>> preferred_emotion;
-  float preferred_emotion_strength{};
+  std::optional<PreferredEmotionSettings> preferred;
 };
+
+using EmotionDriver =
+    std::variant<ManualEmotionDriver, AutomaticEmotionDriver>;
 
 struct Audio2FaceSettings {
   float input_strength{0.0F};
@@ -113,15 +125,6 @@ float required_float_value(const json& value, const std::string& path) {
     throw WorkerError("invalid_params", path + " must be a finite float");
   }
   return static_cast<float>(parsed);
-}
-
-bool required_bool(const json& object, const char* name, const char* path) {
-  const auto it = object.find(name);
-  if (it == object.end() || !it->is_boolean()) {
-    throw WorkerError("invalid_params",
-                      std::string(path) + name + " must be boolean");
-  }
-  return it->get<bool>();
 }
 
 float required_float_in_range(const json& object, const char* name,
@@ -342,10 +345,10 @@ class Backend::Impl final {
     }
     clear_locked();
     try {
-      (void)require_canonical_regular_file(
+      require_canonical_regular_file(
           request.audio2face_model_path, "model_not_found",
           "audio2face_model_path");
-      (void)require_canonical_regular_file(
+      require_canonical_regular_file(
           request.audio2emotion_model_path, "model_not_found",
           "audio2emotion_model_path");
       sdk_check(nva2x::SetCudaDeviceIfNeeded(0), "Selecting CUDA device",
@@ -427,7 +430,7 @@ class Backend::Impl final {
                     executor, &Impl::geometry_callback, this),
                 "Installing geometry callback");
       sdk_check(executor.SetEmotionsCallback(
-                    &Impl::face_emotions_callback, this),
+                    &Impl::effective_emotions_callback, this),
                 "Installing effective emotion callback");
       sdk_check(executor.SetResultsCallback(&Impl::weights_callback, this),
                 "Installing device blendshape callback");
@@ -516,7 +519,7 @@ class Backend::Impl final {
               emotion_executor_->GetEmotionsSize()}});
       }
       sdk_check(emotion_executor_->SetResultsCallback(
-                    &Impl::emotion_callback, this),
+                    &Impl::generated_emotion_callback, this),
                 "Installing Audio2Emotion callback");
 
       json model_schema = {{"channels", std::move(output_channels)},
@@ -603,7 +606,7 @@ class Backend::Impl final {
     std::int64_t next_timestamp{0};
     SdkPtr<nva2x::IHostTensorFloat> weights;
     SdkPtr<nva2x::IHostTensorFloat> eyes;
-    SdkPtr<nva2x::IHostTensorFloat> emotions;
+    SdkPtr<nva2x::IHostTensorFloat> effective_emotions;
   };
 
   struct Capture {
@@ -614,7 +617,7 @@ class Backend::Impl final {
     const char* failure{nullptr};
   };
 
-  struct EmotionCapture {
+  struct GeneratedEmotionCapture {
     std::atomic_bool* canceled{nullptr};
     nva2x::IEmotionAccumulator* accumulator{nullptr};
     std::size_t emotion_count{0};
@@ -628,15 +631,15 @@ class Backend::Impl final {
 
   static bool pending_timestamp_matches(
       const PendingFrame& frame, std::int64_t next_timestamp) noexcept {
-    return (!frame.weights && !frame.eyes && !frame.emotions) ||
+    return (!frame.weights && !frame.eyes && !frame.effective_emotions) ||
            frame.next_timestamp == next_timestamp;
   }
 
-  static bool emotion_callback(
+  static bool generated_emotion_callback(
       void* userdata, const nva2e::IEmotionExecutor::Results& results) {
     auto& owner = *static_cast<Impl*>(userdata);
-    if (owner.active_emotion_capture_ == nullptr) return false;
-    auto& capture = *owner.active_emotion_capture_;
+    if (owner.active_generated_emotion_capture_ == nullptr) return false;
+    auto& capture = *owner.active_generated_emotion_capture_;
     if (capture.canceled->load(std::memory_order_acquire)) return false;
     if (results.trackIndex != 0) {
       capture.failure = "Audio2Emotion callback returned an unexpected track";
@@ -656,7 +659,7 @@ class Backend::Impl final {
     return true;
   }
 
-  static void face_emotions_callback(
+  static void effective_emotions_callback(
       void* userdata, const nva2f::IFaceExecutor::Emotions& results) {
     auto& owner = *static_cast<Impl*>(userdata);
     if (owner.active_capture_ == nullptr) return;
@@ -675,7 +678,7 @@ class Backend::Impl final {
         return;
       }
       auto& frame = capture.frames[results.timeStampCurrentFrame];
-      if (frame.emotions ||
+      if (frame.effective_emotions ||
           !pending_timestamp_matches(frame, results.timeStampNextFrame)) {
         fail_capture(
             capture,
@@ -683,11 +686,11 @@ class Backend::Impl final {
         return;
       }
       frame.next_timestamp = results.timeStampNextFrame;
-      frame.emotions = require_sdk_ptr(
+      frame.effective_emotions = require_sdk_ptr(
           nva2x::CreateHostPinnedTensorFloat(capture.emotion_count),
           "Allocating pinned emotion result buffer", "gpu_error");
       const auto error = nva2x::CopyDeviceToHost(
-          frame.emotions->View(0, capture.emotion_count),
+          frame.effective_emotions->View(0, capture.emotion_count),
           results.emotions, results.cudaStream);
       if (error) {
         fail_capture(capture, "Copying effective emotions failed");
@@ -812,13 +815,15 @@ class Backend::Impl final {
     sdk_check(emotion_executor_->Reset(0),
               "Resetting Audio2Emotion executor");
     apply_settings(settings);
-    if (auto_audio2emotion_active_) {
-      configure_automatic_emotion();
+    if (const auto* automatic =
+            std::get_if<AutomaticEmotionDriver>(&emotion_driver_)) {
+      configure_automatic_emotion(*automatic);
     } else {
+      const auto& manual = std::get<ManualEmotionDriver>(emotion_driver_);
       sdk_check(bundle_->GetEmotionAccumulator(0).Accumulate(
                     0,
                     nva2x::HostTensorFloatConstView(
-                        manual_emotion_.data(), manual_emotion_.size()),
+                        manual.values.data(), manual.values.size()),
                     bundle_->GetCudaStream().Data()),
                 "Accumulating manual emotion driver");
       sdk_check(bundle_->GetEmotionAccumulator(0).Close(),
@@ -899,7 +904,7 @@ class Backend::Impl final {
     sdk_check(bundle_->GetAudioAccumulator(0).Close(),
               "Closing audio accumulator");
     drain_interleaved_ready(canceled, frame);
-    if (auto_audio2emotion_active_) {
+    if (std::holds_alternative<AutomaticEmotionDriver>(emotion_driver_)) {
       if (emotion_executor_->GetNbAvailableExecutions(0) != 0) {
         throw WorkerError(
             "inference_failed",
@@ -932,32 +937,32 @@ class Backend::Impl final {
         execute_face_once(canceled, frame_callback);
         continue;
       }
-      if (auto_audio2emotion_active_ &&
+      if (std::holds_alternative<AutomaticEmotionDriver>(emotion_driver_) &&
           nva2x::GetNbReadyTracks(*emotion_executor_) > 0) {
-        execute_emotion_once(canceled);
+        execute_generated_emotion_once(canceled);
         continue;
       }
       break;
     }
   }
 
-  void execute_emotion_once(std::atomic_bool& canceled) {
+  void execute_generated_emotion_once(std::atomic_bool& canceled) {
     if (canceled.load(std::memory_order_acquire)) {
       throw WorkerError("canceled", "Operation was stopped");
     }
-    EmotionCapture capture;
+    GeneratedEmotionCapture capture;
     capture.canceled = &canceled;
     capture.accumulator = &bundle_->GetEmotionAccumulator(0);
     capture.emotion_count = emotion_channels_.size();
-    active_emotion_capture_ = &capture;
+    active_generated_emotion_capture_ = &capture;
     std::error_code execute_error;
     try {
       execute_error = emotion_executor_->Execute(nullptr);
     } catch (...) {
-      active_emotion_capture_ = nullptr;
+      active_generated_emotion_capture_ = nullptr;
       throw;
     }
-    active_emotion_capture_ = nullptr;
+    active_generated_emotion_capture_ = nullptr;
     if (canceled.load(std::memory_order_acquire)) {
       throw WorkerError("canceled", "Operation was stopped");
     }
@@ -1012,7 +1017,7 @@ class Backend::Impl final {
 
     for (const auto& [timestamp, pending] : capture.frames) {
       const std::int64_t stream_timestamp = absolute_timestamp(timestamp);
-      if (!pending.weights || !pending.eyes || !pending.emotions) {
+      if (!pending.weights || !pending.eyes || !pending.effective_emotions) {
         throw WorkerError("inference_failed",
                           "SDK callbacks returned an incomplete frame",
                           {{"timestamp", stream_timestamp}});
@@ -1044,10 +1049,11 @@ class Backend::Impl final {
                              {"component", index}});
         }
       }
-      std::vector<float> emotions;
-      emotions.reserve(pending.emotions->Size());
-      for (std::size_t index = 0; index < pending.emotions->Size(); ++index) {
-        const float value = pending.emotions->Data()[index];
+      std::vector<float> effective_emotions;
+      effective_emotions.reserve(pending.effective_emotions->Size());
+      for (std::size_t index = 0;
+           index < pending.effective_emotions->Size(); ++index) {
+        const float value = pending.effective_emotions->Data()[index];
         if (!std::isfinite(value)) {
           throw WorkerError(
               "inference_failed",
@@ -1055,7 +1061,7 @@ class Backend::Impl final {
               {{"timestamp", stream_timestamp}, {"channel", index},
                {"value", value}});
         }
-        emotions.push_back(value);
+        effective_emotions.push_back(value);
       }
       resolve_arkit_eye_look(arkit, pending.eyes->Data(), eye_look_indices_);
       for (float& value : arkit) {
@@ -1071,13 +1077,13 @@ class Backend::Impl final {
       }
       previous_timestamp_ = stream_timestamp;
       frame_callback(StreamFrame{stream_timestamp, std::move(arkit),
-                                 std::move(emotions)});
+                                 std::move(effective_emotions)});
     }
   }
 
   void drop_consumed_inputs() {
     std::size_t next_audio_sample = executor().GetNextAudioSampleToRead(0);
-    if (auto_audio2emotion_active_) {
+    if (std::holds_alternative<AutomaticEmotionDriver>(emotion_driver_)) {
       next_audio_sample = std::min(
           next_audio_sample, emotion_executor_->GetNextAudioSampleToRead(0));
     }
@@ -1086,7 +1092,8 @@ class Backend::Impl final {
               "Dropping processed audio samples");
 
     auto& emotion_accumulator = bundle_->GetEmotionAccumulator(0);
-    if (auto_audio2emotion_active_ && !emotion_accumulator.IsEmpty()) {
+    if (std::holds_alternative<AutomaticEmotionDriver>(emotion_driver_) &&
+        !emotion_accumulator.IsEmpty()) {
       const auto next_emotion_timestamp =
           executor().GetNextEmotionTimestampToRead(0);
       const auto last_emotion_timestamp =
@@ -1157,88 +1164,107 @@ class Backend::Impl final {
               "Configuring Audio2Face eyes parameters");
   }
 
+  EmotionDriver parse_emotion_driver(const json& value) const {
+    if (!value.is_object()) {
+      throw WorkerError("invalid_params",
+                        "settings.emotion_driver must be an object");
+    }
+    const auto mode_value = value.find("mode");
+    if (mode_value == value.end() || !mode_value->is_string()) {
+      throw WorkerError("invalid_params",
+                        "settings.emotion_driver.mode must be a string");
+    }
+    const std::string& mode = mode_value->get_ref<const std::string&>();
+
+    if (mode == "manual") {
+      require_exact_keys(value, {"mode", "values"},
+                         "settings.emotion_driver");
+      return ManualEmotionDriver{parse_emotion_snapshot(
+          value.at("values"), "settings.emotion_driver.values")};
+    }
+    if (mode == "automatic") {
+      require_exact_keys(
+          value,
+          {"mode", "emotion_strength", "emotion_contrast", "max_emotions",
+           "live_blend_coef", "transition_smoothing", "preferred"},
+          "settings.emotion_driver");
+      AutomaticEmotionDriver automatic;
+      automatic.emotion_strength = required_float_in_range(
+          value, "emotion_strength", "settings.emotion_driver.",
+          0.0F, 2.0F);
+      automatic.emotion_contrast = required_float_in_range(
+          value, "emotion_contrast", "settings.emotion_driver.",
+          0.1F, 3.0F);
+      automatic.max_emotions = required_size_in_range(
+          value, "max_emotions", "settings.emotion_driver.", 1,
+          emotion_channels_.size());
+      automatic.live_blend_coefficient = required_float_in_range(
+          value, "live_blend_coef", "settings.emotion_driver.",
+          0.0F, 1.0F);
+      automatic.transition_smoothing = required_float_in_range(
+          value, "transition_smoothing", "settings.emotion_driver.",
+          0.1F, 1.0F);
+
+      const json& preferred = value.at("preferred");
+      if (!preferred.is_null()) {
+        if (!preferred.is_object()) {
+          throw WorkerError(
+              "invalid_params",
+              "settings.emotion_driver.preferred must be null or an object");
+        }
+        require_exact_keys(preferred, {"values", "strength"},
+                           "settings.emotion_driver.preferred");
+        PreferredEmotionSettings preferred_settings;
+        preferred_settings.values = parse_emotion_snapshot(
+            preferred.at("values"),
+            "settings.emotion_driver.preferred.values");
+        preferred_settings.strength = required_float_in_range(
+            preferred, "strength", "settings.emotion_driver.preferred.",
+            0.0F, 1.0F);
+        automatic.preferred = std::move(preferred_settings);
+      }
+      return automatic;
+    }
+
+    throw WorkerError(
+        "invalid_params",
+        "settings.emotion_driver.mode must be \"manual\" or \"automatic\"");
+  }
+
   void apply_settings(const json& settings) {
     if (!settings.is_object()) {
       throw WorkerError("invalid_params", "settings must be an object");
     }
-    require_exact_keys(
-        settings,
-        {"audio2face", "auto_audio2emotion", "manual_emotions",
-         "audio2emotion"},
-        "settings");
+    require_exact_keys(settings, {"audio2face", "emotion_driver"},
+                       "settings");
     const Audio2FaceSettings audio2face =
         parse_audio2face_settings(settings.at("audio2face"));
-    const bool auto_audio2emotion = required_bool(
-        settings, "auto_audio2emotion", "settings.");
-    const auto manual_value = settings.find("manual_emotions");
-    std::vector<float> manual_emotion = parse_emotion_snapshot(
-        *manual_value, "settings.manual_emotions");
+    EmotionDriver emotion_driver =
+        parse_emotion_driver(settings.at("emotion_driver"));
 
-    const auto automatic_value = settings.find("audio2emotion");
-    if (automatic_value == settings.end() || !automatic_value->is_object()) {
-      throw WorkerError("invalid_params",
-                        "settings.audio2emotion must be an object");
-    }
-    require_exact_keys(
-        *automatic_value,
-        {"emotion_strength", "emotion_contrast", "max_emotions",
-         "live_blend_coef", "transition_smoothing",
-         "preferred_emotion", "preferred_emotion_strength"},
-        "settings.audio2emotion");
-    AutomaticEmotionSettings automatic_emotion;
-    automatic_emotion.emotion_strength = required_float_in_range(
-        *automatic_value, "emotion_strength", "settings.audio2emotion.", 0.0F,
-        2.0F);
-    automatic_emotion.emotion_contrast = required_float_in_range(
-        *automatic_value, "emotion_contrast", "settings.audio2emotion.", 0.1F,
-        3.0F);
-    automatic_emotion.max_emotions = required_size_in_range(
-        *automatic_value, "max_emotions", "settings.audio2emotion.", 1,
-        emotion_channels_.size());
-    automatic_emotion.live_blend_coefficient = required_float_in_range(
-        *automatic_value, "live_blend_coef", "settings.audio2emotion.", 0.0F,
-        1.0F);
-    automatic_emotion.transition_smoothing = required_float_in_range(
-        *automatic_value, "transition_smoothing", "settings.audio2emotion.",
-        0.1F, 1.0F);
-    const auto preferred_value = automatic_value->find("preferred_emotion");
-    if (!preferred_value->is_null()) {
-      automatic_emotion.preferred_emotion = parse_emotion_snapshot(
-          *preferred_value, "settings.audio2emotion.preferred_emotion");
-    }
-    automatic_emotion.preferred_emotion_strength = required_float_in_range(
-        *automatic_value, "preferred_emotion_strength",
-        "settings.audio2emotion.", 0.0F, 1.0F);
-
-    auto_audio2emotion_active_ = auto_audio2emotion;
-    manual_emotion_ = std::move(manual_emotion);
-    automatic_emotion_settings_ = std::move(automatic_emotion);
     configure_audio2face(audio2face);
+    emotion_driver_ = std::move(emotion_driver);
   }
 
-  void configure_automatic_emotion() {
+  void configure_automatic_emotion(const AutomaticEmotionDriver& settings) {
     nva2e::PostProcessParams parameters;
     sdk_check(nva2e::GetExecutorPostProcessParameters(
                   *emotion_executor_, 0, parameters),
               "Reading Audio2Emotion post-process parameters");
-    parameters.emotionStrength =
-        automatic_emotion_settings_.emotion_strength;
-    parameters.emotionContrast =
-        automatic_emotion_settings_.emotion_contrast;
-    parameters.maxEmotions = automatic_emotion_settings_.max_emotions;
-    parameters.liveBlendCoef =
-        automatic_emotion_settings_.live_blend_coefficient;
-    parameters.liveTransitionTime =
-        automatic_emotion_settings_.transition_smoothing;
-    parameters.enablePreferredEmotion =
-        automatic_emotion_settings_.preferred_emotion.has_value();
-    parameters.preferredEmotionStrength =
-        automatic_emotion_settings_.preferred_emotion_strength;
-    if (automatic_emotion_settings_.preferred_emotion) {
-      const std::vector<float>& preferred_emotion =
-          *automatic_emotion_settings_.preferred_emotion;
+    parameters.emotionStrength = settings.emotion_strength;
+    parameters.emotionContrast = settings.emotion_contrast;
+    parameters.maxEmotions = settings.max_emotions;
+    parameters.liveBlendCoef = settings.live_blend_coefficient;
+    parameters.liveTransitionTime = settings.transition_smoothing;
+    parameters.enablePreferredEmotion = settings.preferred.has_value();
+    if (settings.preferred) {
+      const PreferredEmotionSettings& preferred =
+          *settings.preferred;
+      parameters.preferredEmotionStrength = preferred.strength;
       parameters.preferredEmotion = nva2x::HostTensorFloatConstView(
-          preferred_emotion.data(), preferred_emotion.size());
+          preferred.values.data(), preferred.values.size());
+    } else {
+      parameters.preferredEmotionStrength = 0.0F;
     }
     sdk_check(nva2e::SetExecutorPostProcessParameters(
                   *emotion_executor_, 0, parameters),
@@ -1318,18 +1344,16 @@ class Backend::Impl final {
       (void)bundle_->GetCudaStream().Synchronize();
     }
     active_capture_ = nullptr;
-    active_emotion_capture_ = nullptr;
+    active_generated_emotion_capture_ = nullptr;
     emotion_executor_.reset();
     bundle_.reset();
     eye_look_indices_ = {};
     audio2face_defaults_ = {};
     emotion_channels_.clear();
-    manual_emotion_.clear();
+    emotion_driver_ = ManualEmotionDriver{};
     finish_operation();
     sample_rate_ = 0;
     prebuffer_samples_ = 0;
-    auto_audio2emotion_active_ = false;
-    automatic_emotion_settings_ = {};
   }
 
   std::mutex resource_mutex_;
@@ -1337,11 +1361,11 @@ class Backend::Impl final {
   SdkPtr<nva2f::IBlendshapeExecutorBundle> bundle_;
   SdkPtr<nva2e::IEmotionExecutor> emotion_executor_;
   Capture* active_capture_{nullptr};
-  EmotionCapture* active_emotion_capture_{nullptr};
+  GeneratedEmotionCapture* active_generated_emotion_capture_{nullptr};
   ArkitEyeLookIndices eye_look_indices_{};
   Audio2FaceSettings audio2face_defaults_;
   std::vector<std::string> emotion_channels_;
-  std::vector<float> manual_emotion_;
+  EmotionDriver emotion_driver_{ManualEmotionDriver{}};
   std::deque<float> retained_audio_;
   std::size_t retained_audio_capacity_{0};
   std::int64_t total_audio_samples_{0};
@@ -1349,8 +1373,6 @@ class Backend::Impl final {
   std::optional<std::int64_t> previous_timestamp_;
   std::uint32_t sample_rate_{0};
   std::size_t prebuffer_samples_{0};
-  bool auto_audio2emotion_active_{false};
-  AutomaticEmotionSettings automatic_emotion_settings_;
 };
 
 Backend::Backend() : impl_(std::make_unique<Impl>()) {}

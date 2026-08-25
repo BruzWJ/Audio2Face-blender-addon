@@ -38,7 +38,7 @@ def test_windows_native_transport_uses_binary_stdio() -> None:
 
 
 def test_native_worker_mirrors_the_python_wire_identity() -> None:
-    assert WORKER_PROFILE.rpartition("/")[2] == "7"
+    assert WORKER_PROFILE.rpartition("/")[2] == "8"
     assert f'constexpr const char* kProtocol = "{PROTOCOL_VERSION}";' in (
         WORKER_PROTOCOL_SOURCE
     )
@@ -47,7 +47,7 @@ def test_native_worker_mirrors_the_python_wire_identity() -> None:
         WORKER_PROTOCOL_SOURCE
     )
     assert MAX_CONTROL_LINE_BYTES == 1024 * 1024
-    assert '{"emotions", frame.emotions}' in WORKER_PROTOCOL_SOURCE
+    assert '{"effective_emotions", frame.effective_emotions}' in WORKER_PROTOCOL_SOURCE
 
 
 def test_request_round_trip_is_compact_utf8_and_one_record() -> None:
@@ -72,12 +72,12 @@ def test_request_round_trip_is_compact_utf8_and_one_record() -> None:
     "line",
     [
         "{}\n",
-        '{"protocol":"audio2face/7","type":"response","id":"1","result":{}}',
+        '{"protocol":"audio2face/8","type":"response","id":"1","result":{}}',
         '{"protocol":"audio2face/999","type":"response","id":"1","result":{}}\n',
-        '{"protocol":"audio2face/7","type":"response","id":"1","result":{}}\n{}\n',
-        '{"protocol":"audio2face/7","type":"response","id":"1","result":{}}\n\n',
+        '{"protocol":"audio2face/8","type":"response","id":"1","result":{}}\n{}\n',
+        '{"protocol":"audio2face/8","type":"response","id":"1","result":{}}\n\n',
         b"\xff\n",
-        '{"protocol":"audio2face/7","type":"response","id":"1","id":"2","result":{}}\n',
+        '{"protocol":"audio2face/8","type":"response","id":"1","id":"2","result":{}}\n',
     ],
 )
 def test_decode_rejects_malformed_noncanonical_records(line: str | bytes) -> None:
@@ -109,7 +109,7 @@ def test_decode_rejects_malformed_noncanonical_records(line: str | bytes) -> Non
             "data": {
                 "timestamp_sample": 0,
                 "weights": [0.0],
-                "emotions": [0.0],
+                "effective_emotions": [0.0],
             },
         },
     ],
@@ -146,7 +146,7 @@ def test_canonical_stream_event_requires_operation_id_and_exact_fields() -> None
     data = {
         "timestamp_sample": 0,
         "weights": [0.0],
-        "emotions": [0.0],
+        "effective_emotions": [0.0],
     }
     event = {
         "protocol": PROTOCOL_VERSION,
@@ -177,7 +177,7 @@ def test_stream_methods_and_events_are_canonical_protocol_members() -> None:
             {
                 "timestamp_sample": 0,
                 "weights": [0.0],
-                "emotions": [0.0],
+                "effective_emotions": [0.0],
             }
             if event_name == "stream_frame"
             else {}
@@ -259,7 +259,10 @@ def test_encode_rejects_non_json_numbers(bad_value: float) -> None:
         "stream_start",
         {
             "settings": {
-                "audio2emotion": {"emotion_strength": bad_value},
+                "emotion_driver": {
+                    "mode": "automatic",
+                    "emotion_strength": bad_value,
+                },
             }
         },
     )
@@ -304,7 +307,7 @@ def test_protocol_normalizes_non_utf8_text_errors() -> None:
         encode_message(message)
 
     line = (
-        '{"protocol":"audio2face/7","type":"response","id":"1",'
+        '{"protocol":"audio2face/8","type":"response","id":"1",'
         '"result":{"value":"\ud800"}}\n'
     )
     with pytest.raises(ProtocolError, match="UTF-8"):

@@ -783,33 +783,23 @@ def write_provenance(
     work_root: Path,
     msvc_manifest: Path,
 ) -> tuple[Path, Path]:
-    notices = work_root / "notices"
-    notices.mkdir(parents=True, exist_ok=True)
-    lock_digest = common.file_sha256(common.LOCK_PATH)
     artifact = lock["tensorrt"]["windows_artifact"]
-    trtexec_provenance = notices / "trtexec-PROVENANCE.txt"
-    record: dict[str, Any] = {
-        "schema": "audio2face-trtexec-provenance/1",
-        "platform": PLATFORM_ID,
-        "runtime_lock_sha256": lock_digest,
-        "tensorrt_binary": {
-            "version": lock["tensorrt"]["version"],
-            "cuda": lock["tensorrt"]["cuda"],
-            "input": {"archive": artifact},
-        },
-        "trtexec": {
+    trtexec_provenance = common.write_trtexec_provenance(
+        lock,
+        PLATFORM_ID,
+        trtexec,
+        work_root,
+        binary_input={"archive": artifact},
+        trtexec_input={
             "archive_member": (
                 PurePosixPath(artifact["archive_root"])
                 / PurePosixPath(common.runtime_contract(PLATFORM_ID).trtexec)
             ).as_posix(),
-            "size": trtexec.stat().st_size,
-            "sha256": common.file_sha256(trtexec),
         },
-    }
-    trtexec_provenance.write_text(
-        json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
 
+    notices = work_root / "notices"
+    lock_digest = common.file_sha256(common.LOCK_PATH)
     msvc_provenance = notices / "msvc-runtime-PROVENANCE.txt"
     msvc_record = {
         "schema": "audio2face-msvc-runtime-provenance/1",
@@ -895,35 +885,20 @@ def build_windows_runtime(work_root: Path) -> Path:
     lock = common.load_lock()
     runner = common.CommandRunner()
     environment = release_environment(work_root, lock)
-    git = common.require_host_program("git.exe", environment)
-
-    sdk_source = work_root / "source" / "audio2face-sdk"
-    common.checkout_exact(
+    sdk_source, cmake_root, cuda_root = common.materialize_build_inputs(
         runner,
-        git,
-        lock["audio2face_sdk"]["repository"],
-        lock["audio2face_sdk"]["commit"],
-        sdk_source,
-        env=environment,
-    )
-    cmake_root = common.materialize_archive_root(
-        lock["cmake"]["artifacts"][PLATFORM_ID],
-        "cmake",
+        lock,
         PLATFORM_ID,
         work_root,
+        environment,
     )
-    cuda_root = common.materialize_cuda(lock, PLATFORM_ID, work_root)
     tensorrt_root = materialize_windows_tensorrt(lock, work_root)
     trtexec = common.pinned_trtexec(tensorrt_root, PLATFORM_ID)
     msvc_runtime, msvc_manifest = materialize_msvc_runtime(lock, work_root)
     ninja = fetch_sdk_dependencies(runner, sdk_source, environment)
     compiler = validate_native_compiler(runner, lock, environment)
     cmake = common.validate_cmake(
-        runner,
-        cmake_root,
-        PLATFORM_ID,
-        lock["cmake"]["version"],
-        environment,
+        runner, cmake_root, PLATFORM_ID, lock, environment
     )
     build_environment = private_build_environment(
         environment,
@@ -939,17 +914,9 @@ def build_windows_runtime(work_root: Path) -> Path:
         work_root,
         msvc_manifest,
     )
-    runtime = work_root / "runtime" / PLATFORM_ID
-    if runtime.exists() or runtime.is_symlink():
-        raise BuildError(f"runtime package output already exists: {runtime}")
-    contract = common.runtime_contract(PLATFORM_ID)
-    bundle_manifest = work_root / "notices" / "bundle.json"
-    bundle_manifest.write_text(
-        json.dumps(contract.manifest(), indent=2) + "\n", encoding="utf-8"
-    )
-    external_files = common.runtime_package_map(
-        contract,
-        bundle_manifest=bundle_manifest,
+    runtime, contract, external_files = common.initialize_runtime_package(
+        PLATFORM_ID,
+        work_root,
         sdk_source=sdk_source,
         cuda_runtime=cuda_root / "bin",
         tensorrt_runtime=tensorrt_root / "lib",
@@ -975,7 +942,6 @@ def build_windows_runtime(work_root: Path) -> Path:
         work_root,
         build_environment,
     )
-    common.validate_runtime_package(runtime, PLATFORM_ID)
     audit_windows_dependencies(
         runner,
         runtime,

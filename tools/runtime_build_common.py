@@ -839,6 +839,39 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def write_trtexec_provenance(
+    lock: Mapping[str, Any],
+    platform_id: str,
+    trtexec: Path,
+    work_root: Path,
+    *,
+    binary_input: Mapping[str, Any],
+    trtexec_input: Mapping[str, Any],
+) -> Path:
+    provenance = work_root / "notices" / "trtexec-PROVENANCE.txt"
+    provenance.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "schema": "audio2face-trtexec-provenance/1",
+        "platform": platform_id,
+        "runtime_lock_sha256": file_sha256(LOCK_PATH),
+        "tensorrt_binary": {
+            "version": lock["tensorrt"]["version"],
+            "cuda": lock["tensorrt"]["cuda"],
+            "input": dict(binary_input),
+        },
+        "trtexec": {
+            **trtexec_input,
+            "size": trtexec.stat().st_size,
+            "sha256": file_sha256(trtexec),
+        },
+    }
+    provenance.write_text(
+        json.dumps(record, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return provenance
+
+
 def _url_filename(url: str) -> str:
     name = PurePosixPath(urllib.parse.urlsplit(url).path).name
     safe_member_path(name, "download filename")
@@ -1065,6 +1098,34 @@ def materialize_archive_root(
     return exact_archive_root(extracted, str(artifact["archive_root"]), label)
 
 
+def materialize_build_inputs(
+    runner: CommandRunner,
+    lock: Mapping[str, Any],
+    platform_id: str,
+    work_root: Path,
+    environment: Mapping[str, str],
+) -> tuple[Path, Path, Path]:
+    git_name = "git.exe" if platform_id == "windows-x64" else "git"
+    git = require_host_program(git_name, environment)
+    sdk_source = work_root / "source" / "audio2face-sdk"
+    checkout_exact(
+        runner,
+        git,
+        lock["audio2face_sdk"]["repository"],
+        lock["audio2face_sdk"]["commit"],
+        sdk_source,
+        env=environment,
+    )
+    cmake_root = materialize_archive_root(
+        lock["cmake"]["artifacts"][platform_id],
+        "cmake",
+        platform_id,
+        work_root,
+    )
+    cuda_root = materialize_cuda(lock, platform_id, work_root)
+    return sdk_source, cmake_root, cuda_root
+
+
 class CommandRunner:
     def run(
         self,
@@ -1161,7 +1222,7 @@ def validate_cmake(
     runner: CommandRunner,
     cmake_root: Path,
     platform_id: str,
-    expected_version: str,
+    lock: Mapping[str, Any],
     environment: Mapping[str, str],
 ) -> Path:
     executable = (
@@ -1169,6 +1230,7 @@ def validate_cmake(
     )
     if not executable.is_file():
         raise BuildError(f"pinned CMake executable is missing: {executable}")
+    expected_version = lock["cmake"]["version"]
     version = runner.run([executable, "--version"], env=environment, capture=True)
     first_line = version.splitlines()[0] if version else ""
     if first_line != f"cmake version {expected_version}":
@@ -1361,6 +1423,7 @@ def configure_and_package_worker(
         env=environment,
     )
     assemble_runtime_package(runtime, contract, external_files)
+    validate_runtime_package(runtime, contract.platform)
 
 
 def pinned_trtexec(tensorrt_root: Path, platform_id: str) -> Path:
@@ -1444,10 +1507,10 @@ def _runtime_source_for_file(
     )
 
 
-def runtime_package_map(
-    contract: RuntimePlatformContract,
+def initialize_runtime_package(
+    platform_id: str,
+    work_root: Path,
     *,
-    bundle_manifest: Path,
     sdk_source: Path,
     cuda_runtime: Path,
     tensorrt_runtime: Path,
@@ -1457,9 +1520,15 @@ def runtime_package_map(
     platform_provenance: Path | None,
     trtexec: Path,
     trtexec_provenance: Path,
-) -> tuple[tuple[Path, str], ...]:
-    """Resolve every non-generated runtime file from the package contract."""
-
+) -> tuple[Path, RuntimePlatformContract, tuple[tuple[Path, str], ...]]:
+    runtime = work_root / "runtime" / platform_id
+    if runtime.exists() or runtime.is_symlink():
+        raise BuildError(f"runtime package output already exists: {runtime}")
+    contract = runtime_contract(platform_id)
+    bundle_manifest = work_root / "notices" / "bundle.json"
+    bundle_manifest.write_text(
+        json.dumps(contract.manifest(), indent=2) + "\n", encoding="utf-8"
+    )
     external: list[tuple[Path, str]] = [
         (trtexec, contract.trtexec),
         (bundle_manifest, "bundle.json"),
@@ -1495,7 +1564,7 @@ def runtime_package_map(
         if resolved in seen_sources:
             raise BuildError(f"runtime package map repeats source {resolved}")
         seen_sources.add(resolved)
-    return tuple(external)
+    return runtime, contract, tuple(external)
 
 
 def assemble_runtime_package(

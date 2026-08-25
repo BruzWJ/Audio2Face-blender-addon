@@ -75,7 +75,7 @@ def test_worker_reports_exact_model_owned_audio2face_defaults() -> None:
         assert re.search(rf"{getter}\(\s*geometry,", defaults)
 
 
-def test_audio2emotion_compatibility_uses_postprocessed_output() -> None:
+def test_audio2emotion_output_matches_the_effective_emotion_schema() -> None:
     setup = SOURCE[SOURCE.index("const auto emotion_model_info") :]
     setup = setup[: setup.index("Installing Audio2Emotion callback")]
     assert "GetNetworkInfo().GetEmotionsCount()" not in setup
@@ -193,13 +193,11 @@ def test_stream_frames_carry_the_model_channel_order() -> None:
     assert "capture.weight_count = executor().GetWeightCount()" in SOURCE
     assert "capture.emotion_count = emotion_channels_.size()" in SOURCE
     assert "pending.weights->Data()[channel]" in SOURCE
-    assert "pending.emotions->Data()[index]" in SOURCE
+    assert "pending.effective_emotions->Data()[index]" in SOURCE
     assert (
         "frame_callback(StreamFrame{stream_timestamp, std::move(arkit)," in SOURCE
     )
-    assert (
-        "std::move(emotions)})" in SOURCE
-    )
+    assert "std::move(effective_emotions)})" in SOURCE
 
 
 def test_arkit_solve_uses_the_model_owned_default_identity() -> None:
@@ -225,6 +223,11 @@ def test_callbacks_follow_the_sdk_result_stream_contract() -> None:
 
 
 def test_worker_configures_the_sdk_from_one_optional_preferred_snapshot() -> None:
+    assert re.search(
+        r"using EmotionDriver\s*=\s*"
+        r"std::variant<ManualEmotionDriver, AutomaticEmotionDriver>;",
+        SOURCE,
+    )
     reset_inference = re.search(
         r"  void reset_inference\(.*?(?=\n  void begin_operation\()",
         SOURCE,
@@ -233,11 +236,12 @@ def test_worker_configures_the_sdk_from_one_optional_preferred_snapshot() -> Non
     assert reset_inference is not None
     reset_source = reset_inference.group(0)
     assert reset_source.index("emotion_executor_->Reset(0)") < reset_source.index(
-        "configure_automatic_emotion();"
+        "configure_automatic_emotion(*automatic);"
     )
 
     configure = re.search(
-        r"  void configure_automatic_emotion\(\).*?(?=\n  json load_emotion_channels\()",
+        r"  void configure_automatic_emotion\(.*?"
+        r"(?=\n  std::vector<float> parse_emotion_snapshot\()",
         SOURCE,
         flags=re.DOTALL,
     )
@@ -251,20 +255,26 @@ def test_worker_configures_the_sdk_from_one_optional_preferred_snapshot() -> Non
         "parameters.liveBlendCoef",
         "parameters.liveTransitionTime",
         "parameters.enablePreferredEmotion",
-        "automatic_emotion_settings_.preferred_emotion.has_value()",
+        "settings.preferred.has_value()",
         "parameters.preferredEmotionStrength",
         "parameters.preferredEmotion =",
-        "*automatic_emotion_settings_.preferred_emotion",
+        "*settings.preferred",
+        "preferred.values.data()",
         "nva2e::SetExecutorPostProcessParameters",
     ):
         assert expression in configure_source
 
-    assert '"preferred_emotion", "preferred_emotion_strength"' in SOURCE
+    assert '{"audio2face", "emotion_driver"}' in SOURCE
+    assert '{"mode", "values"}' in SOURCE
+    assert '{"values", "strength"}' in SOURCE
     assert re.search(
-        r'"emotion_strength", "settings\.audio2emotion\.", 0\.0F,\s*2\.0F\)',
+        r'"emotion_strength", "settings\.emotion_driver\.",\s*0\.0F, 2\.0F\)',
         SOURCE,
     )
-    assert "if (!preferred_value->is_null())" in SOURCE
+    assert 'if (mode == "manual")' in SOURCE
+    assert 'if (mode == "automatic")' in SOURCE
+    assert "if (!preferred.is_null())" in SOURCE
+    assert "settings.emotion_driver.preferred.values" in SOURCE
     assert "parse_emotion_snapshot(" in SOURCE
     assert "value.size() != emotion_channels_.size()" in SOURCE
     assert "amount < 0.0F || amount > 1.0F" in SOURCE

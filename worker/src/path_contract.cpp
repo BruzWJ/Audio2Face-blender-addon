@@ -95,9 +95,9 @@ void require_unaliased_components(const fs::path& path,
 
 }  // namespace
 
-fs::path require_canonical_regular_file(const std::string& value,
-                                        const char* error_code,
-                                        const char* label) {
+void require_canonical_regular_file(const std::string& value,
+                                    const char* error_code,
+                                    const char* label) {
   const fs::path path = require_canonical_absolute(value, error_code, label);
   require_unaliased_components(path, error_code, label);
   std::error_code error;
@@ -106,7 +106,6 @@ fs::path require_canonical_regular_file(const std::string& value,
         error_code, std::string(label) + " must be a regular file",
         {{"path", display_path(path)}, {"error", error.message()}});
   }
-  return path;
 }
 
 }  // namespace a2f_worker

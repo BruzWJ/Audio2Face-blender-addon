@@ -104,9 +104,14 @@ def live_module(
     ) -> None:
         assert channels == tuple(item.name for item in settings.mixed_emotions)
         for item, value in zip(settings.mixed_emotions, values):
-            item.value = min(max(value, 0.0), 1.0)
+            item.value = value
+
+    def reset_mixed_emotions(settings: _Settings) -> None:
+        for item in settings.mixed_emotions:
+            item.value = 0.0
 
     properties.apply_mixed_emotions = apply_mixed_emotions  # type: ignore[attr-defined]
+    properties.reset_mixed_emotions = reset_mixed_emotions  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, properties.__name__, properties)
 
     module_name = "audio2face._live_stream_test"
@@ -246,26 +251,11 @@ def test_live_frames_resolve_the_current_object_targets(
 
 def test_selected_audio_updates_mixed_emotions_without_mutating_preferred(
     live_module: tuple[ModuleType, _Scene, list[AppliedFrame]],
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     live, scene, _applied = live_module
     audio_path = tmp_path / "voice.wav"
     audio_path.write_bytes(b"RIFF")
-    first_target = object()
-    second_target = object()
-    current_targets = [(first_target,)]
-    delivered_targets: list[tuple[object, ...]] = []
-    monkeypatch.setattr(
-        live,
-        "resolve_target_objects",
-        lambda _settings: current_targets[0],
-    )
-    monkeypatch.setattr(
-        live,
-        "apply_shape_key_frame",
-        lambda targets, _channels, _weights: delivered_targets.append(targets),
-    )
     controller = live.LiveStreamController()
     controller.prepare(
         scene,
@@ -288,25 +278,11 @@ def test_selected_audio_updates_mixed_emotions_without_mutating_preferred(
         [0.25] * len(MODEL_CHANNELS),
         MODEL_EMOTIONS.copy(),
     )
-    assert [item.value for item in scene.audio2face.mixed_emotions] == [0.0, 0.0]
-
-    controller.tick()
     assert [item.value for item in scene.audio2face.mixed_emotions] == pytest.approx(
         MODEL_EMOTIONS
     )
-    current_targets[0] = (second_target,)
-    controller.tick()
 
-    assert delivered_targets == [(first_target,), (second_target,)]
     assert [item.value for item in scene.audio2face.preferred_emotions] == [0.1, 0.9]
-
-    scene.audio2face.playback_state = "PLAYING"
-    controller.tick()
-
-    assert delivered_targets == [(first_target,), (second_target,), (second_target,)]
-    assert [item.value for item in scene.audio2face.mixed_emotions] == pytest.approx(
-        MODEL_EMOTIONS
-    )
 
 
 def test_frame_reset_starts_a_new_timestamp_epoch_without_stopping_stream(
@@ -319,7 +295,7 @@ def test_frame_reset_starts_a_new_timestamp_epoch_without_stopping_stream(
     controller.receive("stream-1", 100, weights, MODEL_EMOTIONS.copy())
 
     controller.reset_frames("stream-1")
-    assert controller._emotions == []
+    assert [item.value for item in scene.audio2face.mixed_emotions] == [0.0, 0.0]
     controller.receive("stream-1", -50, weights, MODEL_EMOTIONS.copy())
 
     assert controller.active is True
@@ -371,7 +347,7 @@ def test_live_stream_rejects_invalid_model_width_or_weight(
 
 
 @pytest.mark.parametrize(
-    "emotions",
+    "effective_emotions",
     (
         [0.0],
         [0.0, True],
@@ -381,9 +357,9 @@ def test_live_stream_rejects_invalid_model_width_or_weight(
         [0.0, 0],
     ),
 )
-def test_live_stream_rejects_invalid_emotion_width_or_value(
+def test_live_stream_rejects_invalid_effective_emotion_width_or_value(
     live_module: tuple[ModuleType, _Scene, list[AppliedFrame]],
-    emotions: list[object],
+    effective_emotions: list[object],
 ) -> None:
     live, scene, applied = live_module
     controller = live.LiveStreamController()
@@ -394,13 +370,13 @@ def test_live_stream_rejects_invalid_emotion_width_or_value(
             "stream-1",
             0,
             [0.0] * len(MODEL_CHANNELS),
-            emotions,
+            effective_emotions,
         )
 
     assert applied == []
 
 
-def test_live_stream_accepts_finite_unbounded_emotions(
+def test_live_stream_accepts_finite_unbounded_effective_emotions(
     live_module: tuple[ModuleType, _Scene, list[AppliedFrame]],
 ) -> None:
     live, scene, applied = live_module
@@ -411,6 +387,7 @@ def test_live_stream_accepts_finite_unbounded_emotions(
     controller.receive("stream-1", 0, weights, [-0.5, 1.5])
 
     assert applied == [(tuple(MODEL_CHANNELS), tuple(weights))]
+    assert [item.value for item in scene.audio2face.mixed_emotions] == [-0.5, 1.5]
 
 
 def test_live_stream_rejects_tuples_at_worker_frame_json_array_boundaries(
@@ -428,7 +405,10 @@ def test_live_stream_rejects_tuples_at_worker_frame_json_array_boundaries(
             MODEL_EMOTIONS.copy(),
         )
 
-    with pytest.raises(live.LiveStreamError, match="emotions must be a JSON array"):
+    with pytest.raises(
+        live.LiveStreamError,
+        match="effective_emotions must be a JSON array",
+    ):
         controller.receive(
             "stream-1",
             0,

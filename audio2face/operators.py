@@ -13,10 +13,7 @@ from .live_stream import (
     playback_position,
     playback_position_maximum,
 )
-from .properties import (
-    clear_preferred_emotion,
-    load_preferred_emotion,
-)
+from .properties import toggle_preferred_emotion
 from .runtime import RuntimeController, get_controller
 from .shape_keys import supports_shape_keys
 from .sidecar import Lifecycle, SidecarError
@@ -90,35 +87,27 @@ class A2F_OT_stop_worker(bpy.types.Operator):
         return _run_runtime(self, lambda controller: controller.stop(context.scene))
 
 
-class A2F_OT_load_preferred_emotion(bpy.types.Operator):
-    bl_idname = "a2f.load_preferred_emotion"
-    bl_label = "Load Preferred Emotion"
-    bl_description = "Enable the current authored Preferred Emotion values"
+class A2F_OT_toggle_preferred_emotion(bpy.types.Operator):
+    bl_idname = "a2f.toggle_preferred_emotion"
+    bl_label = "Toggle Preferred Emotion"
+    bl_description = "Load or clear the authored Preferred Emotion mix"
 
     @classmethod
     def poll(cls, context: bpy.types.Context) -> bool:
-        available = bool(context.scene.audio2face.preferred_emotions)
+        settings = context.scene.audio2face
+        available = settings.preferred_emotion_active or bool(
+            settings.preferred_emotions
+        )
         if not available:
             cls.poll_message_set("load the Audio2Face model first")
         return available
 
     def execute(self, context: bpy.types.Context) -> set[str]:
         try:
-            load_preferred_emotion(context.scene.audio2face)
+            toggle_preferred_emotion(context.scene.audio2face)
         except ValueError as exc:
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
-        get_controller().refresh_inference_settings(context.scene)
-        return {"FINISHED"}
-
-
-class A2F_OT_clear_preferred_emotion(bpy.types.Operator):
-    bl_idname = "a2f.clear_preferred_emotion"
-    bl_label = "Clear Preferred Emotion"
-    bl_description = "Disable preferred emotion mixing without changing its values"
-
-    def execute(self, context: bpy.types.Context) -> set[str]:
-        clear_preferred_emotion(context.scene.audio2face)
         get_controller().refresh_inference_settings(context.scene)
         return {"FINISHED"}
 
@@ -262,8 +251,7 @@ CLASSES = (
     A2F_OT_cancel_model_optimization,
     A2F_OT_start_worker,
     A2F_OT_stop_worker,
-    A2F_OT_load_preferred_emotion,
-    A2F_OT_clear_preferred_emotion,
+    A2F_OT_toggle_preferred_emotion,
     A2F_OT_add_selected_targets,
     A2F_OT_remove_target,
     A2F_OT_play_pause,
