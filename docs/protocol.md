@@ -148,7 +148,7 @@ Every `stream_start` request includes a `settings` object with exactly:
 other key. Values are finite in `[0.0, 1.0]`. The `audio2emotion` object has
 exactly the seven keys shown:
 
-- `emotion_strength`: finite float in `[0.0, 1.0]`;
+- `emotion_strength`: finite float in `[0.0, 2.0]`;
 - `emotion_contrast`: finite float in `[0.1, 3.0]`;
 - `max_emotions`: integer from `1` through the classifier's emotion count;
 - `live_blend_coef`: finite float in `[0.0, 1.0]`;
@@ -161,9 +161,10 @@ Partial documents and unknown keys are rejected. With
 driver. With it true, Audio2Emotion analyzes the same stream and NVIDIA's
 post-processor applies the nested controls. A non-null preferred snapshot is
 mixed as `p * preferred + (1 - p) * generated`, followed by overall emotion
-strength. `stream_start` installs the initial complete snapshot and
-`stream_settings` replaces it at one ordered replay boundary. Partial setting
-updates do not exist.
+strength. Values above `1.0` amplify that automatic-emotion result without
+changing any Audio2Face skin-strength setting. `stream_start` installs the
+initial complete snapshot and `stream_settings` replaces it at one ordered
+replay boundary. Partial setting updates do not exist.
 
 ## `stream_start`
 

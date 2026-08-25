@@ -260,6 +260,10 @@ def test_worker_configures_the_sdk_from_one_optional_preferred_snapshot() -> Non
         assert expression in configure_source
 
     assert '"preferred_emotion", "preferred_emotion_strength"' in SOURCE
+    assert re.search(
+        r'"emotion_strength", "settings\.audio2emotion\.", 0\.0F,\s*2\.0F\)',
+        SOURCE,
+    )
     assert "if (!preferred_value->is_null())" in SOURCE
     assert "parse_emotion_snapshot(" in SOURCE
     assert "value.size() != emotion_channels_.size()" in SOURCE

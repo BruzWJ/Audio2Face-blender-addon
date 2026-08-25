@@ -404,11 +404,14 @@ class A2FSceneSettings(bpy.types.PropertyGroup):
     )
     a2e_emotion_strength: FloatProperty(
         name="Emotion Strength",
-        description="Strength of automatic emotion relative to neutral emotion",
+        description=(
+            "Overall automatic-emotion multiplier applied after preferred "
+            "emotion mixing; values above 1 amplify emotion without changing "
+            "Skin Strength"
+        ),
         default=0.6,
         min=0.0,
-        max=1.0,
-        subtype="FACTOR",
+        max=2.0,
         update=_inference_setting_updated,
     )
     a2e_emotion_contrast: FloatProperty(

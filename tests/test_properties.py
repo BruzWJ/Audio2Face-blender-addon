@@ -149,6 +149,17 @@ def test_emotion_configuration_is_not_hidden_by_auto_mode() -> None:
     assert '"a2f.clear_preferred_emotion"' in UI_SOURCE
 
 
+def test_automatic_emotion_strength_is_an_independent_two_x_multiplier(
+    properties_module: ModuleType,
+) -> None:
+    annotation = properties_module.A2FSceneSettings.__annotations__[
+        "a2e_emotion_strength"
+    ]
+    assert "min=0.0" in annotation
+    assert "max=2.0" in annotation
+    assert "subtype" not in annotation
+
+
 def test_prediction_delay_uses_a_range_slider() -> None:
     assert (
         'playback_box.prop(settings, "prediction_delay", slider=True)'

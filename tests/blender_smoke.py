@@ -227,6 +227,15 @@ def main() -> None:
             "a2e_preferred_emotion_strength",
             *AUDIO2FACE_SETTING_FIELDS,
         } <= scene_property_names
+        emotion_strength_property = A2FSceneSettings.bl_rna.properties[
+            "a2e_emotion_strength"
+        ]
+        _assert_close(
+            emotion_strength_property.hard_max,
+            2.0,
+            label="Emotion Strength max",
+        )
+        assert emotion_strength_property.subtype == "NONE"
         expected_model_ranges = {
             "input_strength": (0.0, 3.0),
             "lower_face_smoothing": (0.0, 0.1),

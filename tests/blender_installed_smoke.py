@@ -119,6 +119,11 @@ def main() -> None:
         )
     for name, default in emotion_property_defaults.items():
         assert properties.A2FSceneSettings.bl_rna.properties[name].default == default
+    emotion_strength_property = properties.A2FSceneSettings.bl_rna.properties[
+        "a2e_emotion_strength"
+    ]
+    assert emotion_strength_property.hard_max == 2.0
+    assert emotion_strength_property.subtype == "NONE"
     assert not properties.A2FSceneSettings.bl_rna.properties[
         "preferred_emotions"
     ].is_skip_save

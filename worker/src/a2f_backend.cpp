@@ -1188,7 +1188,7 @@ class Backend::Impl final {
     AutomaticEmotionSettings automatic_emotion;
     automatic_emotion.emotion_strength = required_float_in_range(
         *automatic_value, "emotion_strength", "settings.audio2emotion.", 0.0F,
-        1.0F);
+        2.0F);
     automatic_emotion.emotion_contrast = required_float_in_range(
         *automatic_value, "emotion_contrast", "settings.audio2emotion.", 0.1F,
         3.0F);

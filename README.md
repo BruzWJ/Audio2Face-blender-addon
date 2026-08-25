@@ -245,8 +245,16 @@ distinct preferred-emotion snapshot; later slider changes do not mutate it.
 scene.
 When a preferred snapshot is loaded, for preferred-mix weight `p` the SDK
 computes `p * preferred + (1 - p) * generated`, then applies the overall
-emotion strength. Auto Audio2Emotion and the Preferred Emotion snapshot are
-independent controls.
+emotion strength. **Emotion Strength** ranges from `0.0` to `2.0`; values above
+`1.0` amplify this automatic-emotion result without changing **Skin Strength**.
+Individual emotion values and the preferred-mix weight remain in `[0.0, 1.0]`.
+The legacy Omniverse UI stopped at `1.0`; amplification above that value uses
+the SDK's multiplier outside the legacy calibrated range and can saturate final
+ARKit coefficients at `1.0`.
+Equal emotion values are learned model-conditioning weights, not equal visual
+deformation amplitudes, so different emotions can remain perceptually uneven.
+Auto Audio2Emotion and the Preferred Emotion snapshot are independent
+controls.
 
 The same complete settings contract applies to Selected WAV and Stream. A
 control edit queues one complete replacement snapshot on the active operation.

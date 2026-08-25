@@ -163,6 +163,10 @@ With `auto_audio2emotion` false, the manual values form a constant emotion
 driver. With it true, Audio2Emotion analyzes the same PCM and NVIDIA's
 post-processor applies strength, contrast, retained-emotion count, temporal
 blend, transition smoothing, and optional preferred-emotion mixing.
+Emotion Strength is the post-processor's final uniform multiplier and ranges
+from `0.0` to `2.0`; values above `1.0` amplify the automatic result without
+changing Audio2Face Skin Strength. It does not equalize the model's learned
+response to different emotion channels.
 **Preferred Emotion > Load** copies the current manual values into a distinct
 snapshot; later manual edits do not mutate it. **Clear** restores `null`. Auto
 Audio2Emotion and the preferred snapshot are independent controls. Both
