@@ -8,6 +8,7 @@ venv/
 
 # Native worker build output
 build/
+%SystemDrive%/
 dist/*
 !dist/README.md
 *.o
