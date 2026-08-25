@@ -93,11 +93,11 @@ class A2F_OT_stop_worker(bpy.types.Operator):
 class A2F_OT_load_preferred_emotion(bpy.types.Operator):
     bl_idname = "a2f.load_preferred_emotion"
     bl_label = "Load Preferred Emotion"
-    bl_description = "Copy the current Mixed Emotion values into Preferred Emotion"
+    bl_description = "Enable the current authored Preferred Emotion values"
 
     @classmethod
     def poll(cls, context: bpy.types.Context) -> bool:
-        available = bool(context.scene.audio2face.mixed_emotions)
+        available = bool(context.scene.audio2face.preferred_emotions)
         if not available:
             cls.poll_message_set("load the Audio2Face model first")
         return available
@@ -115,7 +115,7 @@ class A2F_OT_load_preferred_emotion(bpy.types.Operator):
 class A2F_OT_clear_preferred_emotion(bpy.types.Operator):
     bl_idname = "a2f.clear_preferred_emotion"
     bl_label = "Clear Preferred Emotion"
-    bl_description = "Disable preferred emotion mixing and reset its values"
+    bl_description = "Disable preferred emotion mixing without changing its values"
 
     def execute(self, context: bpy.types.Context) -> set[str]:
         clear_preferred_emotion(context.scene.audio2face)

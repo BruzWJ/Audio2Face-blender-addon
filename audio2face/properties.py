@@ -672,21 +672,20 @@ def apply_mixed_emotions(
 
 
 def load_preferred_emotion(settings: A2FSceneSettings) -> None:
-    """Copy the current mixed values into the preferred-emotion editor."""
+    """Enable the current authored Preferred Emotion values."""
 
-    values = _emotion_values(settings.mixed_emotions, label="mixed emotion")
+    values = _emotion_values(
+        settings.preferred_emotions,
+        label="preferred emotion",
+    )
     if not values:
         raise ValueError("load the Audio2Face model before loading preferred emotion")
-    _replace_emotion_values(settings.preferred_emotions, values)
     settings.preferred_emotion_active = True
 
 
 def clear_preferred_emotion(settings: A2FSceneSettings) -> None:
-    """Disable preferred mixing and reset its editable values."""
+    """Disable preferred mixing without changing its editable values."""
 
-    with _internal_emotion_write():
-        for item in settings.preferred_emotions:
-            item.value = 0.0
     settings.preferred_emotion_active = False
 
 

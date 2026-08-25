@@ -126,10 +126,10 @@ driver caches.
    emotion input. Leave **Auto Audio2Emotion** off to use them as the direct
    constant driver, or enable it to use them as the optional preference mixed
    with generated emotion. The separate **Mixed Emotion** values are read-only
-   worker output. **Load** copies that current output into Preferred Emotion;
-   **Clear** disables the preference and zeros its sliders. A direct Preferred
-   edit enables the preference and applies immediately. Mixed Emotion never
-   becomes inference input.
+   worker output. **Load** enables the current authored Preferred Emotion;
+   **Clear** disables the preference without changing its sliders. A direct
+   Preferred edit also enables the preference and applies immediately. Mixed
+   Emotion never becomes inference input.
 7. In Selected WAV mode, press **Play**. Playback automatically starts
    incremental inference and drives matching Shape Keys as frames arrive.
    **Pause** freezes both audio and source pacing; seek and loop restart
@@ -245,10 +245,10 @@ Preferred Emotion enable preferred mixing and immediately refresh the active
 inference settings; switching Auto Audio2Emotion does not rewrite the authored
 values.
 
-**Load** copies the currently displayed Mixed Emotion values into Preferred
-Emotion and enables preferred mixing. **Clear** disables preferred mixing and
-zeros the saved Preferred Emotion values. The Preferred Emotion collection is
-saved with the Blender scene. For preferred-mix weight `p` the SDK
+**Load** enables preferred mixing with the currently authored Preferred Emotion
+values. **Clear** disables preferred mixing without erasing those saved values.
+The Preferred Emotion collection is saved with the Blender scene. For
+preferred-mix weight `p` the SDK
 computes `p * preferred + (1 - p) * generated`, then applies the overall
 emotion strength. **Emotion Strength** ranges from `0.0` to `2.0`; values above
 `1.0` amplify this automatic-emotion result without changing **Skin Strength**.

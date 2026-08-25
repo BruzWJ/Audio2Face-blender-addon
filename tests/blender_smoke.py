@@ -417,11 +417,11 @@ def main() -> None:
         finally:
             controller.refresh_inference_settings = original_refresh
         assert settings.preferred_emotion_active is False
-        assert all(item.value == 0.0 for item in settings.preferred_emotions)
+        assert [item.value for item in settings.preferred_emotions] == [1.0, 0.75]
         apply_mixed_emotions(
             settings,
             ("Neutral", "Joy"),
-            (1.0, 0.75),
+            (0.0, 0.0),
         )
         refresh = Mock()
         controller.refresh_inference_settings = refresh
@@ -431,6 +431,7 @@ def main() -> None:
         finally:
             controller.refresh_inference_settings = original_refresh
         assert settings.preferred_emotion_active is True
+        assert [item.value for item in settings.preferred_emotions] == [1.0, 0.75]
         settings.preferred_emotions[1].value = 0.5
         settings.input_strength = 2.0
         settings.blink_strength = 1.5
@@ -486,7 +487,7 @@ def main() -> None:
             _assert_close(automatic_payload[name], expected, label=name)
         assert bpy.ops.a2f.clear_preferred_emotion() == {"FINISHED"}
         assert settings.preferred_emotion_active is False
-        assert all(item.value == 0.0 for item in settings.preferred_emotions)
+        assert [item.value for item in settings.preferred_emotions] == [1.0, 0.5]
         assert (
             inference_settings(settings)["audio2emotion"]["preferred_emotion"]
             is None

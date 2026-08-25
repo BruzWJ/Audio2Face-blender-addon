@@ -173,11 +173,11 @@ changing Audio2Face Skin Strength. It does not equalize the model's learned
 response to different emotion channels.
 
 Direct Preferred Emotion edits enable preferred mixing and immediately queue a
-complete settings replacement. **Load** copies the current read-only Mixed
-Emotion values into Preferred Emotion and enables preferred mixing. **Clear**
-disables the mix and zeros Preferred Emotion. Preferred Emotion persists with
-the scene; changing Auto Audio2Emotion does not overwrite it. Both Selected WAV
-and external PCM apply these control edits to their current operation by
+complete settings replacement. **Load** enables preferred mixing with the
+current authored Preferred Emotion values. **Clear** disables the mix without
+changing those values. Preferred Emotion persists with the scene; changing Auto
+Audio2Emotion does not overwrite it. Both Selected WAV and external PCM apply
+these control edits to their current operation by
 resetting the two executors and accumulators and replaying a bounded PCM
 context; audio transport is not restarted or discarded.
 

@@ -349,15 +349,17 @@ def test_mixed_output_and_preferred_input_have_strict_ownership(
     assert calls == [scene]
 
 
-def test_load_and_clear_preferred_emotion_copy_enable_and_reset(
+def test_load_and_clear_preferred_emotion_preserve_authored_values(
     properties_module: ModuleType,
 ) -> None:
     settings = _settings()
     properties_module.apply_model_schema(settings, _schema(), MODEL_SIGNATURE)
+    settings.preferred_emotions[0].value = 0.7
+    settings.preferred_emotions[1].value = 0.3
     properties_module.apply_mixed_emotions(
         settings,
         ("Neutral", "Joy"),
-        (0.7, 0.3),
+        (0.0, 0.0),
     )
 
     properties_module.load_preferred_emotion(settings)
@@ -373,7 +375,7 @@ def test_load_and_clear_preferred_emotion_copy_enable_and_reset(
     properties_module.clear_preferred_emotion(settings)
 
     assert [item.value for item in settings.mixed_emotions] == [0.2, 0.8]
-    assert [item.value for item in settings.preferred_emotions] == [0.0, 0.0]
+    assert [item.value for item in settings.preferred_emotions] == [0.7, 0.3]
     assert settings.preferred_emotion_active is False
 
 
@@ -573,7 +575,7 @@ def test_inference_settings_freezes_face_manual_and_automatic_controls(
 
     properties_module.clear_preferred_emotion(settings)
     cleared = properties_module.inference_settings(settings)
-    assert cleared["manual_emotions"] == {"Neutral": 0.0, "Joy": 0.0}
+    assert cleared["manual_emotions"] == {"Neutral": 0.25, "Joy": 0.75}
     assert cleared["audio2emotion"]["preferred_emotion"] is None
     assert [item.value for item in settings.mixed_emotions] == [0.1, 0.9]
 
