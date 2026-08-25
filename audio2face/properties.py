@@ -127,46 +127,31 @@ def _inference_setting_updated(
 ) -> None:
     """Refresh inference from one shared RNA update callback."""
 
-    if _internal_emotion_write_depth:
-        return
     scene = _update_scene(context)
     if scene is None:
         return
+    _refresh_inference(scene)
+
+
+def _refresh_inference(scene: bpy.types.Scene) -> None:
     from .runtime import get_controller
 
     get_controller().refresh_inference_settings(scene)
 
 
-def _manual_emotion_updated(
+def _preferred_emotion_updated(
     _emotion: bpy.types.PropertyGroup,
     context: bpy.types.Context,
 ) -> None:
-    """Retain an authored channel long enough to load it as preferred emotion."""
+    """Apply one authored preferred-emotion edit to current inference."""
 
     if _internal_emotion_write_depth:
-        return
-    if not _emotion.path_from_id().startswith("audio2face.manual_emotions["):
         return
     scene = _update_scene(context)
     if scene is None:
         return
-    settings = scene.audio2face
-    if settings.auto_audio2emotion:
-        _emotion.user_edited = True
-        return
-    from .runtime import get_controller
-
-    get_controller().refresh_inference_settings(scene)
-
-
-def _auto_audio2emotion_updated(
-    settings: bpy.types.PropertyGroup,
-    context: bpy.types.Context,
-) -> None:
-    """Release authored display channels when automatic inference is toggled."""
-
-    _clear_emotion_edits(settings)
-    _inference_setting_updated(settings, context)
+    scene.audio2face.preferred_emotion_active = True
+    _refresh_inference(scene)
 
 
 def _audio_path_updated(
@@ -206,8 +191,8 @@ class A2FTargetObjectItem(bpy.types.PropertyGroup):
     )
 
 
-class A2FEmotionValueItem(bpy.types.PropertyGroup):
-    """One model-defined manual emotion driver channel."""
+class A2FPreferredEmotionItem(bpy.types.PropertyGroup):
+    """One editable model-defined preferred-emotion channel."""
 
     name: StringProperty(
         name="Emotion",
@@ -217,16 +202,29 @@ class A2FEmotionValueItem(bpy.types.PropertyGroup):
     )
     value: FloatProperty(
         name="Value",
-        description="Manual value supplied to this model emotion channel",
+        description="Authored preference for this model-defined emotion channel",
         default=0.0,
         min=0.0,
         max=1.0,
         subtype="FACTOR",
-        update=_manual_emotion_updated,
+        update=_preferred_emotion_updated,
     )
-    user_edited: BoolProperty(
-        default=False,
-        options={"HIDDEN", "SKIP_SAVE"},
+
+
+class A2FMixedEmotionItem(bpy.types.PropertyGroup):
+    """One callback-free model-defined mixed-emotion display channel."""
+
+    name: StringProperty(
+        name="Emotion",
+        options={"HIDDEN"},
+    )
+    value: FloatProperty(
+        name="Value",
+        description="Effective post-processed value returned by Audio2Face",
+        default=0.0,
+        min=0.0,
+        max=1.0,
+        subtype="FACTOR",
     )
 
 
@@ -395,12 +393,19 @@ class A2FSceneSettings(bpy.types.PropertyGroup):
         name="Auto Audio2Emotion",
         description="Infer emotion values from the input audio for this operation",
         default=False,
-        update=_auto_audio2emotion_updated,
+        update=_inference_setting_updated,
     )
-    manual_emotions: CollectionProperty(type=A2FEmotionValueItem)
     preferred_emotions: CollectionProperty(
-        type=A2FEmotionValueItem,
+        type=A2FPreferredEmotionItem,
         options={"HIDDEN"},
+    )
+    preferred_emotion_active: BoolProperty(
+        default=False,
+        options={"HIDDEN"},
+    )
+    mixed_emotions: CollectionProperty(
+        type=A2FMixedEmotionItem,
+        options={"HIDDEN", "SKIP_SAVE"},
     )
     a2e_emotion_strength: FloatProperty(
         name="Emotion Strength",
@@ -629,14 +634,6 @@ def _emotion_values(items: object, *, label: str) -> dict[str, float]:
     return values
 
 
-def _manual_emotion_values(settings: A2FSceneSettings) -> dict[str, float]:
-    return _emotion_values(settings.manual_emotions, label="manual emotion")
-
-
-def _preferred_emotion_values(settings: A2FSceneSettings) -> dict[str, float]:
-    return _emotion_values(settings.preferred_emotions, label="preferred emotion")
-
-
 def _replace_emotion_values(items: object, values: dict[str, float]) -> None:
     with _internal_emotion_write():
         items.clear()
@@ -646,70 +643,60 @@ def _replace_emotion_values(items: object, values: dict[str, float]) -> None:
             item.value = value
 
 
-def _clear_emotion_edits(settings: A2FSceneSettings) -> None:
-    for item in settings.manual_emotions:
-        item.user_edited = False
-
-
-def apply_effective_emotions(
+def apply_mixed_emotions(
     settings: A2FSceneSettings,
     emotion_channels: tuple[str, ...],
     values: tuple[float, ...],
 ) -> None:
-    """Publish automatic worker output into the model-defined emotion controls."""
+    """Publish worker output into the read-only mixed-emotion controls."""
 
     if type(emotion_channels) is not tuple:
-        raise ValueError("effective emotion channels must be a tuple")
-    current_channels = tuple(item.name for item in settings.manual_emotions)
+        raise ValueError("mixed emotion channels must be a tuple")
+    current_channels = tuple(item.name for item in settings.mixed_emotions)
     if emotion_channels != current_channels:
         raise ValueError(
-            "effective emotion channels do not match the loaded model schema"
+            "mixed emotion channels do not match the loaded model schema"
         )
     if type(values) is not tuple or len(values) != len(emotion_channels):
         raise ValueError(
-            "effective emotion values do not match the loaded model schema"
+            "mixed emotion values do not match the loaded model schema"
         )
     displayed: list[float] = []
     for name, value in zip(emotion_channels, values):
         if type(value) is not float or not math.isfinite(value):
-            raise ValueError(f"effective emotion {name!r} must be a finite float")
+            raise ValueError(f"mixed emotion {name!r} must be a finite float")
         displayed.append(min(max(value, 0.0), 1.0))
 
-    if not settings.auto_audio2emotion:
-        return
-    with _internal_emotion_write():
-        for item, value in zip(settings.manual_emotions, displayed):
-            if not item.user_edited:
-                item.value = value
+    for item, value in zip(settings.mixed_emotions, displayed):
+        item.value = value
 
 
 def load_preferred_emotion(settings: A2FSceneSettings) -> None:
-    """Snapshot the current model-defined manual emotion values."""
+    """Copy the current mixed values into the preferred-emotion editor."""
 
-    values = _manual_emotion_values(settings)
+    values = _emotion_values(settings.mixed_emotions, label="mixed emotion")
     if not values:
         raise ValueError("load the Audio2Face model before loading preferred emotion")
     _replace_emotion_values(settings.preferred_emotions, values)
-    _clear_emotion_edits(settings)
+    settings.preferred_emotion_active = True
 
 
 def clear_preferred_emotion(settings: A2FSceneSettings) -> None:
-    """Unset the preferred emotion snapshot."""
+    """Disable preferred mixing and reset its editable values."""
 
     with _internal_emotion_write():
-        settings.preferred_emotions.clear()
-    _clear_emotion_edits(settings)
+        for item in settings.preferred_emotions:
+            item.value = 0.0
+    settings.preferred_emotion_active = False
 
 
 def inference_settings(settings: A2FSceneSettings) -> dict[str, object]:
     """Return the exact Audio2Face and emotion settings for one stream."""
 
-    manual_emotions = _manual_emotion_values(settings)
-    preferred_emotions = _preferred_emotion_values(settings)
-    if preferred_emotions and set(preferred_emotions) != set(manual_emotions):
-        raise ValueError(
-            "preferred emotion does not match the loaded model emotion channels"
-        )
+    preferred_emotions = _emotion_values(
+        settings.preferred_emotions,
+        label="preferred emotion",
+    )
     return {
         "audio2face": _validated_audio2face_values(
             {
@@ -719,14 +706,18 @@ def inference_settings(settings: A2FSceneSettings) -> dict[str, object]:
             label="Audio2Face settings",
         ),
         "auto_audio2emotion": settings.auto_audio2emotion,
-        "manual_emotions": manual_emotions,
+        "manual_emotions": preferred_emotions,
         "audio2emotion": {
             "emotion_strength": settings.a2e_emotion_strength,
             "emotion_contrast": settings.a2e_emotion_contrast,
             "max_emotions": settings.a2e_max_emotions,
             "live_blend_coef": settings.a2e_live_blend_coef,
             "transition_smoothing": settings.a2e_transition_smoothing,
-            "preferred_emotion": preferred_emotions or None,
+            "preferred_emotion": (
+                preferred_emotions
+                if settings.preferred_emotion_active and preferred_emotions
+                else None
+            ),
             "preferred_emotion_strength": settings.a2e_preferred_emotion_strength,
         },
     }
@@ -736,13 +727,13 @@ def apply_model_schema(
     settings: A2FSceneSettings,
     model_schema: object,
     model_signature: tuple[str, str],
-) -> tuple[str, ...]:
+) -> None:
     """Validate and materialize one self-describing worker model schema."""
 
     if not isinstance(model_schema, dict) or set(model_schema) != _MODEL_SCHEMA_FIELDS:
         raise ValueError("worker returned a noncanonical model_schema object")
     try:
-        channels = validate_output_channels(model_schema["channels"])
+        validate_output_channels(model_schema["channels"])
     except ShapeKeyStreamError as exc:
         raise ValueError(f"worker returned invalid output channels: {exc}") from exc
     emotions = _validated_emotion_descriptors(model_schema["emotion_channels"])
@@ -753,19 +744,14 @@ def apply_model_schema(
     signature = _schema_signature(model_signature, model_schema)
 
     same_schema = settings.model_schema_signature == signature
-    preserved_manual: dict[str, float] = {}
+    preserved_preferred: dict[str, float] = {}
     expected_emotion_names = {name for name, _default in emotions}
     if same_schema:
-        preserved_manual = _manual_emotion_values(settings)
-        if set(preserved_manual) != expected_emotion_names:
-            raise ValueError(
-                "saved manual emotions do not match the exact loaded model schema"
-            )
-        preserved_preferred = _preferred_emotion_values(settings)
-        if (
-            preserved_preferred
-            and set(preserved_preferred) != expected_emotion_names
-        ):
+        preserved_preferred = _emotion_values(
+            settings.preferred_emotions,
+            label="preferred emotion",
+        )
+        if set(preserved_preferred) != expected_emotion_names:
             raise ValueError(
                 "saved preferred emotion does not match the exact loaded model schema"
             )
@@ -773,21 +759,24 @@ def apply_model_schema(
     if not same_schema:
         for name, default in audio2face_defaults.items():
             setattr(settings, name, default)
-        clear_preferred_emotion(settings)
+        settings.preferred_emotion_active = False
+    preferred_values = (
+        {name: preserved_preferred[name] for name, _default in emotions}
+        if same_schema
+        else {name: default for name, default in emotions}
+    )
+    _replace_emotion_values(settings.preferred_emotions, preferred_values)
     _replace_emotion_values(
-        settings.manual_emotions,
-        {
-            name: preserved_manual[name] if same_schema else default
-            for name, default in emotions
-        },
+        settings.mixed_emotions,
+        {name: default for name, default in emotions},
     )
 
     settings.model_schema_signature = signature
-    return channels
 
 
 CLASSES = (
     A2FTargetObjectItem,
-    A2FEmotionValueItem,
+    A2FPreferredEmotionItem,
+    A2FMixedEmotionItem,
     A2FSceneSettings,
 )

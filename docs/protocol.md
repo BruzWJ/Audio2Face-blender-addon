@@ -227,7 +227,7 @@ array contains exactly one finite value for each entry in
 sampled by Audio2Face after Audio2Emotion post-processing and optional preferred
 emotion mixing, not the raw classifier output. NVIDIA's SDK does not constrain
 effective emotions to `[0.0, 1.0]`, so the transport preserves every finite
-value. Blender's existing factor sliders may clamp their displayed presentation,
+value. Blender's read-only Mixed Emotion display may clamp its presentation,
 but not the buffered transport value. Both arrays describe the same Audio2Face
 frame and timestamp.
 
@@ -254,8 +254,8 @@ one model-rate second. At the ordered boundary it resets the Audio2Face
 executor, Audio2Emotion executor, audio accumulator, and emotion accumulator;
 applies the complete new snapshot; and replays that retained PCM. This is the
 required reset-before-set lifecycle for the SDK's Audio2Face input, skin, and
-eye parameters. Switching between automatic and manual emotion therefore also
-starts from reset emotion state.
+eye parameters. Changing `auto_audio2emotion` therefore also starts from reset
+emotion state.
 
 Before any replayed frame, the worker emits exactly:
 

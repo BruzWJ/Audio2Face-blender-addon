@@ -15,11 +15,3 @@ license = ["SPDX:GPL-3.0-or-later"]
 
 [permissions]
 files = "Read WAV and model folders; write TensorRT engines"
-
-[build]
-paths_exclude_pattern = [
-  "__pycache__/",
-  "*.py[cod]",
-  "/.git/",
-  "/*.zip",
-]

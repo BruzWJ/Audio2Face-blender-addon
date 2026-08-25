@@ -182,7 +182,7 @@ def test_current_platform_id_rejects_unsupported_targets(
 def test_resolve_linux_bundle_is_package_local_and_immutable(
     package_root: Path,
 ) -> None:
-    root, _manifest = _make_bundle(package_root)
+    root = _make_bundle(package_root)[0]
     source_environment = runtime_bundle.os.environ
     original = dict(source_environment)
 
@@ -502,7 +502,7 @@ def test_manifest_members_cannot_escape_through_symlinks(
     package_root: Path,
     tmp_path: Path,
 ) -> None:
-    root, manifest = _make_bundle(package_root)
+    root, _manifest = _make_bundle(package_root)
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "license.txt").write_text("outside", encoding="utf-8")

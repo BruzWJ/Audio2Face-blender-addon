@@ -33,13 +33,12 @@ def _draw_audio_playback(
         playback_box = layout.box()
         playback_box.label(text="Playback", icon="SPEAKER")
         playback_row = playback_box.row(align=True)
-        play_button = playback_row.row(align=True)
         if playback.can_seek and settings.playback_state == "PLAYING":
-            play_button.operator(
+            playback_row.operator(
                 "a2f.play_pause", text="Pause", icon="PAUSE"
             )
         else:
-            play_button.operator(
+            playback_row.operator(
                 "a2f.play_pause", text="Play", icon="PLAY"
             )
         playback_row.prop(settings, "playback_loop", text="Loop", toggle=True)
@@ -243,36 +242,48 @@ class A2F_PT_main(bpy.types.Panel):
         emotion_box.label(text="Emotion", icon="DRIVER")
         emotion_controls = emotion_box.column(align=True)
         emotion_controls.prop(settings, "auto_audio2emotion")
-        auto_controls = emotion_controls.column(align=True)
-        auto_controls.prop(settings, "a2e_emotion_strength", slider=True)
-        auto_controls.prop(settings, "a2e_max_emotions", slider=True)
-        auto_controls.prop(settings, "a2e_emotion_contrast", slider=True)
-        auto_controls.prop(settings, "a2e_live_blend_coef", slider=True)
-        auto_controls.prop(settings, "a2e_transition_smoothing", slider=True)
-        preferred_row = auto_controls.row(align=True)
-        preferred_row.label(
-            text=(
-                "Preferred Emotion: is set"
-                if settings.preferred_emotions
-                else "Preferred Emotion: is not set"
+        emotion_controls.prop(settings, "a2e_emotion_strength", slider=True)
+        emotion_controls.prop(settings, "a2e_max_emotions", slider=True)
+        emotion_controls.prop(settings, "a2e_emotion_contrast", slider=True)
+        emotion_controls.prop(settings, "a2e_live_blend_coef", slider=True)
+        emotion_controls.prop(settings, "a2e_transition_smoothing", slider=True)
+        preferred_header, preferred_body = layout.panel(
+            "audio2face_preferred_emotion",
+            default_closed=True,
+        )
+        preferred_header.label(text="Preferred Emotion", icon="DRIVER")
+        preferred_header.operator("a2f.load_preferred_emotion", text="Load")
+        preferred_header.operator("a2f.clear_preferred_emotion", text="Clear")
+        if preferred_body is not None:
+            preferred_body.prop(
+                settings,
+                "a2e_preferred_emotion_strength",
+                slider=True,
             )
-        )
-        preferred_row.operator("a2f.load_preferred_emotion", text="Load")
-        preferred_row.operator("a2f.clear_preferred_emotion", text="Clear")
-        auto_controls.prop(
-            settings,
-            "a2e_preferred_emotion_strength",
-            slider=True,
-        )
-
-        if settings.manual_emotions:
-            emotion_controls.separator()
-            for emotion in settings.manual_emotions:
-                emotion_controls.prop(
-                    emotion,
-                    "value",
-                    text=emotion.name,
-                    slider=True,
+            if settings.preferred_emotions:
+                for emotion in settings.preferred_emotions:
+                    preferred_body.prop(
+                        emotion,
+                        "value",
+                        text=emotion.name,
+                        slider=True,
+                    )
+            else:
+                preferred_body.label(
+                    text="Load the Audio2Face model to edit emotion values",
+                    icon="INFO",
                 )
+
+        mixed_box = layout.box()
+        mixed_box.label(text="Mixed Emotion", icon="DRIVER")
+        mixed_controls = mixed_box.column(align=True)
+        mixed_controls.enabled = False
+        for emotion in settings.mixed_emotions:
+            mixed_controls.prop(
+                emotion,
+                "value",
+                text=emotion.name,
+                slider=True,
+            )
 
 CLASSES = (A2F_UL_target_objects, A2F_PT_main)

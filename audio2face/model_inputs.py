@@ -50,8 +50,6 @@ def _require_existing_path(path: str | Path, description: str) -> Path:
 def _require_regular_file(
     path: Path,
     description: str,
-    *,
-    nonempty: bool,
 ) -> None:
     try:
         details = path.stat()
@@ -61,7 +59,7 @@ def _require_regular_file(
         ) from exc
     if not stat.S_ISREG(details.st_mode):
         raise ModelInputError(f"{description} must be a regular file: {path}")
-    if nonempty and details.st_size == 0:
+    if details.st_size == 0:
         raise ModelInputError(f"{description} must not be empty: {path}")
     if 0 < details.st_size <= 1024:
         try:
@@ -224,7 +222,7 @@ def _resolve_referenced_file(
     model_directory: Path,
     value: str,
     description: str,
-) -> Path:
+) -> None:
     if "\x00" in value or "\\" in value:
         raise ModelInputError(f"{description} must be a portable relative path")
     relative = PurePosixPath(value)
@@ -241,8 +239,7 @@ def _resolve_referenced_file(
         model_directory.joinpath(*relative.parts),
         description,
     )
-    _require_regular_file(resolved, description, nonempty=True)
-    return resolved
+    _require_regular_file(resolved, description)
 
 
 def _selected_model_directory(value: str | Path, role: ModelRole) -> Path:
@@ -268,7 +265,6 @@ def _validate_resolved_model_directory(
     _require_regular_file(
         resolved_model,
         f"{label} model.json",
-        nonempty=True,
     )
     document = _read_model_document(resolved_model, label)
 
@@ -284,7 +280,7 @@ def _validate_resolved_model_directory(
     for filename in ("network.onnx", "trt_info.json"):
         description = f"{label} companion {filename}"
         companion = _require_existing_path(model_directory / filename, description)
-        _require_regular_file(companion, description, nonempty=True)
+        _require_regular_file(companion, description)
 
     return resolved_model
 

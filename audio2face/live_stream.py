@@ -11,13 +11,10 @@ from typing import Any
 import bpy
 
 from .frame_stream import sample_linear
-from .path_contract import require_unaliased_path
-from .properties import apply_effective_emotions
+from .properties import apply_mixed_emotions
 from .shape_keys import (
-    ShapeKeyStreamError,
     apply_shape_key_frame,
     resolve_target_objects,
-    validate_output_channels,
 )
 
 
@@ -158,27 +155,6 @@ def validate_stream_frame(
     )
 
 
-def _validate_emotion_channels(channels: object) -> tuple[str, ...]:
-    if type(channels) is not list:
-        raise LiveStreamError(
-            "invalid stream emotion contract: channels must be a JSON array"
-        )
-    validated: list[str] = []
-    seen: set[str] = set()
-    for channel in channels:
-        if type(channel) is not str or not channel:
-            raise LiveStreamError(
-                "invalid stream emotion contract: channel names must be non-empty strings"
-            )
-        if channel in seen:
-            raise LiveStreamError(
-                f"invalid stream emotion contract: duplicate channel {channel!r}"
-            )
-        seen.add(channel)
-        validated.append(channel)
-    return tuple(validated)
-
-
 class LiveStreamController:
     """Buffer model frames and drive selected objects from the audio clock."""
 
@@ -233,8 +209,8 @@ class LiveStreamController:
         scene: bpy.types.Scene,
         operation_id: str,
         sample_rate: int,
-        channels: list[str],
-        emotion_channels: list[str],
+        channels: tuple[str, ...],
+        emotion_channels: tuple[str, ...],
         *,
         audio_path: Path | None,
         audio_start_position: float = 0.0,
@@ -248,56 +224,12 @@ class LiveStreamController:
         """Prepare one stream while resolving its target objects at delivery time."""
 
         self.stop(reset=True, notify=False)
-        if type(operation_id) is not str or not operation_id:
-            raise LiveStreamError("operation ID must be a non-empty string")
-        if type(sample_rate) is not int or sample_rate <= 0:
-            raise LiveStreamError("stream sample rate must be a positive integer")
-        if type(audio_start_position) is not float or not math.isfinite(
-            audio_start_position
-        ) or audio_start_position < 0.0:
-            raise LiveStreamError("audio start position must be a finite non-negative float")
-        if type(start_paused) is not bool:
-            raise LiveStreamError("start_paused must be an exact bool")
-        callbacks = (
-            ("playback_started", playback_started),
-            ("playback_paused", playback_paused),
-            ("playback_resumed", playback_resumed),
-            ("playback_seeked", playback_seeked),
-            ("playback_stopped", playback_stopped),
-        )
-        for name, callback in callbacks:
-            if callback is not None and not callable(callback):
-                raise LiveStreamError(f"{name} must be callable or None")
-        if audio_path is not None and not isinstance(audio_path, Path):
-            raise LiveStreamError("stream audio path must be a Path or None")
-        if audio_path is None and (audio_start_position != 0.0 or start_paused):
-            raise LiveStreamError("external PCM cannot have selected-audio playback state")
-        if type(channels) is not list:
-            raise LiveStreamError(
-                "invalid stream output contract: channels must be a JSON array"
-            )
-        try:
-            validated_channels = validate_output_channels(channels)
-        except ShapeKeyStreamError as exc:
-            raise LiveStreamError(f"invalid stream output contract: {exc}") from exc
-        validated_emotion_channels = _validate_emotion_channels(emotion_channels)
-
-        resolved_audio: Path | None = None
-        if audio_path is not None:
-            resolved_audio = require_unaliased_path(
-                audio_path,
-                description="selected audio",
-                error_type=LiveStreamError,
-            )
-            if not resolved_audio.is_file():
-                raise LiveStreamError(f"audio file does not exist: {resolved_audio}")
-
         self._scene_name = scene.name
         self._operation_id = operation_id
         self._sample_rate = sample_rate
-        self._channels = validated_channels
-        self._emotion_channels = validated_emotion_channels
-        self._audio_path = resolved_audio
+        self._channels = channels
+        self._emotion_channels = emotion_channels
+        self._audio_path = audio_path
         self._audio_start_position = audio_start_position
         self._start_paused = start_paused
         self._playback_started = playback_started
@@ -398,7 +330,7 @@ class LiveStreamController:
         settings = scene.audio2face
         settings.playback_state = "PAUSED" if self._start_paused else "PLAYING"
         configure_playback_position(settings, start_position, duration)
-        self._publish_position(settings, start_position)
+        self._published_position = playback_position(settings)
         callback = self._playback_started
         self._playback_started = None
         if callback is not None:
@@ -435,7 +367,6 @@ class LiveStreamController:
             raise LiveStreamError("stream scene is no longer editable")
         settings = scene.audio2face
         if self._audio_path is None:
-            settings.stream_time = max(0.0, timestamp_sample / self._sample_rate)
             if self._stream_clock_started is None:
                 self._stream_clock_started = time.monotonic()
                 self._stream_clock_origin = timestamp_sample
@@ -542,7 +473,7 @@ class LiveStreamController:
                 sample_position,
             ),
         )
-        apply_effective_emotions(
+        apply_mixed_emotions(
             settings,
             self._emotion_channels,
             sample_linear(

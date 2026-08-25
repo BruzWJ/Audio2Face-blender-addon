@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import importlib
-import inspect
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -45,7 +44,6 @@ def main() -> None:
     runtime = importlib.import_module(f"{addon_names[0]}.runtime")
     preferences = importlib.import_module(f"{addon_names[0]}.preferences")
     properties = importlib.import_module(f"{addon_names[0]}.properties")
-    ui = importlib.import_module(f"{addon_names[0]}.ui")
 
     assert hasattr(bpy.types.Scene, "audio2face")
     assert bpy.app.timers.is_registered(runtime._timer_callback)
@@ -107,8 +105,9 @@ def main() -> None:
     assert {
         "prediction_delay",
         "auto_audio2emotion",
-        "manual_emotions",
         "preferred_emotions",
+        "preferred_emotion_active",
+        "mixed_emotions",
         *emotion_property_defaults,
         *AUDIO2FACE_DEFAULTS,
     } <= scene_property_names
@@ -127,14 +126,17 @@ def main() -> None:
     assert not properties.A2FSceneSettings.bl_rna.properties[
         "preferred_emotions"
     ].is_skip_save
-    panel_source = inspect.getsource(ui.A2F_PT_main.draw)
-    assert "if settings.manual_emotions:" in panel_source
-    assert (
-        "settings.manual_emotions and not settings.auto_audio2emotion"
-        not in panel_source
-    )
-    assert "if settings.auto_audio2emotion:" not in panel_source
-
+    assert not properties.A2FSceneSettings.bl_rna.properties[
+        "preferred_emotion_active"
+    ].is_skip_save
+    assert properties.A2FSceneSettings.bl_rna.properties[
+        "preferred_emotion_active"
+    ].default is False
+    assert properties.A2FSceneSettings.bl_rna.properties[
+        "mixed_emotions"
+    ].is_skip_save
+    assert set(properties.A2FPreferredEmotionItem.__annotations__) == {"name", "value"}
+    assert set(properties.A2FMixedEmotionItem.__annotations__) == {"name", "value"}
     settings = bpy.context.scene.audio2face
     properties.apply_model_schema(
         settings,

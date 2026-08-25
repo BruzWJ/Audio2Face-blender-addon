@@ -268,7 +268,6 @@ def test_worker_configures_the_sdk_from_one_optional_preferred_snapshot() -> Non
     assert "parse_emotion_snapshot(" in SOURCE
     assert "value.size() != emotion_channels_.size()" in SOURCE
     assert "amount < 0.0F || amount > 1.0F" in SOURCE
-    assert "manual_emotion_.data()" not in configure_source
 
 
 def test_active_settings_replay_bounded_pcm_on_one_absolute_timeline() -> None:

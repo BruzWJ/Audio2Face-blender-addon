@@ -1,7 +1,6 @@
 {
   "schema": "audio2face-runtime-inputs/1",
   "audio2face_sdk": {
-    "version": "1.0.0",
     "repository": "https://github.com/NVIDIA/Audio2Face-3D-SDK.git",
     "commit": "1ca0f02535ed774f5dbcd724a31cd486368dc783"
   },

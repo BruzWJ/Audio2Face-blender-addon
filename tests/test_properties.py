@@ -105,11 +105,12 @@ def _settings() -> SimpleNamespace:
         model_schema_signature="",
         **AUDIO2FACE_DEFAULTS,
         auto_audio2emotion=False,
-        manual_emotions=_Collection(
-            lambda: SimpleNamespace(name="", value=0.0, user_edited=False)
-        ),
         preferred_emotions=_Collection(
-            lambda: SimpleNamespace(name="", value=0.0, user_edited=False)
+            lambda: SimpleNamespace(name="", value=0.0)
+        ),
+        preferred_emotion_active=False,
+        mixed_emotions=_Collection(
+            lambda: SimpleNamespace(name="", value=0.0)
         ),
         a2e_emotion_strength=0.6,
         a2e_emotion_contrast=1.0,
@@ -131,11 +132,8 @@ def _schema() -> dict[str, object]:
     }
 
 
-def test_emotion_configuration_is_not_hidden_by_auto_mode() -> None:
-    assert "if settings.auto_audio2emotion:" not in UI_SOURCE
-    assert 'text="Manual Emotion"' not in UI_SOURCE
+def test_emotion_configuration_uses_preferred_and_mixed_views() -> None:
     for name in (
-        "a2e_preferred_emotion_strength",
         "a2e_emotion_strength",
         "a2e_emotion_contrast",
         "a2e_max_emotions",
@@ -143,11 +141,41 @@ def test_emotion_configuration_is_not_hidden_by_auto_mode() -> None:
         "a2e_transition_smoothing",
     ):
         assert re.search(
-            rf'auto_controls\.prop\(\s*settings,\s*"{name}",\s*slider=True,?\s*\)',
+            rf'emotion_controls\.prop\(\s*settings,\s*"{name}",\s*slider=True,?\s*\)',
             UI_SOURCE,
         )
+    assert re.search(
+        r'preferred_header, preferred_body = layout\.panel\(\s*'
+        r'"audio2face_preferred_emotion",\s*default_closed=True,?\s*\)',
+        UI_SOURCE,
+    )
+    assert re.search(
+        r'preferred_body\.prop\(\s*settings,\s*'
+        r'"a2e_preferred_emotion_strength",\s*slider=True,?\s*\)',
+        UI_SOURCE,
+    )
+    assert "for emotion in settings.preferred_emotions:" in UI_SOURCE
+    assert "for emotion in settings.mixed_emotions:" in UI_SOURCE
+    assert "mixed_controls.enabled = False" in UI_SOURCE
     assert '"a2f.load_preferred_emotion"' in UI_SOURCE
     assert '"a2f.clear_preferred_emotion"' in UI_SOURCE
+
+
+def test_preferred_emotions_are_saved_and_mixed_emotions_are_transient(
+    properties_module: ModuleType,
+) -> None:
+    annotations = properties_module.A2FSceneSettings.__annotations__
+
+    assert "SKIP_SAVE" not in annotations["preferred_emotions"]
+    assert "SKIP_SAVE" not in annotations["preferred_emotion_active"]
+    assert "SKIP_SAVE" in annotations["mixed_emotions"]
+    assert "update=_inference_setting_updated" in annotations["auto_audio2emotion"]
+    assert "update=_preferred_emotion_updated" in (
+        properties_module.A2FPreferredEmotionItem.__annotations__["value"]
+    )
+    assert "update" not in (
+        properties_module.A2FMixedEmotionItem.__annotations__["value"]
+    )
 
 
 def test_automatic_emotion_strength_is_an_independent_two_x_multiplier(
@@ -176,7 +204,6 @@ def test_model_tuning_ui_exposes_only_the_fixed_audio2face_contract() -> None:
 
 def test_runtime_status_box_uses_the_persistence_gate() -> None:
     assert "controller.status_notice(context.scene)" in UI_SOURCE
-    assert "visible_statuses" not in UI_SOURCE
 
 
 def test_playback_ui_uses_an_editable_absolute_time_slider() -> None:
@@ -185,11 +212,6 @@ def test_playback_ui_uses_an_editable_absolute_time_slider() -> None:
         r'\s*text="",\s*slider=True,?\s*\)',
         UI_SOURCE,
     )
-    assert "playback_progress" not in UI_SOURCE
-    assert "playback_duration" not in UI_SOURCE
-    assert "playback_position(settings)" not in UI_SOURCE
-    assert "seek_row.enabled" not in UI_SOURCE
-    assert ".progress(" not in UI_SOURCE
 
 
 def test_input_mode_switch_is_never_disabled() -> None:
@@ -202,7 +224,6 @@ def test_target_ui_uses_the_shape_key_object_contract() -> None:
     assert 'text="Target Objects"' in UI_SOURCE
     assert 'text="Add Selected Objects"' in UI_SOURCE
     assert '"target_objects"' in UI_SOURCE
-    assert "target_mesh" not in UI_SOURCE
 
 
 def test_audio_path_update_replaces_the_selected_media_slider(
@@ -264,36 +285,10 @@ def test_shared_update_callback_refreshes_the_context_scene(
     assert calls == [scene]
 
 
-def test_effective_emotions_update_visible_values_without_mutating_preferred(
-    properties_module: ModuleType,
-) -> None:
-    settings = _settings()
-    properties_module.apply_model_schema(settings, _schema(), MODEL_SIGNATURE)
-    properties_module.load_preferred_emotion(settings)
-    settings.auto_audio2emotion = True
-
-    properties_module.apply_effective_emotions(
-        settings,
-        ("Neutral", "Joy"),
-        (0.1, 0.9),
-    )
-
-    assert [(item.name, item.value) for item in settings.manual_emotions] == [
-        ("Neutral", 0.1),
-        ("Joy", 0.9),
-    ]
-    assert [(item.name, item.value) for item in settings.preferred_emotions] == [
-        ("Neutral", 0.5),
-        ("Joy", 0.2),
-    ]
-
-
-@pytest.mark.parametrize("playback_state", ("PLAYING", "PAUSED"))
 @pytest.mark.parametrize("auto_audio2emotion", (False, True))
-def test_emotion_value_ownership_matches_manual_or_automatic_mode(
+def test_mixed_output_and_preferred_input_have_strict_ownership(
     properties_module: ModuleType,
     monkeypatch: pytest.MonkeyPatch,
-    playback_state: str,
     auto_audio2emotion: bool,
 ) -> None:
     calls: list[object] = []
@@ -304,19 +299,10 @@ def test_emotion_value_ownership_matches_manual_or_automatic_mode(
     runtime.get_controller = lambda: controller  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "audio2face.runtime", runtime)
 
-    class CallbackItem:
-        def __init__(
-            self,
-            name: str,
-            path: str = "audio2face.manual_emotions[0]",
-        ) -> None:
-            self.name = name
-            self.path = path
+    class PreferredCallbackItem:
+        def __init__(self) -> None:
+            self.name = ""
             self._value = 0.0
-            self.user_edited = False
-
-        def path_from_id(self) -> str:
-            return self.path
 
         @property
         def value(self) -> float:
@@ -325,72 +311,70 @@ def test_emotion_value_ownership_matches_manual_or_automatic_mode(
         @value.setter
         def value(self, value: float) -> None:
             self._value = value
-            properties_module._manual_emotion_updated(self, context)
+            properties_module._preferred_emotion_updated(self, context)
 
-    settings = SimpleNamespace(
-        auto_audio2emotion=auto_audio2emotion,
-        manual_emotions=[CallbackItem("Neutral"), CallbackItem("Joy")],
-        playback_state=playback_state,
-        preferred_emotions=_Collection(
-            lambda: SimpleNamespace(name="", value=0.0, user_edited=False)
-        ),
+    settings = _settings()
+    settings.auto_audio2emotion = auto_audio2emotion
+    settings.preferred_emotions = _Collection(
+        PreferredCallbackItem
+    )
+    settings.mixed_emotions = _Collection(
+        lambda: SimpleNamespace(name="", value=0.0)
     )
     scene = SimpleNamespace(audio2face=settings)
     context = SimpleNamespace(scene=scene)
+    properties_module.apply_model_schema(settings, _schema(), MODEL_SIGNATURE)
 
-    properties_module.apply_effective_emotions(
+    properties_module.apply_mixed_emotions(
         settings,
         ("Neutral", "Joy"),
         (0.25, 0.75),
     )
     assert calls == []
-    assert [item.value for item in settings.manual_emotions] == (
-        [0.25, 0.75] if auto_audio2emotion else [0.0, 0.0]
-    )
+    assert [item.value for item in settings.mixed_emotions] == [0.25, 0.75]
+    assert [item.value for item in settings.preferred_emotions] == [0.5, 0.2]
+    assert settings.preferred_emotion_active is False
 
-    settings.manual_emotions[1].value = 0.35
-    assert calls == ([] if auto_audio2emotion else [scene])
-    assert settings.manual_emotions[1].user_edited is auto_audio2emotion
+    settings.preferred_emotions[1].value = 0.35
+    assert calls == [scene]
+    assert settings.preferred_emotion_active is True
 
-    properties_module.apply_effective_emotions(
+    properties_module.apply_mixed_emotions(
         settings,
         ("Neutral", "Joy"),
         (0.6, 0.4),
     )
-    assert [item.value for item in settings.manual_emotions] == (
-        [0.6, 0.35] if auto_audio2emotion else [0.0, 0.35]
-    )
-    assert settings.playback_state == playback_state
+    assert [item.value for item in settings.mixed_emotions] == [0.6, 0.4]
+    assert [item.value for item in settings.preferred_emotions] == [0.5, 0.35]
+    assert calls == [scene]
 
-    properties_module.load_preferred_emotion(settings)
-    expected_preferred = [0.6, 0.35] if auto_audio2emotion else [0.0, 0.35]
-    assert [item.value for item in settings.preferred_emotions] == expected_preferred
-    assert not any(item.user_edited for item in settings.manual_emotions)
 
-    properties_module.apply_effective_emotions(
+def test_load_and_clear_preferred_emotion_copy_enable_and_reset(
+    properties_module: ModuleType,
+) -> None:
+    settings = _settings()
+    properties_module.apply_model_schema(settings, _schema(), MODEL_SIGNATURE)
+    properties_module.apply_mixed_emotions(
         settings,
         ("Neutral", "Joy"),
         (0.7, 0.3),
     )
-    assert [item.value for item in settings.manual_emotions] == (
-        [0.7, 0.3] if auto_audio2emotion else [0.0, 0.35]
-    )
-    assert [item.value for item in settings.preferred_emotions] == expected_preferred
-    assert settings.playback_state == playback_state
 
-    calls_before = calls.copy()
-    properties_module._manual_emotion_updated(
-        CallbackItem("Joy", "audio2face.preferred_emotions[0]"),
-        context,
-    )
-    assert calls == calls_before
-    settings.manual_emotions[0].user_edited = True
-    properties_module._auto_audio2emotion_updated(
+    properties_module.load_preferred_emotion(settings)
+
+    assert [item.value for item in settings.preferred_emotions] == [0.7, 0.3]
+    assert settings.preferred_emotion_active is True
+
+    properties_module.apply_mixed_emotions(
         settings,
-        context,
+        ("Neutral", "Joy"),
+        (0.2, 0.8),
     )
-    assert not any(item.user_edited for item in settings.manual_emotions)
-    assert calls == [*calls_before, scene]
+    properties_module.clear_preferred_emotion(settings)
+
+    assert [item.value for item in settings.mixed_emotions] == [0.2, 0.8]
+    assert [item.value for item in settings.preferred_emotions] == [0.0, 0.0]
+    assert settings.preferred_emotion_active is False
 
 
 @pytest.mark.parametrize(
@@ -401,7 +385,7 @@ def test_emotion_value_ownership_matches_manual_or_automatic_mode(
         (("Neutral", "Joy"), (0.1, float("nan"))),
     ),
 )
-def test_effective_emotions_require_the_exact_loaded_schema(
+def test_mixed_emotions_require_the_exact_loaded_schema(
     properties_module: ModuleType,
     channels: tuple[str, ...],
     values: tuple[float, ...],
@@ -410,24 +394,22 @@ def test_effective_emotions_require_the_exact_loaded_schema(
     properties_module.apply_model_schema(settings, _schema(), MODEL_SIGNATURE)
 
     with pytest.raises(ValueError):
-        properties_module.apply_effective_emotions(settings, channels, values)
+        properties_module.apply_mixed_emotions(settings, channels, values)
 
 
-def test_effective_emotion_display_clamps_without_mutating_preferred(
+def test_mixed_emotion_display_clamps_without_mutating_preferred(
     properties_module: ModuleType,
 ) -> None:
     settings = _settings()
     properties_module.apply_model_schema(settings, _schema(), MODEL_SIGNATURE)
-    properties_module.load_preferred_emotion(settings)
-    settings.auto_audio2emotion = True
 
-    properties_module.apply_effective_emotions(
+    properties_module.apply_mixed_emotions(
         settings,
         ("Neutral", "Joy"),
         (-0.5, 1.5),
     )
 
-    assert [item.value for item in settings.manual_emotions] == [0.0, 1.0]
+    assert [item.value for item in settings.mixed_emotions] == [0.0, 1.0]
     assert [item.value for item in settings.preferred_emotions] == [0.5, 0.2]
 
 
@@ -448,18 +430,20 @@ def test_schema_materializes_dynamic_emotions(
     )
     settings = _settings()
 
-    assert (
-        properties_module.apply_model_schema(
-            settings,
-            _schema(),
-            MODEL_SIGNATURE,
-        )
-        == CHANNELS
+    properties_module.apply_model_schema(
+        settings,
+        _schema(),
+        MODEL_SIGNATURE,
     )
-    assert [(item.name, item.value) for item in settings.manual_emotions] == [
+    assert [(item.name, item.value) for item in settings.preferred_emotions] == [
         ("Neutral", 0.5),
         ("Joy", 0.2),
     ]
+    assert [(item.name, item.value) for item in settings.mixed_emotions] == [
+        ("Neutral", 0.5),
+        ("Joy", 0.2),
+    ]
+    assert settings.preferred_emotion_active is False
 
 
 def test_reload_preserves_values_only_for_the_exact_same_schema(
@@ -467,20 +451,26 @@ def test_reload_preserves_values_only_for_the_exact_same_schema(
 ) -> None:
     settings = _settings()
     properties_module.apply_model_schema(settings, _schema(), MODEL_SIGNATURE)
-    settings.manual_emotions[1].value = 0.82
+    settings.preferred_emotions[1].value = 0.82
+    settings.preferred_emotion_active = True
+    properties_module.apply_mixed_emotions(
+        settings,
+        ("Neutral", "Joy"),
+        (0.3, 0.7),
+    )
     for name, value in AUDIO2FACE_TUNING.items():
         setattr(settings, name, value)
-    properties_module.load_preferred_emotion(settings)
 
     properties_module.apply_model_schema(settings, _schema(), MODEL_SIGNATURE)
-    assert [(item.name, item.value) for item in settings.manual_emotions] == [
-        ("Neutral", 0.5),
-        ("Joy", 0.82),
-    ]
     assert [(item.name, item.value) for item in settings.preferred_emotions] == [
         ("Neutral", 0.5),
         ("Joy", 0.82),
     ]
+    assert [(item.name, item.value) for item in settings.mixed_emotions] == [
+        ("Neutral", 0.5),
+        ("Joy", 0.2),
+    ]
+    assert settings.preferred_emotion_active is True
     assert {
         name: getattr(settings, name)
         for name in AUDIO2FACE_DEFAULTS
@@ -492,10 +482,15 @@ def test_changed_schema_resets_every_control_to_advertised_defaults(
 ) -> None:
     settings = _settings()
     properties_module.apply_model_schema(settings, _schema(), MODEL_SIGNATURE)
-    settings.manual_emotions[1].value = 0.82
+    settings.preferred_emotions[1].value = 0.82
+    settings.preferred_emotion_active = True
+    properties_module.apply_mixed_emotions(
+        settings,
+        ("Neutral", "Joy"),
+        (0.3, 0.7),
+    )
     for name, value in AUDIO2FACE_TUNING.items():
         setattr(settings, name, value)
-    properties_module.load_preferred_emotion(settings)
 
     schema = _schema()
     changed_defaults = AUDIO2FACE_DEFAULTS.copy()
@@ -504,7 +499,15 @@ def test_changed_schema_resets_every_control_to_advertised_defaults(
     properties_module.apply_model_schema(settings, schema, MODEL_SIGNATURE)
     settings.auto_audio2emotion = True
 
-    assert not settings.preferred_emotions
+    assert [(item.name, item.value) for item in settings.preferred_emotions] == [
+        ("Neutral", 0.5),
+        ("Joy", 0.2),
+    ]
+    assert [(item.name, item.value) for item in settings.mixed_emotions] == [
+        ("Neutral", 0.5),
+        ("Joy", 0.2),
+    ]
+    assert settings.preferred_emotion_active is False
     assert properties_module.inference_settings(settings) == {
         "audio2face": changed_defaults,
         "auto_audio2emotion": True,
@@ -526,8 +529,9 @@ def test_inference_settings_freezes_face_manual_and_automatic_controls(
 ) -> None:
     settings = _settings()
     properties_module.apply_model_schema(settings, _schema(), MODEL_SIGNATURE)
-    settings.manual_emotions[0].value = 0.25
-    settings.manual_emotions[1].value = 0.75
+    settings.preferred_emotions[0].value = 0.25
+    settings.preferred_emotions[1].value = 0.75
+    settings.preferred_emotion_active = True
     settings.auto_audio2emotion = True
     settings.a2e_emotion_strength = 0.8
     settings.a2e_emotion_contrast = 1.4
@@ -539,9 +543,11 @@ def test_inference_settings_freezes_face_manual_and_automatic_controls(
     settings.blink_strength = 1.5
     settings.right_eye_rot_y_offset = -4.5
     settings.eye_saccade_seed = 4999
-    properties_module.load_preferred_emotion(settings)
-    settings.manual_emotions[0].value = 0.1
-    settings.manual_emotions[1].value = 0.9
+    properties_module.apply_mixed_emotions(
+        settings,
+        ("Neutral", "Joy"),
+        (0.1, 0.9),
+    )
 
     expected_audio2face = AUDIO2FACE_DEFAULTS.copy()
     expected_audio2face.update(
@@ -553,7 +559,7 @@ def test_inference_settings_freezes_face_manual_and_automatic_controls(
     assert properties_module.inference_settings(settings) == {
         "audio2face": expected_audio2face,
         "auto_audio2emotion": True,
-        "manual_emotions": {"Neutral": 0.1, "Joy": 0.9},
+        "manual_emotions": {"Neutral": 0.25, "Joy": 0.75},
         "audio2emotion": {
             "emotion_strength": 0.8,
             "emotion_contrast": 1.4,
@@ -566,19 +572,15 @@ def test_inference_settings_freezes_face_manual_and_automatic_controls(
     }
 
     properties_module.clear_preferred_emotion(settings)
-    assert (
-        properties_module.inference_settings(settings)["audio2emotion"][
-            "preferred_emotion"
-        ]
-        is None
-    )
+    cleared = properties_module.inference_settings(settings)
+    assert cleared["manual_emotions"] == {"Neutral": 0.0, "Joy": 0.0}
+    assert cleared["audio2emotion"]["preferred_emotion"] is None
+    assert [item.value for item in settings.mixed_emotions] == [0.1, 0.9]
 
 
 @pytest.mark.parametrize(
     "corrupt",
     (
-        lambda settings: settings.manual_emotions.pop(),
-        lambda settings: setattr(settings.manual_emotions[0], "name", "Renamed"),
         lambda settings: settings.preferred_emotions.pop(),
         lambda settings: setattr(settings.preferred_emotions[0], "name", "Renamed"),
     ),
@@ -592,8 +594,34 @@ def test_exact_schema_signature_never_masks_corrupt_saved_collections(
     properties_module.load_preferred_emotion(settings)
     corrupt(settings)
 
-    with pytest.raises(ValueError, match="saved|unsupported"):
+    with pytest.raises(ValueError, match="saved preferred"):
         properties_module.apply_model_schema(settings, _schema(), MODEL_SIGNATURE)
+
+
+def test_same_schema_rebuilds_transient_mixed_emotions(
+    properties_module: ModuleType,
+) -> None:
+    settings = _settings()
+    properties_module.apply_model_schema(settings, _schema(), MODEL_SIGNATURE)
+    settings.mixed_emotions.pop()
+
+    properties_module.apply_model_schema(settings, _schema(), MODEL_SIGNATURE)
+
+    assert [(item.name, item.value) for item in settings.mixed_emotions] == [
+        ("Neutral", 0.5),
+        ("Joy", 0.2),
+    ]
+
+
+def test_transient_mixed_state_never_affects_inference_settings(
+    properties_module: ModuleType,
+) -> None:
+    settings = _settings()
+    properties_module.apply_model_schema(settings, _schema(), MODEL_SIGNATURE)
+    expected = properties_module.inference_settings(settings)
+    settings.mixed_emotions.clear()
+
+    assert properties_module.inference_settings(settings) == expected
 
 
 @pytest.mark.parametrize(
@@ -624,8 +652,11 @@ def test_invalid_schema_does_not_mutate_controls(
 ) -> None:
     settings = _settings()
     properties_module.apply_model_schema(settings, _schema(), MODEL_SIGNATURE)
-    before_emotions = copy.deepcopy(
-        [(item.name, item.value) for item in settings.manual_emotions]
+    before_preferred = copy.deepcopy(
+        [(item.name, item.value) for item in settings.preferred_emotions]
+    )
+    before_mixed = copy.deepcopy(
+        [(item.name, item.value) for item in settings.mixed_emotions]
     )
     before_audio2face = {
         name: getattr(settings, name)
@@ -638,8 +669,12 @@ def test_invalid_schema_does_not_mutate_controls(
         properties_module.apply_model_schema(settings, schema, MODEL_SIGNATURE)
 
     assert (
-        [(item.name, item.value) for item in settings.manual_emotions]
-        == before_emotions
+        [(item.name, item.value) for item in settings.preferred_emotions]
+        == before_preferred
+    )
+    assert (
+        [(item.name, item.value) for item in settings.mixed_emotions]
+        == before_mixed
     )
     assert {
         name: getattr(settings, name)

@@ -16,10 +16,7 @@ def register() -> None:
     if _REGISTERED:
         return
 
-    try:
-        import bpy
-    except ModuleNotFoundError as exc:  # pragma: no cover - Blender-only path
-        raise RuntimeError("Audio2Face must be registered inside Blender") from exc
+    import bpy
 
     from . import operators, preferences, properties, runtime, ui
 

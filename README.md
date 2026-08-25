@@ -122,15 +122,14 @@ driver caches.
    **Add Selected Objects**.
 5. Click **Start Worker**. Blender launches the verified package-local worker,
    negotiates the protocol, and loads both selected models.
-6. The emotion sliders remain available in both modes. Leave **Auto
-   Audio2Emotion** off to apply the current emotion vector directly. Enable it
-   to infer emotion from the same audio and display the effective values on
-   those sliders. **Load** under **Preferred Emotion** captures the current
-   slider values for mixing with generated emotion;
-   **Clear** removes that captured preference. While playback or streaming is
-   active, an edited channel remains authored until Load or Clear while the
-   other sliders continue displaying generated values. Load applies the visible
-   snapshot and returns every slider to the live mixed output.
+6. The collapsible **Preferred Emotion** sliders are the saved, editable
+   emotion input. Leave **Auto Audio2Emotion** off to use them as the direct
+   constant driver, or enable it to use them as the optional preference mixed
+   with generated emotion. The separate **Mixed Emotion** values are read-only
+   worker output. **Load** copies that current output into Preferred Emotion;
+   **Clear** disables the preference and zeros its sliders. A direct Preferred
+   edit enables the preference and applies immediately. Mixed Emotion never
+   becomes inference input.
 7. In Selected WAV mode, press **Play**. Playback automatically starts
    incremental inference and drives matching Shape Keys as frames arrive.
    **Pause** freezes both audio and source pacing; seek and loop restart
@@ -220,8 +219,9 @@ selector or identity state.
 `stream_start` installs one exact initial settings snapshot containing the fixed
 18-field `audio2face` object, `auto_audio2emotion`, all model-described
 `manual_emotions`, and the `audio2emotion` object. Audio2Emotion controls remain
-available regardless of the **Auto Audio2Emotion** toggle, and the same emotion
-sliders remain visible in both modes. These are the Audio2Emotion defaults:
+available regardless of the **Auto Audio2Emotion** toggle. Blender presents two
+model-defined emotion collections: saved, editable **Preferred Emotion** and
+transient, read-only **Mixed Emotion**. These are the Audio2Emotion defaults:
 
 ```json
 {
@@ -235,29 +235,33 @@ sliders remain visible in both modes. These are the Audio2Emotion defaults:
 }
 ```
 
-With automatic emotion off, the current slider values are the direct, constant
-emotion driver. With it on, Audio2Emotion generates timestamped values and
-applies strength, contrast, retained-emotion count, temporal blend, and
-transition controls through NVIDIA's SDK post-processor. Each returned frame
-contains the effective emotion values sampled by Audio2Face, aligned with its
-ARKit weights; Blender presents those values on the existing factor sliders at
-the same time, clamping only their display when NVIDIA returns a finite value
-outside the factor range. **Load** copies the current emotion values into a
-distinct preferred-emotion snapshot; later slider changes do not mutate it.
-**Clear** unsets that snapshot. The loaded snapshot is saved with the Blender
-scene.
-When a preferred snapshot is loaded, for preferred-mix weight `p` the SDK
+With automatic emotion off, the saved Preferred Emotion values populate the
+protocol's `manual_emotions` field and form the direct, constant emotion driver.
+With it on, Audio2Emotion generates timestamped values and applies strength,
+contrast, retained-emotion count, temporal blend, and transition controls
+through NVIDIA's SDK post-processor. When preferred mixing is enabled, the same
+saved values are supplied as `audio2emotion.preferred_emotion`. Direct edits to
+Preferred Emotion enable preferred mixing and immediately refresh the active
+inference settings; switching Auto Audio2Emotion does not rewrite the authored
+values.
+
+**Load** copies the currently displayed Mixed Emotion values into Preferred
+Emotion and enables preferred mixing. **Clear** disables preferred mixing and
+zeros the saved Preferred Emotion values. The Preferred Emotion collection is
+saved with the Blender scene. For preferred-mix weight `p` the SDK
 computes `p * preferred + (1 - p) * generated`, then applies the overall
 emotion strength. **Emotion Strength** ranges from `0.0` to `2.0`; values above
 `1.0` amplify this automatic-emotion result without changing **Skin Strength**.
 Individual emotion values and the preferred-mix weight remain in `[0.0, 1.0]`.
-The legacy Omniverse UI stopped at `1.0`; amplification above that value uses
-the SDK's multiplier outside the legacy calibrated range and can saturate final
-ARKit coefficients at `1.0`.
 Equal emotion values are learned model-conditioning weights, not equal visual
 deformation amplitudes, so different emotions can remain perceptually uneven.
-Auto Audio2Emotion and the Preferred Emotion snapshot are independent
-controls.
+
+Each returned frame contains the effective, post-processed values sampled by
+Audio2Face, aligned with its ARKit weights. Blender writes them only to the
+read-only Mixed Emotion display, clamping that display when NVIDIA returns a
+finite value outside the factor range. Mixed Emotion is transient, is not saved
+with the scene, and never supplies `manual_emotions`, `preferred_emotion`, or
+any other inference setting.
 
 The same complete settings contract applies to Selected WAV and Stream. A
 control edit queues one complete replacement snapshot on the active operation.

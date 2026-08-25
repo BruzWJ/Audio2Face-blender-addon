@@ -54,8 +54,10 @@ from .sidecar import (
 from .wav_stream import WavStreamSource
 
 
-def _model_emotion_channels(model_schema: dict[str, Any]) -> list[str]:
-    return [descriptor["name"] for descriptor in model_schema["emotion_channels"]]
+def _model_emotion_channels(model_schema: dict[str, Any]) -> tuple[str, ...]:
+    return tuple(
+        descriptor["name"] for descriptor in model_schema["emotion_channels"]
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -364,12 +366,12 @@ class RuntimeController:
         )
 
     @staticmethod
-    def _extension_data_directory(name: str) -> Path:
-        description = f"Audio2Face {name} directory"
+    def log_directory() -> Path:
+        description = "Audio2Face logs directory"
         try:
             value = bpy.utils.extension_path_user(
                 __package__,
-                path=name,
+                path="logs",
                 create=True,
             )
         except (OSError, RuntimeError, ValueError) as exc:
@@ -382,10 +384,6 @@ class RuntimeController:
         if not path.is_dir():
             raise SidecarError(f"{description} is not a directory: {path}")
         return path
-
-    @staticmethod
-    def log_directory() -> Path:
-        return RuntimeController._extension_data_directory("logs")
 
     def setup_snapshot(self) -> RuntimeSetupSnapshot:
         """Inspect the bundled runtime and selected model pair exactly once."""
@@ -489,8 +487,6 @@ class RuntimeController:
         if self.client.state not in {Lifecycle.STOPPED, Lifecycle.FAILED}:
             return False, "stop the Audio2Face worker before optimizing models"
         preferences = get_preferences()
-        if preferences is None:
-            return False, "Audio2Face Add-on Preferences are unavailable"
         if not preferences.nvidia_terms_accepted:
             return False, "accept the NVIDIA terms first"
         return True, "The bundled GPU runtime and selected model inputs are ready"
@@ -622,12 +618,12 @@ class RuntimeController:
         *,
         model_signature: tuple[str, str] | None,
         operation_id: str | None,
-    ) -> str:
+    ) -> None:
         with self.pending_lock:
             # Store correlation state before the main-thread poller can consume
             # a fast worker response.  This also covers calls made by an audio
             # source thread.
-            return self._request_locked(
+            self._request_locked(
                 scene.name,
                 method,
                 params,
@@ -643,7 +639,7 @@ class RuntimeController:
         *,
         model_signature: tuple[str, str] | None,
         operation_id: str | None,
-    ) -> str:
+    ) -> None:
         """Submit and correlate one request while ``pending_lock`` is held."""
 
         request_id = self.client.request(method, params)
@@ -653,7 +649,6 @@ class RuntimeController:
             model_signature=model_signature,
             operation_id=operation_id,
         )
-        return request_id
 
     def _send_hello(self, scene: bpy.types.Scene) -> None:
         self._request(
@@ -722,7 +717,7 @@ class RuntimeController:
         audio_path: Path | None,
         audio_start_position: float = 0.0,
         start_paused: bool = False,
-    ) -> str:
+    ) -> None:
         sample_rate = self.model_sample_rate
         if sample_rate is None:
             raise SidecarError("worker model did not report its sampling rate")
@@ -746,46 +741,43 @@ class RuntimeController:
         )
         if wav_source is not None and not start_paused:
             wav_source.playing.set()
-        try:
-            get_live_stream_controller().prepare(
-                scene,
-                operation_id,
-                sample_rate,
-                model_schema["channels"],
-                _model_emotion_channels(model_schema),
-                audio_path=audio_path,
-                audio_start_position=audio_start_position,
-                start_paused=start_paused,
-                playback_started=(
-                    wav_source.playback_started.set
-                    if wav_source is not None
-                    else None
-                ),
-                playback_paused=(
-                    wav_source.playing.clear if wav_source is not None else None
-                ),
-                playback_resumed=(
-                    wav_source.playing.set if wav_source is not None else None
-                ),
-                playback_seeked=(
-                    (
-                        lambda position, paused: self.seek_selected_audio(
-                            scene,
-                            position,
-                            paused=paused,
-                        )
+        get_live_stream_controller().prepare(
+            scene,
+            operation_id,
+            sample_rate,
+            tuple(model_schema["channels"]),
+            _model_emotion_channels(model_schema),
+            audio_path=audio_path,
+            audio_start_position=audio_start_position,
+            start_paused=start_paused,
+            playback_started=(
+                wav_source.playback_started.set
+                if wav_source is not None
+                else None
+            ),
+            playback_paused=(
+                wav_source.playing.clear if wav_source is not None else None
+            ),
+            playback_resumed=(
+                wav_source.playing.set if wav_source is not None else None
+            ),
+            playback_seeked=(
+                (
+                    lambda position, paused: self.seek_selected_audio(
+                        scene,
+                        position,
+                        paused=paused,
                     )
-                    if wav_source is not None
-                    else None
-                ),
-                playback_stopped=lambda natural: self._finish_stream_presentation(
-                    scene.name,
-                    operation_id,
-                    natural=natural,
-                ),
-            )
-        except LiveStreamError as exc:
-            raise SidecarError(str(exc)) from exc
+                )
+                if wav_source is not None
+                else None
+            ),
+            playback_stopped=lambda natural: self._finish_stream_presentation(
+                scene.name,
+                operation_id,
+                natural=natural,
+            ),
+        )
         try:
             self._request(
                 scene,
@@ -811,7 +803,6 @@ class RuntimeController:
         stream.chunk_credit.set()
         self.active_stream = stream
         self._set_status(scene, "STREAM_STARTING", "Preparing audio inference")
-        return operation_id
 
     def start_selected_audio(
         self,
@@ -819,7 +810,7 @@ class RuntimeController:
         *,
         position: float = 0.0,
         paused: bool = False,
-    ) -> str | None:
+    ) -> None:
         """Start selected-WAV inference as the direct result of pressing Play."""
 
         self._require_editable_scene(scene)
@@ -840,8 +831,8 @@ class RuntimeController:
                 scene,
                 spec,
             )
-            return None
-        return self._submit_stream_start(
+            return
+        self._submit_stream_start(
             scene,
             audio_path=audio_path,
             audio_start_position=position,
@@ -879,7 +870,7 @@ class RuntimeController:
         audio_f32le: bytes,
         *,
         operation_id: str,
-    ) -> str:
+    ) -> None:
         """Send one validated mono-f32le chunk to an accepted worker stream."""
 
         stream = self.active_stream
@@ -890,7 +881,7 @@ class RuntimeController:
                 raise SidecarError("wait for the worker's next PCM chunk credit")
             stream.chunk_credit.clear()
             try:
-                return self._request_locked(
+                self._request_locked(
                     stream.scene_name,
                     "stream_chunk",
                     {
@@ -954,14 +945,14 @@ class RuntimeController:
     def _queue_stream_end(
         self,
         operation_id: str,
-    ) -> str:
+    ) -> None:
         stream = self.active_stream
         if stream is None or stream.operation_id != operation_id:
             raise SidecarError("the requested PCM stream is not active")
         with self.pending_lock:
             if stream.end_sent:
                 raise SidecarError("the active PCM stream has already ended")
-            request_id = self._request_locked(
+            self._request_locked(
                 stream.scene_name,
                 "stream_end",
                 {"operation_id": operation_id},
@@ -969,7 +960,6 @@ class RuntimeController:
                 operation_id=operation_id,
             )
             stream.end_sent = True
-            return request_id
 
     def _queue_stream_settings(
         self,
@@ -1374,7 +1364,7 @@ class RuntimeController:
         scene: bpy.types.Scene,
         position: float,
         *,
-        paused: bool | None = None,
+        paused: bool,
     ) -> None:
         """Restart only the current inference stream at one selected-audio time."""
 
@@ -1390,8 +1380,6 @@ class RuntimeController:
             or stream.wav_source is None
         ):
             raise SidecarError("selected audio playback is not active")
-        if paused is None:
-            paused = settings.playback_state == "PAUSED"
         if type(paused) is not bool:
             raise SidecarError("paused must be an exact bool")
         if stream.worker_ended:
@@ -1433,8 +1421,9 @@ class RuntimeController:
         live = get_live_stream_controller()
         try:
             live.stop_for_seek(position, paused=paused)
-        except LiveStreamError:
-            live.stop(reset=False, notify=False)
+        except LiveStreamError as exc:
+            self.selected_restart = None
+            raise SidecarError(str(exc)) from exc
         self._set_status(scene, "STREAM_ENDING", "Seeking selected audio")
 
     def refresh_inference_settings(self, scene: bpy.types.Scene) -> None:
@@ -1866,7 +1855,7 @@ class RuntimeController:
                 try:
                     validate_stream_frame(
                         tuple(model_schema["channels"]),
-                        tuple(_model_emotion_channels(model_schema)),
+                        _model_emotion_channels(model_schema),
                         data["timestamp_sample"],
                         data["weights"],
                         data["emotions"],

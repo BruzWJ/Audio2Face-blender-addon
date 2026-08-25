@@ -275,8 +275,7 @@ def load_lock() -> dict[str, Any]:
         raise BuildError(f"unsupported runtime lock schema {data['schema']!r}")
 
     sdk = _object(data["audio2face_sdk"], "audio2face_sdk")
-    _keys(sdk, {"version", "repository", "commit"}, "audio2face_sdk")
-    _string(sdk["version"], "audio2face_sdk.version")
+    _keys(sdk, {"repository", "commit"}, "audio2face_sdk")
     _https_url(sdk["repository"], "audio2face_sdk.repository")
     if not COMMIT_RE.fullmatch(_string(sdk["commit"], "audio2face_sdk.commit")):
         raise BuildError("audio2face_sdk.commit must be a lowercase full commit ID")

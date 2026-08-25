@@ -14,14 +14,9 @@ dist/*
 *.obj
 *.so
 *.dll
-*.dylib
 *.exe
 
 # Blender packages and local files
 *.zip
 *.blend1
 *.blend2
-
-# Generated Audio2Face results
-*.a2f.json
-/%SystemDrive%

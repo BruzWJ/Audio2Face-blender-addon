@@ -39,7 +39,7 @@ def _inference_settings_payload() -> dict[str, object]:
     return {
         "audio2face": AUDIO2FACE_DEFAULTS.copy(),
         "auto_audio2emotion": True,
-        "manual_emotions": {"Joy": 0.25},
+        "manual_emotions": {"Joy": 0.75},
         "audio2emotion": {
             "emotion_strength": 0.6,
             "emotion_contrast": 1.0,
@@ -219,7 +219,7 @@ def runtime_module(monkeypatch: pytest.MonkeyPatch) -> tuple[ModuleType, ModuleT
     monkeypatch.setitem(sys.modules, preferences.__name__, preferences)
 
     properties = ModuleType("audio2face.properties")
-    properties.apply_model_schema = lambda *_args, **_kwargs: MODEL_CHANNELS  # type: ignore[attr-defined]
+    properties.apply_model_schema = lambda *_args, **_kwargs: None  # type: ignore[attr-defined]
     properties.inference_settings = lambda *_args, **_kwargs: _inference_settings_payload()  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, properties.__name__, properties)
 
@@ -413,7 +413,7 @@ def test_log_directory_rejects_a_filesystem_alias(
 def test_selected_paths_reject_blender_relative_spelling(
     runtime_module: tuple[ModuleType, ModuleType],
 ) -> None:
-    runtime, _bpy = runtime_module
+    runtime = runtime_module[0]
 
     with pytest.raises(runtime.SidecarError, match="canonical absolute path"):
         runtime.RuntimeController._selected_path("//models/Audio2Face", "model")
@@ -597,7 +597,7 @@ def test_optimization_eligibility_requires_nvidia_terms_acceptance(
     runtime_module: tuple[ModuleType, ModuleType],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    runtime, bpy = runtime_module
+    runtime = runtime_module[0]
     controller = runtime.RuntimeController()
     spec = SimpleNamespace()
     setup = runtime.RuntimeSetupSnapshot(
@@ -761,11 +761,10 @@ def test_loaded_model_schema_is_applied_when_each_scene_starts_a_stream(
         settings: object,
         payload: object,
         applied_signature: tuple[str, str],
-    ) -> tuple[str, ...]:
+    ) -> None:
         assert applied_signature == signature
         assert payload == model_schema
         applications.append(settings)
-        return MODEL_CHANNELS
 
     monkeypatch.setattr(runtime, "apply_model_schema", apply)
     controller.pending["load"] = _model_pending(
@@ -808,9 +807,8 @@ def test_model_load_submits_both_bundled_models(
         method: str,
         params: dict[str, object],
         **kwargs: object,
-    ) -> str:
+    ) -> None:
         submitted.append((method, params, kwargs))
-        return "load"
 
     controller._request = request
     controller._submit_model_load(
@@ -950,7 +948,7 @@ def test_terminal_contract_rejection_clears_the_active_stream_from_all_scenes(
     runtime_module: tuple[ModuleType, ModuleType],
 ) -> None:
     runtime, bpy = runtime_module
-    first, first_settings = _local_scene(bpy, "First")
+    first_settings = _local_scene(bpy, "First")[1]
     second_settings = _Settings()
     second = _Scene("Second", editable=True, settings=second_settings)
     bpy.data.scenes.append(second)  # type: ignore[attr-defined]
@@ -983,7 +981,7 @@ def test_rejected_worker_controls_cannot_revive_scene_state(
     runtime_module: tuple[ModuleType, ModuleType],
 ) -> None:
     runtime, bpy = runtime_module
-    scene, settings = _local_scene(bpy)
+    settings = _local_scene(bpy)[1]
     controller = runtime.RuntimeController()
     controller.client.begin_shutdown = lambda *, timeout: None
     controller._reject_worker_contract("terminal contract failure")
@@ -1140,24 +1138,23 @@ def test_selected_wav_play_starts_streaming_inference(
         method: str,
         params: dict[str, object],
         **_kwargs: object,
-    ) -> str:
+    ) -> None:
         requests.append((method, params))
-        return "stream-start-request"
 
     controller._request = request
-    operation_id = controller.start_selected_audio(scene)
+    controller.start_selected_audio(scene)
 
-    assert operation_id is not None
+    assert controller.active_stream is not None
+    operation_id = controller.active_stream.operation_id
     assert requests[0][0] == "stream_start"
     assert set(requests[0][1]) == {"operation_id", "sample_rate", "settings"}
     assert requests[0][1]["operation_id"] == operation_id
     assert requests[0][1]["sample_rate"] == 16_000
     assert requests[0][1]["settings"] == _inference_settings_payload()
-    assert controller.active_stream is not None
     assert controller.active_stream.operation_id == operation_id
     assert controller.active_stream.wav_source is not None
     assert controller.active_stream.wav_source.audio_path == audio_path.resolve()
-    assert runtime._test_live_controller.prepare_calls[0][0][4] == ["Joy"]
+    assert runtime._test_live_controller.prepare_calls[0][0][4] == ("Joy",)
     assert settings.status == "STREAM_STARTING"
 
 
@@ -1208,19 +1205,51 @@ def test_selected_audio_seek_preserves_ui_and_cancels_only_the_stream(
         method: str,
         params: dict[str, object],
         **_kwargs: object,
-    ) -> str:
+    ) -> None:
         requests.append((method, params))
-        return "cancel-request"
 
     controller._request = request
 
-    controller.seek_selected_audio(scene, 1.25)
+    controller.seek_selected_audio(scene, 1.25, paused=True)
 
     assert runtime._test_live_controller.seek_stop_calls == [(1.25, True)]
     assert controller.selected_restart == (scene.name, 1.25, True)
     assert stream.stop_requested is True
     assert requests == [("cancel", {"operation_id": "stream-1"})]
     assert settings.status == "STREAM_ENDING"
+
+
+def test_selected_audio_seek_failure_does_not_leave_a_restart_armed(
+    runtime_module: tuple[ModuleType, ModuleType],
+    tmp_path: Path,
+) -> None:
+    runtime, bpy = runtime_module
+    scene, _settings = _local_scene(bpy)
+    controller = runtime.RuntimeController()
+    stream = _activate_stream(
+        runtime,
+        controller,
+        scene,
+        audio_path=tmp_path / "voice.wav",
+    )
+    requests: list[tuple[str, dict[str, object]]] = []
+    controller._request = lambda _scene, method, params, **_kwargs: requests.append(
+        (method, params)
+    )
+
+    def reject_seek(_position: float, *, paused: bool) -> None:
+        assert paused is True
+        raise runtime.LiveStreamError("audio device rejected seek")
+
+    runtime._test_live_controller.stop_for_seek = reject_seek
+
+    with pytest.raises(runtime.SidecarError, match="audio device rejected seek"):
+        controller.seek_selected_audio(scene, 1.25, paused=True)
+
+    assert requests == [("cancel", {"operation_id": "stream-1"})]
+    assert stream.stop_requested is True
+    assert controller.selected_restart is None
+    assert runtime._test_live_controller.stop_calls == []
 
 
 def test_selected_to_stream_detaches_wav_then_uses_queued_pcm(
@@ -1446,7 +1475,7 @@ def test_repeated_inference_edits_coalesce_into_the_pending_selected_restart(
     runtime_module: tuple[ModuleType, ModuleType],
 ) -> None:
     runtime, bpy = runtime_module
-    scene, settings = _local_scene(bpy)
+    scene = _local_scene(bpy)[0]
     controller = runtime.RuntimeController()
     _activate_stream(runtime, controller, scene, audio_path=Path("voice.wav"))
     controller.selected_restart = (scene.name, 1.0, False)
@@ -1558,14 +1587,15 @@ def test_stream_start_submits_the_same_complete_inference_settings(
         method: str,
         params: dict[str, object],
         **kwargs: object,
-    ) -> str:
+    ) -> None:
         requests.append((method, params, kwargs))
-        return "stream-start-request"
 
     controller._request = request
-    operation_id = controller._submit_stream_start(scene, audio_path=None)
+    controller._submit_stream_start(scene, audio_path=None)
 
     assert len(requests) == 1
+    assert controller.active_stream is not None
+    operation_id = controller.active_stream.operation_id
     method, params, kwargs = requests[0]
     assert method == "stream_start"
     assert params == {
@@ -1594,12 +1624,11 @@ def test_stream_audio_request_is_exact_base64_f32le(
     controller.client.request = request
     payload = struct.pack("<fff", -0.5, 0.0, 0.75)
 
-    request_id = controller._send_stream_audio(
+    controller._send_stream_audio(
         payload,
         operation_id="stream-1",
     )
 
-    assert request_id == "chunk-request"
     assert requests == [
         (
             "stream_chunk",
@@ -1610,7 +1639,7 @@ def test_stream_audio_request_is_exact_base64_f32le(
         )
     ]
     assert base64.b64decode(requests[0][1]["audio_f32le_base64"], validate=True) == payload
-    assert controller.pending[request_id] == _stream_pending(
+    assert controller.pending["chunk-request"] == _stream_pending(
         runtime, "stream_chunk", scene.name, "stream-1"
     )
 
@@ -1862,14 +1891,14 @@ def test_selected_wav_source_honors_worker_prebuffer_without_local_override(
     stream.wav_source.playback_started = playback_gate
     submitted: list[bytes] = []
     ended: list[str] = []
-    def send(payload: bytes, *, operation_id: str) -> str:
+
+    def send(payload: bytes, *, operation_id: str) -> None:
         stream.chunk_credit.clear()
         submitted.append(payload)
         stream.chunk_credit.set()
-        return "chunk"
 
     controller._send_stream_audio = send
-    controller._queue_stream_end = lambda operation_id: ended.append(operation_id) or "end"
+    controller._queue_stream_end = lambda operation_id: ended.append(operation_id)
     monkeypatch.setattr(runtime, "WavStreamSource", Source)
 
     controller._start_wav_stream_source(
@@ -1925,15 +1954,14 @@ def test_selected_wav_source_waits_for_each_worker_chunk_credit(
     second_sent = threading.Event()
     ended: list[str] = []
 
-    def send(payload: bytes, *, operation_id: str) -> str:
+    def send(payload: bytes, *, operation_id: str) -> None:
         assert operation_id == "stream-1"
         stream.chunk_credit.clear()
         submitted.append(payload)
         (first_sent if len(submitted) == 1 else second_sent).set()
-        return f"chunk-{len(submitted)}"
 
     controller._send_stream_audio = send
-    controller._queue_stream_end = lambda operation_id: ended.append(operation_id) or "end"
+    controller._queue_stream_end = lambda operation_id: ended.append(operation_id)
     monkeypatch.setattr(runtime, "WavStreamSource", Source)
 
     controller._start_wav_stream_source(
@@ -1991,14 +2019,14 @@ def test_cancel_interrupts_a_selected_wav_waiting_for_chunk_credit(
 
     sent = threading.Event()
     ended: list[str] = []
-    def send(_payload: bytes, *, operation_id: str) -> str:
+
+    def send(_payload: bytes, *, operation_id: str) -> None:
         assert operation_id == "stream-1"
         stream.chunk_credit.clear()
         sent.set()
-        return "chunk-1"
 
     controller._send_stream_audio = send
-    controller._queue_stream_end = lambda operation_id: ended.append(operation_id) or "end"
+    controller._queue_stream_end = lambda operation_id: ended.append(operation_id)
     monkeypatch.setattr(runtime, "WavStreamSource", Source)
 
     controller._start_wav_stream_source(

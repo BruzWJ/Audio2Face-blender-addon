@@ -1974,7 +1974,6 @@ def test_release_workflow_stamps_dated_manifest_and_publishes_by_id() -> None:
     assert "group: audio2face-release" in workflow
     assert "ref: ${{ github.sha }}" in workflow
     assert "fetch-depth: 0" in workflow
-    assert "fetch-tags: true" in workflow
     assert workflow.count("persist-credentials: false") == 3
     assert "DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}" in workflow
     assert "manual releases must use the repository default branch" in workflow

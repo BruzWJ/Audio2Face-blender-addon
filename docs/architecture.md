@@ -21,7 +21,7 @@ Blender 5.2 extension -- private audio2face/7 JSONL -- native worker
                                                    |
                          52 coefficients + effective emotion values
                                                    |
-               Blender main-thread Shape Keys + existing emotion sliders
+          Blender main-thread Shape Keys + read-only Mixed Emotion display
 ```
 
 Blender owns the package-local worker as a child process. The worker opens no
@@ -58,7 +58,7 @@ performs RNA and Shape Key updates on the main thread.
 
 ### Shape Key targets
 
-**Add Selected Objects** accepts Blender Mesh, legacy Curve, Surface, and
+**Add Selected Objects** accepts Blender Mesh, Curve, Surface, and
 Lattice objects without requiring existing Shape Keys. These are the exact
 object types on which Blender 5.2 supports Shape Keys; Text, Hair Curves, Point
 Cloud, Grease Pencil, and other object types are excluded. At delivery time,
@@ -148,9 +148,10 @@ paths. It returns a positive sample rate and one exact `model_schema`:
   object.
 
 Blender has no independent output-channel list, identity selector, model
-variant selector, graph-node controls, or tensor controls. It builds the emotion
-collection and target delivery from the loaded default model schema, and seeds
-all Audio2Face controls from the returned defaults.
+variant selector, graph-node controls, or tensor controls. It builds the saved
+Preferred Emotion and transient Mixed Emotion collections, plus target
+delivery, from the loaded default model schema, and seeds all Audio2Face
+controls from the returned defaults.
 
 Every `stream_start` installs one complete settings snapshot containing the
 exact 18-field `audio2face` object, `auto_audio2emotion`, every advertised
@@ -159,36 +160,35 @@ names, types, and ranges are defined by the
 [protocol](protocol.md#settings-document). `stream_settings` replaces that
 whole snapshot at an ordered boundary; partial setting updates do not exist.
 
-With `auto_audio2emotion` false, the manual values form a constant emotion
-driver. With it true, Audio2Emotion analyzes the same PCM and NVIDIA's
-post-processor applies strength, contrast, retained-emotion count, temporal
-blend, transition smoothing, and optional preferred-emotion mixing.
+The editable Preferred Emotion collection is the only authored emotion vector.
+With `auto_audio2emotion` false, its saved values populate `manual_emotions` and
+form a constant emotion driver. With it true, Audio2Emotion analyzes the same
+PCM and NVIDIA's post-processor applies strength, contrast, retained-emotion
+count, temporal blend, transition smoothing, and optional preferred-emotion
+mixing. When that mix is enabled, the same authored values populate
+`audio2emotion.preferred_emotion`.
 Emotion Strength is the post-processor's final uniform multiplier and ranges
 from `0.0` to `2.0`; values above `1.0` amplify the automatic result without
 changing Audio2Face Skin Strength. It does not equalize the model's learned
 response to different emotion channels.
-**Preferred Emotion > Load** copies the current manual values into a distinct
-snapshot; later manual edits do not mutate it. **Clear** restores `null`. Auto
-Audio2Emotion and the preferred snapshot are independent controls. Both
-Selected WAV and external PCM apply control edits to their current operation by
+
+Direct Preferred Emotion edits enable preferred mixing and immediately queue a
+complete settings replacement. **Load** copies the current read-only Mixed
+Emotion values into Preferred Emotion and enables preferred mixing. **Clear**
+disables the mix and zeros Preferred Emotion. Preferred Emotion persists with
+the scene; changing Auto Audio2Emotion does not overwrite it. Both Selected WAV
+and external PCM apply these control edits to their current operation by
 resetting the two executors and accumulators and replaying a bounded PCM
 context; audio transport is not restarted or discarded.
 
-The emotion sliders are user-owned while Auto Audio2Emotion is disabled. With
-Auto enabled, untouched channels display effective worker output. Editing a
-channel gives that channel temporary UI ownership so playback cannot overwrite
-the value before Load captures the visible preferred-emotion snapshot. Load,
-Clear, and toggling Auto release that temporary ownership; the other channels
-remain live throughout. The playback timer explicitly redraws the sidebar so
-timer-driven RNA values remain visibly synchronized with sampled frames.
-
 Each worker frame returns the effective emotion vector sampled by Audio2Face
 after that processing, aligned with its ARKit weights. Blender samples both
-vectors on the same presentation clock and writes the effective values into the
-existing emotion sliders. NVIDIA may return finite values outside the sliders'
-factor range; Blender clamps only that displayed presentation. Worker-driven
-slider updates do not queue another settings snapshot, and the distinct
-preferred-emotion snapshot is not changed.
+vectors on the same presentation clock and writes the effective values only to
+the read-only, transient Mixed Emotion collection. NVIDIA may return finite
+values outside the controls' factor range; Blender clamps only that displayed
+presentation. Mixed Emotion is not saved and never feeds an inference settings
+snapshot, so worker output cannot mutate Preferred Emotion or recursively queue
+another `stream_settings` request.
 
 ## Runtime and model ownership
 

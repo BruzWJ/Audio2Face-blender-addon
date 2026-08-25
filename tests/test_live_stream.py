@@ -18,16 +18,21 @@ AppliedFrame = tuple[tuple[str, ...], tuple[float, ...]]
 class _Settings:
     stream_time: float = 7.0
     prediction_delay: float = 0.0
-    auto_audio2emotion: bool = True
     playback_state: str = "IDLE"
     status: str = "MODEL_READY"
     status_message: str = ""
     custom_properties: dict[str, object] = field(default_factory=dict)
     custom_property_ui: dict[str, dict[str, object]] = field(default_factory=dict)
-    manual_emotions: tuple[SimpleNamespace, ...] = field(
+    preferred_emotions: tuple[SimpleNamespace, ...] = field(
         default_factory=lambda: (
-            SimpleNamespace(name="Neutral", value=0.0, user_edited=False),
-            SimpleNamespace(name="Joy", value=0.0, user_edited=False),
+            SimpleNamespace(name="Neutral", value=0.1),
+            SimpleNamespace(name="Joy", value=0.9),
+        )
+    )
+    mixed_emotions: tuple[SimpleNamespace, ...] = field(
+        default_factory=lambda: (
+            SimpleNamespace(name="Neutral", value=0.0),
+            SimpleNamespace(name="Joy", value=0.0),
         )
     )
 
@@ -76,15 +81,6 @@ def live_module(
 
     applied: list[AppliedFrame] = []
     shape_keys = ModuleType("audio2face.shape_keys")
-    shape_keys.ShapeKeyStreamError = ValueError  # type: ignore[attr-defined]
-    def validate_output_channels(channels: object) -> tuple[str, ...]:
-        if type(channels) is not list:
-            raise ValueError("channels must be a JSON array")
-        if len(channels) != 52:
-            raise ValueError("channels must contain exactly 52 names")
-        return tuple(channels)
-
-    shape_keys.validate_output_channels = validate_output_channels  # type: ignore[attr-defined]
     shape_keys.resolve_target_objects = lambda _settings: (object(),)  # type: ignore[attr-defined]
 
     def apply_shape_key_frame(
@@ -101,19 +97,16 @@ def live_module(
 
     properties = ModuleType("audio2face.properties")
 
-    def apply_effective_emotions(
+    def apply_mixed_emotions(
         settings: _Settings,
         channels: tuple[str, ...],
         values: tuple[float, ...],
     ) -> None:
-        assert channels == tuple(item.name for item in settings.manual_emotions)
-        if not settings.auto_audio2emotion:
-            return
-        for item, value in zip(settings.manual_emotions, values):
-            if not item.user_edited:
-                item.value = min(max(value, 0.0), 1.0)
+        assert channels == tuple(item.name for item in settings.mixed_emotions)
+        for item, value in zip(settings.mixed_emotions, values):
+            item.value = min(max(value, 0.0), 1.0)
 
-    properties.apply_effective_emotions = apply_effective_emotions  # type: ignore[attr-defined]
+    properties.apply_mixed_emotions = apply_mixed_emotions  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, properties.__name__, properties)
 
     module_name = "audio2face._live_stream_test"
@@ -131,8 +124,8 @@ def _prepare_external(controller: object, scene: _Scene, channels: list[str]) ->
         scene,
         "stream-1",
         16_000,
-        channels.copy(),
-        MODEL_EMOTION_CHANNELS.copy(),
+        tuple(channels),
+        tuple(MODEL_EMOTION_CHANNELS),
         audio_path=None,
         playback_started=None,
         playback_stopped=None,
@@ -168,33 +161,14 @@ def test_prepare_allows_targets_to_be_added_after_stream_start(
         scene,
         "stream-1",
         16_000,
-        MODEL_CHANNELS.copy(),
-        MODEL_EMOTION_CHANNELS.copy(),
+        tuple(MODEL_CHANNELS),
+        tuple(MODEL_EMOTION_CHANNELS),
         audio_path=None,
         playback_started=None,
         playback_stopped=None,
     )
 
     assert controller.active is True
-
-
-def test_prepare_translates_invalid_channel_contract(
-    live_module: tuple[ModuleType, _Scene, list[AppliedFrame]],
-) -> None:
-    live, scene, _applied = live_module
-
-    with pytest.raises(live.LiveStreamError, match="exactly 52 names"):
-        live.LiveStreamController().prepare(
-            scene,
-            "stream-1",
-            16_000,
-            MODEL_CHANNELS[:-1],
-            MODEL_EMOTION_CHANNELS.copy(),
-            audio_path=None,
-            playback_started=None,
-            playback_stopped=None,
-        )
-
 
 def test_source_free_stream_interpolates_bursted_frames_on_a_monotonic_clock(
     live_module: tuple[ModuleType, _Scene, list[AppliedFrame]],
@@ -219,7 +193,7 @@ def test_source_free_stream_interpolates_bursted_frames_on_a_monotonic_clock(
 
     assert applied[-1][0] == tuple(MODEL_CHANNELS)
     assert applied[-1][1][jaw] == pytest.approx(0.5)
-    assert [item.value for item in scene.audio2face.manual_emotions] == pytest.approx(
+    assert [item.value for item in scene.audio2face.mixed_emotions] == pytest.approx(
         [0.5, 0.5]
     )
     assert scene.audio2face.stream_time == pytest.approx(0.05)
@@ -270,7 +244,7 @@ def test_live_frames_resolve_the_current_object_targets(
     ]
 
 
-def test_selected_audio_preserves_authored_emotion_channels_and_current_targets(
+def test_selected_audio_updates_mixed_emotions_without_mutating_preferred(
     live_module: tuple[ModuleType, _Scene, list[AppliedFrame]],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -297,8 +271,8 @@ def test_selected_audio_preserves_authored_emotion_channels_and_current_targets(
         scene,
         "stream-1",
         16_000,
-        MODEL_CHANNELS.copy(),
-        MODEL_EMOTION_CHANNELS.copy(),
+        tuple(MODEL_CHANNELS),
+        tuple(MODEL_EMOTION_CHANNELS),
         audio_path=audio_path,
         playback_started=None,
         playback_stopped=None,
@@ -314,24 +288,23 @@ def test_selected_audio_preserves_authored_emotion_channels_and_current_targets(
         [0.25] * len(MODEL_CHANNELS),
         MODEL_EMOTIONS.copy(),
     )
-    assert [item.value for item in scene.audio2face.manual_emotions] == [0.0, 0.0]
+    assert [item.value for item in scene.audio2face.mixed_emotions] == [0.0, 0.0]
 
-    scene.audio2face.manual_emotions[1].value = 0.65
-    scene.audio2face.manual_emotions[1].user_edited = True
     controller.tick()
-    assert [item.value for item in scene.audio2face.manual_emotions] == [0.75, 0.65]
+    assert [item.value for item in scene.audio2face.mixed_emotions] == pytest.approx(
+        MODEL_EMOTIONS
+    )
     current_targets[0] = (second_target,)
     controller.tick()
 
     assert delivered_targets == [(first_target,), (second_target,)]
-    assert [item.value for item in scene.audio2face.manual_emotions] == [0.75, 0.65]
+    assert [item.value for item in scene.audio2face.preferred_emotions] == [0.1, 0.9]
 
-    scene.audio2face.manual_emotions[1].user_edited = False
     scene.audio2face.playback_state = "PLAYING"
     controller.tick()
 
     assert delivered_targets == [(first_target,), (second_target,), (second_target,)]
-    assert [item.value for item in scene.audio2face.manual_emotions] == pytest.approx(
+    assert [item.value for item in scene.audio2face.mixed_emotions] == pytest.approx(
         MODEL_EMOTIONS
     )
 
@@ -427,7 +400,7 @@ def test_live_stream_rejects_invalid_emotion_width_or_value(
     assert applied == []
 
 
-def test_live_stream_accepts_finite_unbounded_emotions_and_clamps_the_ui(
+def test_live_stream_accepts_finite_unbounded_emotions(
     live_module: tuple[ModuleType, _Scene, list[AppliedFrame]],
 ) -> None:
     live, scene, applied = live_module
@@ -438,26 +411,13 @@ def test_live_stream_accepts_finite_unbounded_emotions_and_clamps_the_ui(
     controller.receive("stream-1", 0, weights, [-0.5, 1.5])
 
     assert applied == [(tuple(MODEL_CHANNELS), tuple(weights))]
-    assert [item.value for item in scene.audio2face.manual_emotions] == [0.0, 1.0]
 
 
-def test_live_stream_rejects_tuple_aliases_at_json_array_boundaries(
+def test_live_stream_rejects_tuples_at_worker_frame_json_array_boundaries(
     live_module: tuple[ModuleType, _Scene, list[AppliedFrame]],
 ) -> None:
     live, scene, _applied = live_module
     controller = live.LiveStreamController()
-
-    with pytest.raises(live.LiveStreamError, match="channels must be a JSON array"):
-        controller.prepare(
-            scene,
-            "stream-1",
-            16_000,
-            tuple(MODEL_CHANNELS),
-            MODEL_EMOTION_CHANNELS.copy(),
-            audio_path=None,
-            playback_started=None,
-            playback_stopped=None,
-        )
 
     _prepare_external(controller, scene, MODEL_CHANNELS)
     with pytest.raises(live.LiveStreamError, match="weights must be a JSON array"):
@@ -496,8 +456,8 @@ def test_terminal_event_cleans_external_stream_and_holds_final_values(
         scene,
         "stream-1",
         16_000,
-        MODEL_CHANNELS.copy(),
-        MODEL_EMOTION_CHANNELS.copy(),
+        tuple(MODEL_CHANNELS),
+        tuple(MODEL_EMOTION_CHANNELS),
         audio_path=None,
         playback_started=None,
         playback_stopped=lambda natural: stopped.append(
@@ -529,8 +489,8 @@ def test_selected_audio_waits_for_worker_terminal_after_device_stops(
         scene,
         "stream-1",
         16_000,
-        MODEL_CHANNELS.copy(),
-        MODEL_EMOTION_CHANNELS.copy(),
+        tuple(MODEL_CHANNELS),
+        tuple(MODEL_EMOTION_CHANNELS),
         audio_path=audio_path,
         playback_started=None,
         playback_stopped=stopped.append,
@@ -577,8 +537,8 @@ def test_boolean_handle_status_does_not_overwrite_paused_state(
         scene,
         "stream-1",
         16_000,
-        MODEL_CHANNELS.copy(),
-        MODEL_EMOTION_CHANNELS.copy(),
+        tuple(MODEL_CHANNELS),
+        tuple(MODEL_EMOTION_CHANNELS),
         audio_path=audio_path,
         playback_started=None,
         playback_stopped=None,
@@ -610,8 +570,8 @@ def test_position_slider_coalesces_edits_without_snapping_back(
         scene,
         "stream-1",
         16_000,
-        MODEL_CHANNELS.copy(),
-        MODEL_EMOTION_CHANNELS.copy(),
+        tuple(MODEL_CHANNELS),
+        tuple(MODEL_EMOTION_CHANNELS),
         audio_path=audio_path,
         playback_started=None,
         playback_seeked=lambda position, paused: seeks.append((position, paused)),
@@ -653,8 +613,8 @@ def test_seek_stop_preserves_requested_playback_presentation(
         scene,
         "stream-1",
         16_000,
-        MODEL_CHANNELS.copy(),
-        MODEL_EMOTION_CHANNELS.copy(),
+        tuple(MODEL_CHANNELS),
+        tuple(MODEL_EMOTION_CHANNELS),
         audio_path=audio_path,
         playback_started=None,
         playback_stopped=None,
@@ -698,8 +658,8 @@ def test_selected_audio_seek_endpoint_resolves_to_final_model_sample(
         scene,
         "stream-1",
         16_000,
-        MODEL_CHANNELS.copy(),
-        MODEL_EMOTION_CHANNELS.copy(),
+        tuple(MODEL_CHANNELS),
+        tuple(MODEL_EMOTION_CHANNELS),
         audio_path=audio_path,
         playback_started=None,
         playback_seeked=lambda position, paused: seeks.append((position, paused)),
