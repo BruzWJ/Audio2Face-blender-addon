@@ -212,50 +212,38 @@ an independent output or emotion name list. The worker uses the Audio2Face
 model's default identity at SDK index `0` internally; Blender has no identity
 selector or identity state.
 
-`stream_start` installs one exact initial settings snapshot containing the fixed
-18-field `audio2face` object and one strict `emotion_driver` tagged union. The
-driver is either manual, with one complete authored vector, or automatic, with
-the Audio2Emotion controls and an optional loaded Preferred snapshot. Blender
-presents exactly two model-defined emotion collections: saved, editable
-**Preferred Emotion** and transient, read-only **Mixed Emotion**. The automatic
-driver defaults are:
+`stream_start` installs the fixed 18-field `audio2face` object and one
+compositional `emotion_driver`. Its generated and loaded-Preferred sources are
+independent; an absent source contributes zero. Blender presents saved,
+editable **Preferred Emotion** and transient, read-only **Mixed Emotion**.
 
 ```json
 {
-  "mode": "automatic",
   "emotion_strength": 0.6,
-  "emotion_contrast": 1.0,
-  "max_emotions": 6,
-  "live_blend_coef": 0.7,
-  "transition_smoothing": 0.5,
+  "generated": {
+    "emotion_contrast": 1.0,
+    "max_emotions": 6,
+    "live_blend_coef": 0.7,
+    "transition_smoothing": 0.5
+  },
   "preferred": null
 }
 ```
 
-With automatic emotion off, Preferred Emotion is the direct, constant manual
-driver. With it on, Audio2Emotion generates timestamped values and applies
-strength, contrast, retained-emotion count, temporal blend, and transition
-controls through NVIDIA's SDK post-processor.
-
 Preferred and Mixed never synchronize. Editing Preferred while it is not loaded
-changes only its saved editor state and cannot affect automatic inference.
-The single **Load/Clear** button explicitly includes or removes Preferred from
-the automatic mix; it never copies Mixed into Preferred, and Clear preserves
-the authored values. The Preferred collection is saved with the Blender scene.
-For preferred-mix weight `p` the SDK
-computes `p * preferred + (1 - p) * generated`, then applies the overall
-emotion strength. **Emotion Strength** ranges from `0.0` to `2.0`; values above
-`1.0` amplify this automatic-emotion result without changing **Skin Strength**.
+changes only its saved editor state. **Load/Clear** includes or removes that
+source without copying either collection. For generated values `G`, loaded
+Preferred `P`, mix weight `p`, and strength `e`, the worker applies
+`e * (pP + (1-p)G)`; absent sources are zero. **Emotion Strength** ranges from
+`0.0` to `2.0` without changing **Skin Strength**.
 Individual emotion values and the preferred-mix weight remain in `[0.0, 1.0]`.
 Equal emotion values are learned model-conditioning weights, not equal visual
 deformation amplitudes, so different emotions can remain perceptually uneven.
 
-Each returned frame contains the effective, post-processed values sampled by
-Audio2Face, aligned with its ARKit weights. Blender writes them only to the
-read-only Mixed Emotion display without clamping the finite worker values.
-Mixed Emotion is transient, is not saved with the scene, and does not feed
-inference during frame delivery. A new model, stream, or inference replay
-resets every displayed channel to zero before fresh worker frames arrive.
+Audio2Face's emotion callback is the sole Mixed Emotion source. Each frame
+carries the exact effective tensor used with its ARKit weights; Blender never
+derives it from Preferred. Mixed is transient, unsaved, unclamped, and reset to
+zero before a new stream or replay supplies fresh worker frames.
 
 The same complete settings contract applies to Selected WAV and Stream. A
 control edit queues one complete replacement snapshot on the active operation.

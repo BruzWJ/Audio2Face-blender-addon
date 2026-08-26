@@ -406,7 +406,6 @@ def main() -> None:
             label="preserved input strength",
         )
         settings.auto_audio2emotion = True
-        settings.a2e_preferred_emotion_strength = 0.35
         controller = runtime.get_controller()
         original_refresh = controller.refresh_inference_settings
         refresh = Mock()
@@ -435,22 +434,10 @@ def main() -> None:
         ):
             for item, expected in zip(collection, expected_values):
                 _assert_close(item.value, expected, label=item.name)
-        automatic_payload = inference_settings(settings)["emotion_driver"]
-        assert automatic_payload["mode"] == "automatic"
-        preferred_payload = automatic_payload["preferred"]
-        for name, expected in (("Neutral", 0.6), ("Joy", 0.5)):
-            _assert_close(preferred_payload["values"][name], expected, label=name)
-        _assert_close(preferred_payload["strength"], 0.35, label="preferred strength")
         assert bpy.ops.a2f.toggle_preferred_emotion() == {"FINISHED"}
         assert settings.preferred_emotion_active is False
         for item, expected in zip(settings.preferred_emotions, (0.6, 0.5)):
             _assert_close(item.value, expected, label=item.name)
-        assert inference_settings(settings)["emotion_driver"]["preferred"] is None
-        settings.auto_audio2emotion = False
-        manual_driver = inference_settings(settings)["emotion_driver"]
-        assert manual_driver["mode"] == "manual"
-        for name, expected in (("Neutral", 0.6), ("Joy", 0.5)):
-            _assert_close(manual_driver["values"][name], expected, label=name)
         extra_target = _make_shape_key_target(
             scene,
             object_name="A2FSmokeExtraTarget",

@@ -39,12 +39,11 @@ def _inference_settings_payload() -> dict[str, object]:
     return {
         "audio2face": AUDIO2FACE_DEFAULTS.copy(),
         "emotion_driver": {
-            "mode": "automatic",
             "emotion_strength": 0.6,
-            "emotion_contrast": 1.0,
-            "max_emotions": 6,
-            "live_blend_coef": 0.7,
-            "transition_smoothing": 0.5,
+            "generated": {
+                "emotion_contrast": 1.0, "max_emotions": 6,
+                "live_blend_coef": 0.7, "transition_smoothing": 0.5,
+            },
             "preferred": {
                 "values": {"Joy": 0.75},
                 "strength": 0.35,

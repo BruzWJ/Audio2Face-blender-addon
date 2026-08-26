@@ -1,4 +1,4 @@
-# Worker protocol `audio2face/8`
+# Worker protocol `audio2face/9`
 
 ## Transport and envelopes
 
@@ -15,28 +15,28 @@ rejected.
 A request contains exactly:
 
 ```json
-{"protocol":"audio2face/8","type":"request","id":"1","method":"hello","params":{}}
+{"protocol":"audio2face/9","type":"request","id":"1","method":"hello","params":{}}
 ```
 
 `id` is a non-empty string of at most 128 characters. A successful response
 repeats it and contains an object `result`:
 
 ```json
-{"protocol":"audio2face/8","type":"response","id":"1","result":{}}
+{"protocol":"audio2face/9","type":"response","id":"1","result":{}}
 ```
 
 A request error contains exact `code`, `message`, and `details` fields. `id` is
 included only when it could be recovered safely:
 
 ```json
-{"protocol":"audio2face/8","type":"error","id":"1","error":{"code":"invalid_params","message":"invalid request","details":{}}}
+{"protocol":"audio2face/9","type":"error","id":"1","error":{"code":"invalid_params","message":"invalid request","details":{}}}
 ```
 
 An asynchronous event contains exact `event`, `operation_id`, and object `data`
 fields in addition to `protocol` and `type`:
 
 ```json
-{"protocol":"audio2face/8","type":"event","event":"stream_ended","operation_id":"stream-1","data":{}}
+{"protocol":"audio2face/9","type":"event","event":"stream_ended","operation_id":"stream-1","data":{}}
 ```
 
 The only request methods are `hello`, `load_model`, `stream_start`,
@@ -55,7 +55,7 @@ methods.
 Parameters are exactly `{}`. The result is exactly:
 
 ```json
-{"worker_profile":"nvidia-a2f3-a2e3-gpu-arkit52/8","worker_version":"0.1.0"}
+{"worker_profile":"nvidia-a2f3-a2e3-gpu-arkit52/9","worker_version":"0.1.0"}
 ```
 
 Blender requires that exact profile and a non-empty worker version. `hello`
@@ -117,10 +117,9 @@ Every `stream_start` request includes a `settings` object with exactly:
     "eye_saccade_seed": 0
   },
   "emotion_driver": {
-    "mode": "manual",
-    "values": {
-      "<every model_schema emotion name>": 0.0
-    }
+    "emotion_strength": 0.6,
+    "generated": null,
+    "preferred": null
   }
 }
 ```
@@ -137,44 +136,37 @@ Every `stream_start` request includes a `settings` object with exactly:
 - the four `*_eye_rot_*_offset` fields: `[-10.0, 10.0]`; and
 - `eye_saccade_seed`: JSON integer in `[0, 4999]`.
 
-`emotion_driver` is a strict tagged union. The manual variant shown above has
-exactly `mode` and `values`; `values` contains every advertised emotion name
-exactly once, contains no other key, and holds finite values in `[0.0, 1.0]`.
-The automatic variant is:
+`emotion_driver` has exactly `emotion_strength`, `generated`, and `preferred`.
+`emotion_strength` is a finite float in `[0.0, 2.0]`. The generated source is
+`null` or exactly:
 
 ```json
 {
-  "mode": "automatic",
-  "emotion_strength": 0.6,
   "emotion_contrast": 1.0,
   "max_emotions": 6,
   "live_blend_coef": 0.7,
-  "transition_smoothing": 0.5,
-  "preferred": null
+  "transition_smoothing": 0.5
 }
 ```
 
-Its controls are:
+Its fields are:
 
-- `emotion_strength`: finite float in `[0.0, 2.0]`;
 - `emotion_contrast`: finite float in `[0.1, 3.0]`;
 - `max_emotions`: integer from `1` through the classifier's emotion count;
 - `live_blend_coef`: finite float in `[0.0, 1.0]`;
-- `transition_smoothing`: finite seconds in `[0.1, 1.0]`;
-- `preferred`: `null` or exactly
-  `{"values": {"<every emotion>": 0.0}, "strength": 0.5}`, where the values
-  form one complete emotion snapshot and strength is finite in `[0.0, 1.0]`.
+- `transition_smoothing`: finite seconds in `[0.1, 1.0]`.
 
-The manual and automatic shapes are mutually exclusive; partial documents,
-fields from the other variant, and unknown keys are rejected. Manual values
-are the direct constant emotion driver. In automatic mode, Audio2Emotion
-analyzes the same stream and NVIDIA's post-processor applies the automatic
-controls. A non-null preferred snapshot is
-mixed as `p * preferred + (1 - p) * generated`, followed by overall emotion
-strength. Values above `1.0` amplify that automatic-emotion result without
-changing any Audio2Face skin-strength setting. `stream_start` installs the
-initial complete snapshot and `stream_settings` replaces it at one ordered
-replay boundary. Partial setting updates do not exist.
+The Preferred source is `null` or exactly
+`{"values":{"<every emotion>":0.0},"strength":0.5}`. `values` contains every
+advertised emotion name exactly once with finite values in `[0.0, 1.0]`, and
+`strength` is finite in `[0.0, 1.0]`.
+
+Generated `G` is zero when its source is absent. With Preferred `P` and mix
+weight `p`, the mixer is `pP + (1-p)G`; without Preferred it is `G`. Global
+strength multiplies that result. Thus both absent produces zero, while
+Preferred without generated produces the constant `emotion_strength * pP`.
+Partial documents and unknown keys are rejected. `stream_start` installs the
+complete snapshot and `stream_settings` replaces it at one replay boundary.
 
 Preferred input and mixed output are deliberately one-way. The worker never
 accepts generated or mixed emotion values as settings, and a returned mixed
@@ -216,7 +208,7 @@ for inference, and before publishing any frame unlocked by it, the worker emits
 one capacity credit:
 
 ```json
-{"protocol":"audio2face/8","type":"event","event":"stream_credit","operation_id":"stream-1","data":{}}
+{"protocol":"audio2face/9","type":"event","event":"stream_credit","operation_id":"stream-1","data":{}}
 ```
 
 A serial producer waits for that credit before submitting the next chunk, so
@@ -226,7 +218,7 @@ a credit for its final queued chunk. A frame event has exact data fields
 
 ```json
 {
-  "protocol": "audio2face/8",
+  "protocol": "audio2face/9",
   "type": "event",
   "event": "stream_frame",
   "operation_id": "stream-1",
@@ -251,7 +243,7 @@ every `stream_reset`. Events do not repeat channel names.
 ## `stream_settings`
 
 Parameters contain exactly `operation_id` and `settings`. The `settings` value
-is one complete object with the exact two top-level fields and tagged shape
+is one complete object with the exact two top-level fields and compositional shape
 defined under **Settings document**; partial objects and unknown keys remain
 invalid.
 
@@ -267,13 +259,13 @@ one model-rate second. At the ordered boundary it resets the Audio2Face
 executor, Audio2Emotion executor, audio accumulator, and emotion accumulator;
 applies the complete new snapshot; and replays that retained PCM. This is the
 required reset-before-set lifecycle for the SDK's Audio2Face input, skin, and
-eye parameters. Changing the tagged emotion-driver mode therefore also starts
-from reset emotion state.
+eye parameters. Changing either emotion source therefore also starts from
+reset emotion state.
 
 Before any replayed frame, the worker emits exactly:
 
 ```json
-{"protocol":"audio2face/8","type":"event","event":"stream_reset","operation_id":"stream-1","data":{}}
+{"protocol":"audio2face/9","type":"event","event":"stream_reset","operation_id":"stream-1","data":{}}
 ```
 
 `stream_reset {}` means Blender must discard its entire buffered weight and
@@ -293,7 +285,7 @@ closes input, drains padded tail frames, waits for scheduled GPU work, and then
 emits:
 
 ```json
-{"protocol":"audio2face/8","type":"event","event":"stream_ended","operation_id":"stream-1","data":{}}
+{"protocol":"audio2face/9","type":"event","event":"stream_ended","operation_id":"stream-1","data":{}}
 ```
 
 Every final `stream_frame` precedes `stream_ended`. Both models remain loaded,
@@ -323,7 +315,7 @@ An asynchronous inference failure uses an `error` event with exact `code` and
 `message` data:
 
 ```json
-{"protocol":"audio2face/8","type":"event","event":"error","operation_id":"stream-1","data":{"code":"inference_failed","message":"operation failed"}}
+{"protocol":"audio2face/9","type":"event","event":"error","operation_id":"stream-1","data":{"code":"inference_failed","message":"operation failed"}}
 ```
 
 Request validation failures use the request error envelope. Worker error codes

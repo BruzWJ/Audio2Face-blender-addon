@@ -38,7 +38,7 @@ def test_windows_native_transport_uses_binary_stdio() -> None:
 
 
 def test_native_worker_mirrors_the_python_wire_identity() -> None:
-    assert WORKER_PROFILE.rpartition("/")[2] == "8"
+    assert WORKER_PROFILE.rpartition("/")[2] == "9"
     assert f'constexpr const char* kProtocol = "{PROTOCOL_VERSION}";' in (
         WORKER_PROTOCOL_SOURCE
     )
@@ -72,12 +72,12 @@ def test_request_round_trip_is_compact_utf8_and_one_record() -> None:
     "line",
     [
         "{}\n",
-        '{"protocol":"audio2face/8","type":"response","id":"1","result":{}}',
+        '{"protocol":"audio2face/9","type":"response","id":"1","result":{}}',
         '{"protocol":"audio2face/999","type":"response","id":"1","result":{}}\n',
-        '{"protocol":"audio2face/8","type":"response","id":"1","result":{}}\n{}\n',
-        '{"protocol":"audio2face/8","type":"response","id":"1","result":{}}\n\n',
+        '{"protocol":"audio2face/9","type":"response","id":"1","result":{}}\n{}\n',
+        '{"protocol":"audio2face/9","type":"response","id":"1","result":{}}\n\n',
         b"\xff\n",
-        '{"protocol":"audio2face/8","type":"response","id":"1","id":"2","result":{}}\n',
+        '{"protocol":"audio2face/9","type":"response","id":"1","id":"2","result":{}}\n',
     ],
 )
 def test_decode_rejects_malformed_noncanonical_records(line: str | bytes) -> None:
@@ -260,8 +260,9 @@ def test_encode_rejects_non_json_numbers(bad_value: float) -> None:
         {
             "settings": {
                 "emotion_driver": {
-                    "mode": "automatic",
                     "emotion_strength": bad_value,
+                    "generated": None,
+                    "preferred": None,
                 },
             }
         },
@@ -307,7 +308,7 @@ def test_protocol_normalizes_non_utf8_text_errors() -> None:
         encode_message(message)
 
     line = (
-        '{"protocol":"audio2face/8","type":"response","id":"1",'
+        '{"protocol":"audio2face/9","type":"response","id":"1",'
         '"result":{"value":"\ud800"}}\n'
     )
     with pytest.raises(ProtocolError, match="UTF-8"):

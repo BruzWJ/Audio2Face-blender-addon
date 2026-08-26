@@ -155,8 +155,8 @@ external model root or its generated engine.
 ## Runtime contract
 
 The process is silent until `hello {}` and communicates only through strict
-`audio2face/8` UTF-8 JSON Lines on stdin/stdout. It reports worker profile
-`nvidia-a2f3-a2e3-gpu-arkit52/8`.
+`audio2face/9` UTF-8 JSON Lines on stdin/stdout. It reports worker profile
+`nvidia-a2f3-a2e3-gpu-arkit52/9`.
 
 One non-interactive diffusion/device-blendshape executor and one Audio2Emotion
 executor serve both input modes on CUDA device 0. The worker reports the

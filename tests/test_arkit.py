@@ -222,25 +222,29 @@ def test_callbacks_follow_the_sdk_result_stream_contract() -> None:
     assert "results.cudaStream !=" not in SOURCE
 
 
-def test_worker_configures_the_sdk_from_one_optional_preferred_snapshot() -> None:
+def test_worker_uses_one_compositional_emotion_driver() -> None:
     assert re.search(
-        r"using EmotionDriver\s*=\s*"
-        r"std::variant<ManualEmotionDriver, AutomaticEmotionDriver>;",
-        SOURCE,
-    )
-    reset_inference = re.search(
-        r"  void reset_inference\(.*?(?=\n  void begin_operation\()",
+        r"struct EmotionDriver\s*\{\s*float emotion_strength.*?"
+        r"optional<GeneratedEmotionSettings> generated.*?"
+        r"optional<PreferredEmotionSettings> preferred.*?\};",
         SOURCE,
         flags=re.DOTALL,
     )
-    assert reset_inference is not None
-    reset_source = reset_inference.group(0)
+    assert "#include <variant>" not in SOURCE
+    assert not re.search(r"(?:Manual|Automatic)EmotionDriver", SOURCE)
+
+    reset_source = SOURCE[SOURCE.index("  void reset_inference(") :]
+    reset_source = reset_source[: reset_source.index("  void begin_operation(")]
     assert reset_source.index("emotion_executor_->Reset(0)") < reset_source.index(
-        "configure_automatic_emotion(*automatic);"
+        "configure_generated_emotion(emotion_driver_);"
     )
+    assert "if (emotion_driver_.generated)" in reset_source
+    assert "emotion_input(emotion_channels_.size(), 0.0F)" in reset_source
+    assert "emotion_driver_.emotion_strength * preferred.strength" in reset_source
+    assert "[scale](float value) { return scale * value; }" in reset_source
 
     configure = re.search(
-        r"  void configure_automatic_emotion\(.*?"
+        r"  void configure_generated_emotion\(.*?"
         r"(?=\n  std::vector<float> parse_emotion_snapshot\()",
         SOURCE,
         flags=re.DOTALL,
@@ -249,6 +253,7 @@ def test_worker_configures_the_sdk_from_one_optional_preferred_snapshot() -> Non
     configure_source = configure.group(0)
     for expression in (
         "nva2e::GetExecutorPostProcessParameters",
+        "settings.generated.value()",
         "parameters.emotionStrength",
         "parameters.emotionContrast",
         "parameters.maxEmotions",
@@ -265,17 +270,17 @@ def test_worker_configures_the_sdk_from_one_optional_preferred_snapshot() -> Non
         assert expression in configure_source
 
     assert '{"audio2face", "emotion_driver"}' in SOURCE
-    assert '{"mode", "values"}' in SOURCE
+    assert '{"emotion_strength", "generated", "preferred"}' in SOURCE
+    assert '{"emotion_contrast", "max_emotions", "live_blend_coef",' in SOURCE
     assert '{"values", "strength"}' in SOURCE
     assert re.search(
         r'"emotion_strength", "settings\.emotion_driver\.",\s*0\.0F, 2\.0F\)',
         SOURCE,
     )
-    assert 'if (mode == "manual")' in SOURCE
-    assert 'if (mode == "automatic")' in SOURCE
+    assert "if (!generated.is_null())" in SOURCE
     assert "if (!preferred.is_null())" in SOURCE
+    assert "settings.emotion_driver.generated." in SOURCE
     assert "settings.emotion_driver.preferred.values" in SOURCE
-    assert "parse_emotion_snapshot(" in SOURCE
     assert "value.size() != emotion_channels_.size()" in SOURCE
     assert "amount < 0.0F || amount > 1.0F" in SOURCE
 

@@ -136,33 +136,6 @@ def main() -> None:
     ].is_skip_save
     assert set(properties.A2FPreferredEmotionItem.__annotations__) == {"name", "value"}
     assert set(properties.A2FMixedEmotionItem.__annotations__) == {"name", "value"}
-    settings = bpy.context.scene.audio2face
-    properties.apply_model_schema(
-        settings,
-        {
-            "channels": [f"modelChannel{index}" for index in range(52)],
-            "emotion_channels": [],
-            "audio2face_defaults": AUDIO2FACE_DEFAULTS.copy(),
-        },
-        ("/models/audio2face/model.json", "/models/audio2emotion/model.json"),
-    )
-    settings.input_strength = 2.0
-    settings.blink_strength = 1.5
-    settings.eye_saccade_seed = 41
-    tuned_audio2face = AUDIO2FACE_DEFAULTS.copy()
-    tuned_audio2face.update(
-        input_strength=2.0,
-        blink_strength=1.5,
-        eye_saccade_seed=41,
-    )
-    assert properties.inference_settings(settings) == {
-        "audio2face": tuned_audio2face,
-        "emotion_driver": {
-            "mode": "manual",
-            "values": {},
-        },
-    }
-
     bundle = runtime.resolve_runtime_bundle()
     package_directory = Path(package.__file__).resolve().parent
     assert bundle.root == package_directory / "runtime"

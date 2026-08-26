@@ -151,7 +151,7 @@ def _preferred_emotion_updated(
     if scene is None:
         return
     settings = scene.audio2face
-    if settings.auto_audio2emotion and not settings.preferred_emotion_active:
+    if not settings.preferred_emotion_active:
         return
     _refresh_inference(scene)
 
@@ -691,38 +691,37 @@ def toggle_preferred_emotion(settings: A2FSceneSettings) -> None:
 
 
 def inference_settings(settings: A2FSceneSettings) -> dict[str, object]:
-    """Return the exact Audio2Face and emotion-driver settings for one stream."""
+    """Freeze the independent generated and preferred emotion drivers."""
 
     preferred_emotions = _emotion_values(
         settings.preferred_emotions,
         label="preferred emotion",
     )
-    if settings.auto_audio2emotion:
-        if settings.preferred_emotion_active and not preferred_emotions:
-            raise ValueError(
-                "active preferred emotion requires the loaded model channels"
-            )
-        emotion_driver: dict[str, object] = {
-            "mode": "automatic",
-            "emotion_strength": settings.a2e_emotion_strength,
-            "emotion_contrast": settings.a2e_emotion_contrast,
-            "max_emotions": settings.a2e_max_emotions,
-            "live_blend_coef": settings.a2e_live_blend_coef,
-            "transition_smoothing": settings.a2e_transition_smoothing,
-            "preferred": (
-                {
-                    "values": preferred_emotions,
-                    "strength": settings.a2e_preferred_emotion_strength,
-                }
-                if settings.preferred_emotion_active
-                else None
-            ),
-        }
-    else:
-        emotion_driver = {
-            "mode": "manual",
-            "values": preferred_emotions,
-        }
+    if settings.preferred_emotion_active and not preferred_emotions:
+        raise ValueError(
+            "active preferred emotion requires the loaded model channels"
+        )
+    emotion_driver: dict[str, object] = {
+        "emotion_strength": settings.a2e_emotion_strength,
+        "generated": (
+            {
+                "emotion_contrast": settings.a2e_emotion_contrast,
+                "max_emotions": settings.a2e_max_emotions,
+                "live_blend_coef": settings.a2e_live_blend_coef,
+                "transition_smoothing": settings.a2e_transition_smoothing,
+            }
+            if settings.auto_audio2emotion
+            else None
+        ),
+        "preferred": (
+            {
+                "values": preferred_emotions,
+                "strength": settings.a2e_preferred_emotion_strength,
+            }
+            if settings.preferred_emotion_active
+            else None
+        ),
+    }
     return {
         "audio2face": _validated_audio2face_values(
             {
