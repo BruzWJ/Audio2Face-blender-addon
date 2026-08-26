@@ -82,16 +82,26 @@ def _draw_model_tuning(
     layout: bpy.types.UILayout,
     settings: A2FSceneSettings,
 ) -> None:
-    tuning_box = layout.box()
-    tuning_box.label(text="Model Tuning", icon="MODIFIER")
-    tuning_box.use_property_split = True
-    tuning_box.use_property_decorate = False
+    tuning_header, tuning_body = layout.panel(
+        "audio2face_model_tuning",
+        default_closed=True,
+    )
+    tuning_header.label(text="Model Tuning", icon="MODIFIER")
+    tuning_header.operator(
+        "a2f.reset_model_tuning",
+        text="Reset",
+        icon="FILE_REFRESH",
+    )
+    if tuning_body is None:
+        return
+    tuning_body.use_property_split = True
+    tuning_body.use_property_decorate = False
 
     for index, (label, fields) in enumerate(AUDIO2FACE_SETTING_GROUPS):
         if index:
-            tuning_box.separator()
-        tuning_box.label(text=label)
-        controls = tuning_box.column(align=True)
+            tuning_body.separator()
+        tuning_body.label(text=label)
+        controls = tuning_body.column(align=True)
         for name, slider in fields:
             controls.prop(settings, name, slider=slider)
 
@@ -238,20 +248,11 @@ class A2F_PT_main(bpy.types.Panel):
 
         _draw_model_tuning(layout, settings)
 
-        emotion_box = layout.box()
-        emotion_box.label(text="Emotion", icon="DRIVER")
-        emotion_controls = emotion_box.column(align=True)
-        emotion_controls.prop(settings, "auto_audio2emotion")
-        emotion_controls.prop(settings, "a2e_emotion_strength", slider=True)
-        emotion_controls.prop(settings, "a2e_max_emotions", slider=True)
-        emotion_controls.prop(settings, "a2e_emotion_contrast", slider=True)
-        emotion_controls.prop(settings, "a2e_live_blend_coef", slider=True)
-        emotion_controls.prop(settings, "a2e_transition_smoothing", slider=True)
         preferred_header, preferred_body = layout.panel(
             "audio2face_preferred_emotion",
             default_closed=True,
         )
-        preferred_header.label(text="Preferred Emotion", icon="DRIVER")
+        preferred_header.label(text="Preferred Emotion", icon="BOOKMARKS")
         preferred_header.operator(
             "a2f.toggle_preferred_emotion",
             text="Clear" if settings.preferred_emotion_active else "Load",
@@ -277,16 +278,35 @@ class A2F_PT_main(bpy.types.Panel):
                     icon="INFO",
                 )
 
-        mixed_box = layout.box()
-        mixed_box.label(text="Mixed Emotion", icon="DRIVER")
-        mixed_controls = mixed_box.column(align=True)
-        mixed_controls.enabled = False
-        for emotion in settings.mixed_emotions:
-            mixed_controls.prop(
-                emotion,
-                "value",
-                text=emotion.name,
-                slider=True,
-            )
+        emotion_header, emotion_body = layout.panel(
+            "audio2face_emotion_tuning",
+            default_closed=True,
+        )
+        emotion_header.label(text="Emotion Tuning", icon="PREFERENCES")
+        emotion_header.operator(
+            "a2f.reset_emotion_settings",
+            text="Reset",
+            icon="FILE_REFRESH",
+        )
+        if emotion_body is not None:
+            emotion_controls = emotion_body.column(align=True)
+            emotion_controls.prop(settings, "auto_audio2emotion")
+            emotion_controls.prop(settings, "a2e_emotion_strength", slider=True)
+            emotion_controls.prop(settings, "a2e_max_emotions", slider=True)
+            emotion_controls.prop(settings, "a2e_emotion_contrast", slider=True)
+            emotion_controls.prop(settings, "a2e_live_blend_coef", slider=True)
+            emotion_controls.prop(settings, "a2e_transition_smoothing", slider=True)
+
+            mixed_box = emotion_body.box()
+            mixed_box.label(text="Mixed Emotion", icon="DRIVER")
+            mixed_controls = mixed_box.column(align=True)
+            mixed_controls.enabled = False
+            for emotion in settings.mixed_emotions:
+                mixed_controls.prop(
+                    emotion,
+                    "value",
+                    text=emotion.name,
+                    slider=True,
+                )
 
 CLASSES = (A2F_UL_target_objects, A2F_PT_main)

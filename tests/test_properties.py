@@ -132,7 +132,7 @@ def _schema() -> dict[str, object]:
     }
 
 
-def test_emotion_configuration_uses_preferred_and_mixed_views() -> None:
+def test_emotion_configuration_uses_parallel_collapsible_sections() -> None:
     for name in (
         "a2e_emotion_strength",
         "a2e_emotion_contrast",
@@ -145,9 +145,25 @@ def test_emotion_configuration_uses_preferred_and_mixed_views() -> None:
             UI_SOURCE,
         )
     assert re.search(
+        r'emotion_header, emotion_body = layout\.panel\(\s*'
+        r'"audio2face_emotion_tuning",\s*default_closed=True,?\s*\)',
+        UI_SOURCE,
+    )
+    assert re.search(
         r'preferred_header, preferred_body = layout\.panel\(\s*'
         r'"audio2face_preferred_emotion",\s*default_closed=True,?\s*\)',
         UI_SOURCE,
+    )
+    assert UI_SOURCE.index("audio2face_preferred_emotion") < UI_SOURCE.index(
+        "audio2face_emotion_tuning"
+    )
+    assert (
+        'preferred_header.label(text="Preferred Emotion", icon="BOOKMARKS")'
+        in UI_SOURCE
+    )
+    assert (
+        'emotion_header.label(text="Emotion Tuning", icon="PREFERENCES")'
+        in UI_SOURCE
     )
     assert re.search(
         r'preferred_body\.prop\(\s*settings,\s*'
@@ -156,7 +172,9 @@ def test_emotion_configuration_uses_preferred_and_mixed_views() -> None:
     )
     assert "for emotion in settings.preferred_emotions:" in UI_SOURCE
     assert "for emotion in settings.mixed_emotions:" in UI_SOURCE
+    assert "mixed_box = emotion_body.box()" in UI_SOURCE
     assert "mixed_controls.enabled = False" in UI_SOURCE
+    assert UI_SOURCE.count('"a2f.reset_emotion_settings"') == 1
     assert UI_SOURCE.count('"a2f.toggle_preferred_emotion"') == 1
     assert (
         'text="Clear" if settings.preferred_emotion_active else "Load"'
@@ -207,6 +225,12 @@ def test_prediction_delay_uses_a_range_slider() -> None:
 def test_model_tuning_ui_exposes_only_the_fixed_audio2face_contract() -> None:
     assert 'text="Model Tuning"' in UI_SOURCE
     assert "AUDIO2FACE_SETTING_GROUPS" in UI_SOURCE
+    assert re.search(
+        r'tuning_header, tuning_body = layout\.panel\(\s*'
+        r'"audio2face_model_tuning",\s*default_closed=True,?\s*\)',
+        UI_SOURCE,
+    )
+    assert UI_SOURCE.count('"a2f.reset_model_tuning"') == 1
     assert "emotion_controls.enabled" not in UI_SOURCE
 
 
@@ -431,6 +455,20 @@ def test_prediction_delay_does_not_reset_inference(
         "prediction_delay"
     ]
     assert "update" not in annotation
+
+
+def test_reset_helpers_only_unset_their_owned_rna_properties(
+    properties_module: ModuleType,
+) -> None:
+    unset: list[str] = []
+    settings = SimpleNamespace(property_unset=unset.append)
+
+    properties_module.reset_model_tuning(settings)
+    assert unset == list(properties_module.AUDIO2FACE_SETTING_FIELDS)
+    unset.clear()
+    properties_module.reset_emotion_settings(settings)
+    assert unset == list(properties_module.EMOTION_SETTING_FIELDS)
+    assert "a2e_preferred_emotion_strength" not in unset
 
 
 def test_schema_materializes_preferred_defaults_and_empty_mixed_output(

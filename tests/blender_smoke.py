@@ -16,7 +16,7 @@ import tempfile
 import wave
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, call
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -153,7 +153,11 @@ def main() -> None:
         clear_playback_position(settings)
 
         stale_layout = Mock()
-        stale_layout.panel.return_value = (Mock(), None)
+        stale_layout.panel.side_effect = (
+            (stale_layout, stale_layout),
+            (stale_layout, stale_layout),
+            (stale_layout, stale_layout),
+        )
         panel_context = SimpleNamespace(
             scene=scene,
             region=SimpleNamespace(width=320),
@@ -162,16 +166,22 @@ def main() -> None:
             ),
         )
         A2F_PT_main.draw(SimpleNamespace(layout=stale_layout), panel_context)
-        stale_layout.panel.assert_called_once_with(
-            "audio2face_preferred_emotion",
-            default_closed=True,
-        )
+        assert stale_layout.panel.call_args_list == [
+            call("audio2face_model_tuning", default_closed=True),
+            call("audio2face_preferred_emotion", default_closed=True),
+            call("audio2face_emotion_tuning", default_closed=True),
+        ]
         stale_labels = {
             call.kwargs.get("text")
             for call in stale_layout.mock_calls
             if call[0].endswith(".label")
         }
-        assert {"Inputs", "Model Tuning", "Emotion"} <= stale_labels
+        assert {
+            "Inputs",
+            "Model Tuning",
+            "Preferred Emotion",
+            "Emotion Tuning",
+        } <= stale_labels
         visible_properties = {
             call.args[1]
             for call in stale_layout.mock_calls

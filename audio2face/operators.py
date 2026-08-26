@@ -13,7 +13,11 @@ from .live_stream import (
     playback_position,
     playback_position_maximum,
 )
-from .properties import toggle_preferred_emotion
+from .properties import (
+    reset_emotion_settings,
+    reset_model_tuning,
+    toggle_preferred_emotion,
+)
 from .runtime import RuntimeController, get_controller
 from .shape_keys import supports_shape_keys
 from .sidecar import Lifecycle, SidecarError
@@ -108,6 +112,28 @@ class A2F_OT_toggle_preferred_emotion(bpy.types.Operator):
         except ValueError as exc:
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
+        get_controller().refresh_inference_settings(context.scene)
+        return {"FINISHED"}
+
+
+class A2F_OT_reset_model_tuning(bpy.types.Operator):
+    bl_idname = "a2f.reset_model_tuning"
+    bl_label = "Reset Model Tuning"
+    bl_description = "Reset all Model Tuning controls to their default values"
+
+    def execute(self, context: bpy.types.Context) -> set[str]:
+        reset_model_tuning(context.scene.audio2face)
+        get_controller().refresh_inference_settings(context.scene)
+        return {"FINISHED"}
+
+
+class A2F_OT_reset_emotion_settings(bpy.types.Operator):
+    bl_idname = "a2f.reset_emotion_settings"
+    bl_label = "Reset Emotion Tuning"
+    bl_description = "Reset Emotion Tuning controls to their default values"
+
+    def execute(self, context: bpy.types.Context) -> set[str]:
+        reset_emotion_settings(context.scene.audio2face)
         get_controller().refresh_inference_settings(context.scene)
         return {"FINISHED"}
 
@@ -252,6 +278,8 @@ CLASSES = (
     A2F_OT_start_worker,
     A2F_OT_stop_worker,
     A2F_OT_toggle_preferred_emotion,
+    A2F_OT_reset_model_tuning,
+    A2F_OT_reset_emotion_settings,
     A2F_OT_add_selected_targets,
     A2F_OT_remove_target,
     A2F_OT_play_pause,

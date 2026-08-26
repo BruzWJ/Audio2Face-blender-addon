@@ -52,6 +52,8 @@ def main() -> None:
     operator_names = set(dir(bpy.ops.a2f))
     assert {
         "play_pause",
+        "reset_emotion_settings",
+        "reset_model_tuning",
         "toggle_preferred_emotion",
     } <= operator_names
     runtime.get_controller().poll()

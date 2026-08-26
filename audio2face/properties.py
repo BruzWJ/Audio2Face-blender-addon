@@ -80,6 +80,14 @@ AUDIO2FACE_SETTING_FIELDS = tuple(
     for _group, fields in AUDIO2FACE_SETTING_GROUPS
     for name, _slider in fields
 )
+EMOTION_SETTING_FIELDS = (
+    "auto_audio2emotion",
+    "a2e_emotion_strength",
+    "a2e_max_emotions",
+    "a2e_emotion_contrast",
+    "a2e_live_blend_coef",
+    "a2e_transition_smoothing",
+)
 
 _AUDIO2FACE_FLOAT_RANGES = {
     "input_strength": (0.0, 3.0),
@@ -674,6 +682,20 @@ def reset_mixed_emotions(settings: A2FSceneSettings) -> None:
 
     for item in settings.mixed_emotions:
         item.value = 0.0
+
+
+def reset_model_tuning(settings: A2FSceneSettings) -> None:
+    """Restore Model Tuning controls to their RNA defaults."""
+
+    for name in AUDIO2FACE_SETTING_FIELDS:
+        settings.property_unset(name)
+
+
+def reset_emotion_settings(settings: A2FSceneSettings) -> None:
+    """Restore generated-emotion controls without changing other sources."""
+
+    for name in EMOTION_SETTING_FIELDS:
+        settings.property_unset(name)
 
 
 def toggle_preferred_emotion(settings: A2FSceneSettings) -> None:
