@@ -586,7 +586,7 @@ def test_inference_settings_composes_emotion_drivers(
         lambda settings: settings.preferred_emotions.reverse(),
     ),
 )
-def test_exact_schema_signature_never_masks_corrupt_saved_collections(
+def test_exact_schema_repairs_invalid_saved_preferred_collection(
     properties_module: ModuleType,
     corrupt: Callable[[SimpleNamespace], object],
 ) -> None:
@@ -595,11 +595,13 @@ def test_exact_schema_signature_never_masks_corrupt_saved_collections(
     properties_module.toggle_preferred_emotion(settings)
     corrupt(settings)
 
-    with pytest.raises(
-        ValueError,
-        match="saved preferred emotion does not match the exact loaded model schema",
-    ):
-        properties_module.apply_model_schema(settings, _schema(), MODEL_SIGNATURE)
+    properties_module.apply_model_schema(settings, _schema(), MODEL_SIGNATURE)
+
+    assert [(item.name, item.value) for item in settings.preferred_emotions] == [
+        ("Neutral", 0.5),
+        ("Joy", 0.2),
+    ]
+    assert settings.preferred_emotion_active is False
 
 
 def test_same_schema_rebuilds_transient_mixed_emotions(

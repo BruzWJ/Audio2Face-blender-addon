@@ -754,27 +754,20 @@ def apply_model_schema(
     )
     signature = _schema_signature(model_signature, model_schema)
 
-    same_schema = settings.model_schema_signature == signature
     ordered_emotion_names = tuple(name for name, _default in emotions)
     default_emotions = {name: default for name, default in emotions}
     empty_mixed_emotions = dict.fromkeys(ordered_emotion_names, 0.0)
-    if same_schema:
-        authored_preferred = _emotion_values(
-            settings.preferred_emotions,
-            label="preferred emotion",
-        )
-        if tuple(authored_preferred) != ordered_emotion_names:
-            raise ValueError(
-                "saved preferred emotion does not match the exact loaded model schema"
-            )
-        _replace_emotion_values(settings.mixed_emotions, empty_mixed_emotions)
-
-    else:
+    same_schema = settings.model_schema_signature == signature
+    preserve_preferred = same_schema and tuple(
+        item.name for item in settings.preferred_emotions
+    ) == ordered_emotion_names
+    if not same_schema:
         for name, default in audio2face_defaults.items():
             setattr(settings, name, default)
+    if not preserve_preferred:
         settings.preferred_emotion_active = False
         _replace_emotion_values(settings.preferred_emotions, default_emotions)
-        _replace_emotion_values(settings.mixed_emotions, empty_mixed_emotions)
+    _replace_emotion_values(settings.mixed_emotions, empty_mixed_emotions)
 
     settings.model_schema_signature = signature
 
