@@ -25,8 +25,9 @@ automatically with WAV playback or incoming PCM.
 The user does not install a CUDA Toolkit, TensorRT, Docker, or a separate
 service. The extension ZIP carries the required Audio2X and CUDA/TensorRT
 user-mode libraries beside the worker; only the compatible NVIDIA display
-driver remains on the host. The installed add-on does not access the network.
-Its model-source buttons open NVIDIA model pages in the user's browser.
+driver remains on the host. The installed add-on does not access the network;
+Blender's extension manager handles release checks and downloads. The add-on's
+model-source buttons open NVIDIA model pages in the user's browser.
 
 There are exactly two release packages: one complete Windows x64 extension ZIP
 with PE executables and their DLLs together in `runtime/bin`, and one complete
@@ -34,20 +35,24 @@ Linux x64 extension ZIP with ELF executables in `runtime/bin` and shared
 objects in `runtime/lib`. These native formats are not interchangeable. This
 CUDA backend requires NVIDIA hardware and has no macOS or ARM build.
 
-## Installation
+## Installation and updates
 
-Install the downloaded platform ZIP into a **local** Blender extension
-repository. In **Preferences > Get Extensions**, open the Repositories menu.
-If **User Default** is missing, choose **Add Local Repository** and name it
-`User Default`; do not give it a remote URL. Then choose **Install from Disk**,
-expand **Extensions** in the file browser, set **Repository** to
-**User Default**, and select the ZIP.
+In Blender 5.2, open **Preferences > Get Extensions**, open the Repositories
+menu, and choose **Add Remote Repository**. Name it `Audio2Face` and use:
 
-Do not install a downloaded ZIP into `extensions.blender.org`. That repository
-is the catalog of packages published by Blender, and Audio2Face is not in its
-index. Blender labels any locally installed package missing from that remote
-index as **Orphan**. If Audio2Face already has that label, uninstall that copy
-and repeat the installation into **User Default**.
+```text
+https://github.com/BruzWJ/Audio2Face-blender-addon/releases/latest/download/index.json
+```
+
+Enable **Check for Updates on Startup**, refresh the repository, and install
+Audio2Face. Blender selects the package for the current operating system and
+offers newer releases through its normal extension update controls.
+
+If Audio2Face was previously installed from disk into **User Default**, first
+uninstall that copy, then install it from the remote repository above. Do not
+keep both copies because they share the extension ID `audio2face`. Uninstalling
+does not remove the external model folders or their generated `network.trt`
+files, although their paths may need to be selected again.
 
 ## Model setup
 
@@ -86,11 +91,11 @@ both roots must be writable. Preferences provide cancellation, progress,
 readable failure summaries, and access to the complete TensorRT logs. The 3D
 View sidebar only reports readiness and directs model setup to Preferences.
 
-The runtime is not installed, updated, or repaired after the extension is
-installed. A missing, damaged, or wrong-platform runtime means the extension
-package is invalid and must be replaced with the correct platform ZIP. The
-add-on never searches the host for another worker, CUDA Toolkit, TensorRT,
-Audio2Face installation, or executable.
+The runtime is replaced only as part of a complete Blender extension update; it
+is never installed or repaired separately. A missing, damaged, or
+wrong-platform runtime means the extension package is invalid and must be
+reinstalled. The add-on never searches the host for another worker, CUDA
+Toolkit, TensorRT, Audio2Face installation, or executable.
 
 Release workers must be built in clean Windows and Linux CI from pinned NVIDIA
 sources and binary archives, never from a developer workstation's installed
@@ -110,9 +115,8 @@ driver caches.
 
 ## Workflow
 
-1. Install the extension ZIP for the current platform into the local **User
-   Default** repository, enable Audio2Face, then select and optimize both models
-   in Add-on Preferences.
+1. Install and enable Audio2Face from its remote repository, then select and
+   optimize both models in Add-on Preferences.
 2. In the Audio2Face sidebar, choose **Selected WAV** or **Stream**. The
    **Playback** controls appear immediately below this mode selector.
 3. In Selected WAV mode, choose a WAV. In Stream mode, a Blender integration

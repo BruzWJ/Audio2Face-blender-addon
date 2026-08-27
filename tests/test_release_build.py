@@ -1974,7 +1974,7 @@ def test_release_workflow_stamps_dated_manifest_and_publishes_by_id() -> None:
     assert "group: audio2face-release" in workflow
     assert "ref: ${{ github.sha }}" in workflow
     assert "fetch-depth: 0" in workflow
-    assert workflow.count("persist-credentials: false") == 3
+    assert workflow.count("persist-credentials: false") == 4
     assert "DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}" in workflow
     assert "manual releases must use the repository default branch" in workflow
     assert workflow.count('"--add", "Microsoft.VisualStudio.Workload.VCTools"') == 1
@@ -2037,8 +2037,13 @@ def test_release_workflow_stamps_dated_manifest_and_publishes_by_id() -> None:
     assert "release_id: ${{ steps.release.outputs.release_id }}" in workflow
     assert workflow.count("RELEASE_ID: ${{ needs.prepare.outputs.release_id }}") == 3
     assert 'asset.get("digest") != identity["digest"]' in workflow
-    assert workflow.count("ref: ${{ needs.prepare.outputs.source_sha }}") == 2
-    assert workflow.count("https://uploads.github.com/repos/") == 2
+    assert workflow.count("ref: ${{ needs.prepare.outputs.source_sha }}") == 3
+    assert "INDEX_ASSET: index.json" in workflow
+    assert "python tools/build_repository_index.py" in workflow
+    assert "steps.repository_index.outputs.sha256" in workflow
+    assert "steps.repository_index.outputs.size" in workflow
+    assert 'os.environ["INDEX_ASSET"]' in workflow
+    assert workflow.count("https://uploads.github.com/repos/") == 3
     assert '--upload-file "$asset"' in workflow
     assert '--method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID"' in workflow
     assert "--raw-field make_latest=true" in workflow

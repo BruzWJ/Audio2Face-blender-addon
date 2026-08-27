@@ -1020,6 +1020,7 @@ jobs:
       contents: write
     env:
       GH_TOKEN: ${{ github.token }}
+      INDEX_ASSET: index.json
       LINUX_ASSET: ${{ needs.prepare.outputs.linux_asset }}
       LINUX_SHA256: ${{ needs.build_linux.outputs.asset_sha256 }}
       LINUX_SIZE: ${{ needs.build_linux.outputs.asset_size }}
@@ -1030,8 +1031,92 @@ jobs:
       WINDOWS_SHA256: ${{ needs.build_windows.outputs.asset_sha256 }}
       WINDOWS_SIZE: ${{ needs.build_windows.outputs.asset_size }}
     steps:
+      - name: Check out frozen release source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+          ref: ${{ needs.prepare.outputs.source_sha }}
+
+      - name: Build and upload Blender repository index
+        id: repository_index
+        shell: bash
+        run: |
+          set -euo pipefail
+          index="$RUNNER_TEMP/$INDEX_ASSET"
+          python tools/build_repository_index.py \
+            --manifest audio2face/blender_manifest.toml \
+            --repository "$GITHUB_REPOSITORY" \
+            --release-tag "$RELEASE_TAG" \
+            --windows-name "$WINDOWS_ASSET" \
+            --windows-size "$WINDOWS_SIZE" \
+            --windows-sha256 "$WINDOWS_SHA256" \
+            --linux-name "$LINUX_ASSET" \
+            --linux-size "$LINUX_SIZE" \
+            --linux-sha256 "$LINUX_SHA256" \
+            --output "$index"
+
+          release="$(
+            gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+              --jq '[.id, .tag_name, .target_commitish, .draft, .prerelease] | @tsv'
+          )"
+          IFS=$'\t' read -r current_id current_tag current_target draft prerelease <<< "$release"
+          if [[ "$current_id" != "$RELEASE_ID" || "$current_tag" != "$RELEASE_TAG" ||
+                "$current_target" != "$SOURCE_SHA" || "$draft" != "true" ||
+                "$prerelease" != "false" ]]; then
+            echo "Prepared draft identity changed before repository index upload." >&2
+            exit 1
+          fi
+
+          existing_id="$(
+            gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?per_page=100" \
+              --jq 'map(select(.name == "index.json")) |
+                if length > 1 then error("duplicate index.json assets")
+                elif length == 1 then .[0].id else "" end'
+          )"
+          if [[ -n "$existing_id" ]]; then
+            gh api --method DELETE \
+              "repos/$GITHUB_REPOSITORY/releases/assets/$existing_id" > /dev/null
+          fi
+
+          size="$(stat --format=%s "$index")"
+          sha256="$(sha256sum "$index" | cut --delimiter=' ' --fields=1)"
+          uploaded="$RUNNER_TEMP/uploaded-index.json"
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            --header "Content-Type: application/json" \
+            --upload-file "$index" \
+            "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?name=$INDEX_ASSET" \
+            > "$uploaded"
+          UPLOADED_JSON="$uploaded" EXPECTED_SIZE="$size" EXPECTED_SHA256="$sha256" \
+            python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          uploaded = json.loads(
+              Path(os.environ["UPLOADED_JSON"]).read_text(encoding="utf-8")
+          )
+          expected = {
+              "name": os.environ["INDEX_ASSET"],
+              "state": "uploaded",
+              "size": int(os.environ["EXPECTED_SIZE"]),
+              "digest": f"sha256:{os.environ['EXPECTED_SHA256']}",
+          }
+          actual = {key: uploaded.get(key) for key in expected}
+          if actual != expected:
+              raise SystemExit(f"GitHub returned an unexpected index asset: {actual!r}")
+          PY
+          printf 'sha256=%s\n' "$sha256" >> "$GITHUB_OUTPUT"
+          printf 'size=%s\n' "$size" >> "$GITHUB_OUTPUT"
+
       - name: Verify exact draft assets
         shell: bash
+        env:
+          INDEX_SHA256: ${{ steps.repository_index.outputs.sha256 }}
+          INDEX_SIZE: ${{ steps.repository_index.outputs.size }}
         run: |
           set -euo pipefail
           gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" > "$RUNNER_TEMP/release.json"
@@ -1060,6 +1145,10 @@ jobs:
           if not isinstance(assets, list):
               raise SystemExit("release assets are not an array")
           expected = {
+              os.environ["INDEX_ASSET"]: {
+                  "size": int(os.environ["INDEX_SIZE"]),
+                  "digest": f"sha256:{os.environ['INDEX_SHA256']}",
+              },
               os.environ["WINDOWS_ASSET"]: {
                   "size": int(os.environ["WINDOWS_SIZE"]),
                   "digest": f"sha256:{os.environ['WINDOWS_SHA256']}",

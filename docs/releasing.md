@@ -15,6 +15,7 @@ generated manifest version, tag, and assets are:
 v2026.8.21
 audio2face-2026.8.21-windows-x64.zip
 audio2face-2026.8.21-linux-x64.zip
+index.json
 ```
 
 Calendar components are deliberately not zero-padded. Blender requires the
@@ -22,6 +23,8 @@ manifest `version` to follow semantic versioning, whose numeric identifiers
 cannot contain leading zeroes. The Git tag is exactly the stamped manifest
 version with a `v` prefix. One published release is allowed per UTC date; a new
 manual dispatch can reuse that date's identity and draft after a failed run.
+Blender reads the current release index through the stable URL
+`https://github.com/BruzWJ/Audio2Face-blender-addon/releases/latest/download/index.json`.
 
 The latest published release tag must resolve to an ancestor of the selected
 commit, and the range from that tag to the selected commit must contain at least
@@ -41,12 +44,12 @@ must either equal the newly verified source or be an ancestor; in the latter
 case, the workflow regenerates the release notes and atomically retargets the
 draft. An existing dated tag must already identify the verified source. Every
 draft upload uses the immutable release ID. The workflow refuses an
-already-published release or an unrelated pending draft. The final job publishes
-only after the draft contains
-exactly the two expected assets with the SHA-256 digests and byte sizes reported
-by their native build jobs. It then creates the dated Git tag at the frozen
-manifest commit, publishes the draft, and explicitly marks the release as
-**Latest**.
+already-published release or an unrelated pending draft. The final job builds
+the small Blender repository `index.json` from the two verified package
+identities and publishes only after the draft contains those two packages plus
+that index with their exact SHA-256 digests and byte sizes. It then creates the
+dated Git tag at the frozen manifest commit, publishes the draft, and explicitly
+marks the release as **Latest**.
 
 ## Standard GitHub-hosted runners
 
@@ -122,10 +125,10 @@ files are deliberately not part of the extension package.
    verify their pinned SHA-256 digests, discard the downloaded archives after
    extraction, run Blender smoke tests, package the platform extensions,
    enforce GitHub's per-asset size limit, and upload directly to the draft by ID.
-7. The final job requires exactly the Windows and Linux asset names, sizes, and
-   SHA-256 digests, atomically creates the lightweight date tag or verifies an
-   exact existing one, publishes the draft, verifies the tag again, and confirms
-   that the release is marked **Latest**.
+7. The final job creates and uploads `index.json`, requires exactly that index
+   and the verified Windows and Linux packages, atomically creates the
+   lightweight date tag or verifies an exact existing one, publishes the draft,
+   verifies the tag again, and confirms that the release is marked **Latest**.
 
 If a native build fails, fix and merge the source, then start a new manual
 workflow run. Do not use **Re-run failed jobs** for a workflow fix: GitHub reruns
