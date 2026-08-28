@@ -10,9 +10,9 @@ obtained separately.
 
 The extension produces 52-channel ARKit coefficients from a selected WAV or
 incremental mono float32 PCM and drives existing Shape Key `value` properties
-on listed Mesh, Curve, Surface, and Lattice objects. Selected WAV inference is
-an explicit Blender-frame bake into native Shape Key Actions; external PCM
-remains a clocked live stream.
+on listed Mesh, Curve, Surface, and Lattice objects. Selected WAV playback
+drives Shape Keys transiently through the live stream protocol, while a
+separate Blender-frame bake writes native Shape Key Actions.
 
 ## Requirements
 
@@ -127,25 +127,28 @@ driver caches.
    Objects**. Selected WAV baking requires at least one target with a matching
    model channel; targets remain optional for a live Stream.
 5. Click **Start Worker**. Blender launches the verified package-local worker,
-   negotiates the protocol, and loads both selected models.
+   negotiates the protocol, loads both selected models, and keeps their
+   interactive Audio2Face and Audio2Emotion executors ready for use.
 6. Configure the saved, animatable **Preferred Emotion** sliders. Any nonzero
    value enables that source; set every value to zero to clear it. **Mixed
-   Emotion** is read-only live Stream output.
-7. In Selected WAV mode, click **Bake Shape Key Animation**. Blender uploads
-   the WAV asynchronously, evaluates inference at every integer scene frame,
-   and assigns a native Action to each compatible Shape Key datablock. Then use
-   **Play/Pause** or Blender's timeline controls to preview the Sequencer sound
-   strip and baked Actions together.
+   Emotion** is read-only output from live Selected WAV playback or Stream
+   input.
+7. In Selected WAV mode, click **Play**. Blender starts its native timeline and
+   sound playback while the add-on lazily feeds the WAV through the live stream
+   protocol. Incoming frames update matching Shape Keys transiently. Click
+   **Bake Shape Key Animation** separately when those results should become
+   native Shape Key Actions.
 8. In Stream mode, the first `push_audio_f32le` call automatically starts the
    inference stream. `end_pcm_stream` marks normal end-of-input after all
    queued chunks. **Stop Worker** exits the child process and releases its
    models and CUDA resources.
 
 Installing or enabling the extension does not start the worker. Loading the
-models does not start continuous inference. GPU inference runs only during a
-Selected WAV bake or an external PCM stream. **Start Worker** and **Stop
-Worker** control the GPU/model process lifecycle; the bake command and PCM
-arrival control inference within that lifecycle.
+models creates and retains the interactive executors but does not continuously
+execute audio inference. GPU work is driven by Selected WAV playback, a
+Selected WAV bake, or an external PCM stream. **Start Worker** and **Stop
+Worker** control the GPU/model process lifecycle; each audio operation uses the
+already loaded executors within that lifecycle.
 
 ## Shape Key targets and channel delivery
 
@@ -158,9 +161,8 @@ Stream targets are resolved for every delivered frame, so edits to the list
 take effect without restarting inference. An empty list suppresses Blender
 writes without stopping the stream.
 
-A bake requires at least one matching Shape Key. It stops before inference if
-a compatible Key datablock has an artist-owned active Action, and a successful
-bake assigns a new add-on-owned Action without deleting earlier Actions.
+A bake requires at least one matching Shape Key. It writes into the active
+native Shape Key Action, or creates and assigns one when no Action exists.
 Objects sharing one Key datablock share one result; make the object data
 single-user when independent animation is required.
 
@@ -170,16 +172,22 @@ Choosing a **Selected WAV** creates or updates one add-on-owned sound strip in
 Blender's Video Sequencer at `scene.frame_start`. The add-on preserves unrelated
 strips and never shortens the scene range.
 
-The add-on's **Play/Pause** button calls Blender's native timeline playback and
-pause controls. Scrubbing, looping, audio output, and Action evaluation use
-Blender's normal timeline. Playback never starts inference and an existing
-bake plays without an active worker.
+**Play** calls Blender's native timeline playback and lazily decodes,
+downmixes, and resamples the selected WAV into model-rate PCM. The add-on sends
+that PCM through the existing `stream_start` / `stream_chunk` / `stream_end`
+protocol. Blender's native timeline and audio playback are the presentation
+clock, and incoming stream frames directly update matching Shape Key values as
+transient preview state without creating an Action. **Pause** only calls
+Blender's native playback pause control. A new preview begins at
+`scene.frame_start`; Play after Pause resumes that active preview.
 
 **Bake Shape Key Animation** is asynchronous and separate from playback. It
 evaluates the selected WAV and animated Audio2Face controls at each integer
-scene frame, then writes LINEAR Shape Key curves. **Prediction Delay** shifts
-the sampled audio position; positive values advance the face and negative
-values make it lag. Canceling a bake leaves artist-owned Actions untouched.
+scene frame, then writes LINEAR Shape Key curves into native Actions. Matching
+curve keys inside the baked frame span are replaced; other animation remains.
+**Prediction Delay** shifts the sampled audio position; positive values advance
+the face and negative values make it lag. Canceling before completion writes no
+Action curves.
 
 **Stream** accepts external model-rate mono f32le chunks. Call
 `get_pcm_stream_requirements(scene)` to obtain `(sample_rate, None)` before
@@ -196,20 +204,21 @@ port or network listener is opened.
 The loaded models define the channel list, emotion names, and Audio2Face
 defaults shown in Blender. **Preferred Emotion** values are saved and
 animatable; any nonzero channel enables that source and setting all channels to
-zero clears it. **Mixed Emotion** is transient, read-only live Stream output
-and never overwrites Preferred values.
+zero clears it. **Mixed Emotion** is transient, read-only output from Selected
+WAV playback and external Stream input, and never overwrites Preferred values.
 
 During a bake, keyframes and drivers on tuning and emotion controls affect the
-generated Shape Key curves. During a Stream, edits apply to subsequent audio
-without restarting the worker or replacing already presented frames. Exact
-settings fields and ranges are in the [protocol](docs/protocol.md#settings-document).
+generated Shape Key curves. During Selected WAV playback or an external Stream,
+edits apply to subsequent audio without restarting the worker or replacing
+already presented frames. Exact settings fields and ranges are in the
+[protocol](docs/protocol.md#settings-document).
 
 ## Output contract
 
 A bake returns 52 finite ARKit coefficients in model order for each requested
-Blender frame. Live Stream frames also return aligned effective emotion values.
-Only those scalars enter Blender; internal geometry, solver meshes, and
-transforms remain in the worker.
+Blender frame. Selected WAV playback and external Stream frames also return
+aligned effective emotion values. Only those scalars enter Blender; internal
+geometry, solver meshes, and transforms remain in the worker.
 
 See [architecture](docs/architecture.md), [protocol](docs/protocol.md), and the
 [worker build guide](worker/README.md) for the full contracts.

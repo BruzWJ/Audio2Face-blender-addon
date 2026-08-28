@@ -253,6 +253,11 @@ def test_selected_play_operator_calls_blender_native_timeline_transport() -> Non
     assert "bpy.ops.screen.animation_pause()" in OPERATORS_SOURCE
     assert "bpy.ops.screen.animation_play()" in OPERATORS_SOURCE
     assert "configure_selected_audio" in OPERATORS_SOURCE
+    assert "controller.start_selected_audio(" in OPERATORS_SOURCE
+    assert "controller.cancel_selected_audio(scene)" in OPERATORS_SOURCE
+    assert OPERATORS_SOURCE.index("controller.start_selected_audio(") < (
+        OPERATORS_SOURCE.index("bpy.ops.screen.animation_play()")
+    )
 
 
 def test_input_mode_switch_is_never_disabled() -> None:

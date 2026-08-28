@@ -328,6 +328,13 @@ def test_stream_uses_one_monotonic_interactive_timeline() -> None:
     interactive_source = interactive.group(0)
     assert "refill_interactive_audio(window);" in interactive_source
     assert "prepare_interactive_settings(interactive_stream_settings_" in interactive_source
+    assert (
+        interactive_source.index("refill_interactive_audio(window);")
+        < interactive_source.index(
+            "prepare_interactive_settings(interactive_stream_settings_"
+        )
+        < interactive_source.index("GetTotalNbFrames()")
+    )
     assert "compute_interactive_frame(index, canceled)" in interactive_source
     assert "timestamp <= *previous_timestamp_" in interactive_source
     assert "timestamp > safe_through" in interactive_source
@@ -363,6 +370,19 @@ def test_interactive_path_uses_supported_setters_and_closed_inputs() -> None:
 
 
 def test_bake_frame_computes_only_neighbor_frames_then_interpolates() -> None:
+    prepare = re.search(
+        r"  json bake_prepare\(.*?(?=\n  BakeFrame bake_frame\()",
+        SOURCE,
+        flags=re.DOTALL,
+    )
+    assert prepare is not None
+    prepare_source = prepare.group(0)
+    assert (
+        prepare_source.index("refill_interactive_audio(bake_audio_);")
+        < prepare_source.index("install_constant_interactive_emotions(")
+        < prepare_source.index("GetTotalNbFrames()")
+    )
+
     bake = re.search(
         r"  BakeFrame bake_frame\(.*?(?=\n  void bake_end\()",
         SOURCE,

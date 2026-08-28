@@ -113,6 +113,8 @@ class LiveStreamController:
         self._terminal = False
         self._stream_clock_started: float | None = None
         self._stream_clock_origin = 0
+        self._timeline_frame_start: int | None = None
+        self._timeline_frame_end: int | None = None
 
     @property
     def active(self) -> bool:
@@ -127,6 +129,8 @@ class LiveStreamController:
         emotion_channels: tuple[str, ...],
         *,
         presentation_stopped: Callable[[], None] | None,
+        timeline_frame_start: int | None = None,
+        timeline_frame_end: int | None = None,
     ) -> None:
         """Prepare one stream while resolving its target objects at delivery time."""
 
@@ -138,6 +142,8 @@ class LiveStreamController:
         self._channels = channels
         self._emotion_channels = emotion_channels
         self._presentation_stopped = presentation_stopped
+        self._timeline_frame_start = timeline_frame_start
+        self._timeline_frame_end = timeline_frame_end
 
     def receive(
         self,
@@ -166,25 +172,9 @@ class LiveStreamController:
         scene = bpy.data.scenes.get(self._scene_name)
         if scene is None or not scene.is_editable:
             raise LiveStreamError("stream scene is no longer editable")
-        settings = scene.audio2face
-        sample_position: float | None = None
-        delay = float(settings.prediction_delay)
-        if not math.isfinite(delay):
-            raise LiveStreamError("prediction delay must be finite")
-        if self._stream_clock_started is not None:
-            sample_position = (
-                self._stream_sample_position() + delay * self._sample_rate
-            )
-        if sample_position is not None:
-            apply_mixed_emotions(
-                settings,
-                self._emotion_channels,
-                sample_linear(
-                    self._timestamps,
-                    self._effective_emotions,
-                    sample_position,
-                ),
-            )
+        if self._timeline_frame_start is not None:
+            self.tick()
+            return
         if self._stream_clock_started is None:
             self._stream_clock_started = time.monotonic()
             self._stream_clock_origin = timestamp_sample
@@ -194,10 +184,33 @@ class LiveStreamController:
         if operation_id != self._operation_id or not self.active:
             raise LiveStreamError("received a terminal event for an inactive stream")
         self._terminal = True
-        if not self._timestamps or self._stream_sample_position() >= self._timestamps[-1]:
+        scene = bpy.data.scenes.get(self._scene_name)
+        if (
+            not self._timestamps
+            or scene is None
+            or not scene.is_editable
+            or self._terminal_reached(scene)
+        ):
             self.stop(reset=False, notify=True)
 
-    def _stream_sample_position(self) -> float:
+    def _terminal_reached(self, scene: bpy.types.Scene) -> bool:
+        if self._timeline_frame_end is not None:
+            return scene.frame_current >= self._timeline_frame_end
+        return self._stream_sample_position(scene) >= self._timestamps[-1]
+
+    def _stream_sample_position(self, scene: bpy.types.Scene) -> float:
+        frame_start = self._timeline_frame_start
+        if frame_start is not None:
+            fps_base = float(scene.render.fps_base)
+            fps = float(scene.render.fps)
+            if not math.isfinite(fps_base) or fps_base <= 0.0 or fps <= 0.0:
+                raise LiveStreamError("scene frame rate must be positive")
+            return (
+                (scene.frame_current - frame_start)
+                * self._sample_rate
+                * fps_base
+                / fps
+            )
         if self._stream_clock_started is None:
             return float(self._stream_clock_origin)
         return self._stream_clock_origin + (
@@ -252,7 +265,7 @@ class LiveStreamController:
         settings = scene.audio2face
         if not self._timestamps:
             return True
-        sample_position = self._stream_sample_position()
+        sample_position = self._stream_sample_position(scene)
         try:
             delay = float(settings.prediction_delay)
             if not math.isfinite(delay):
@@ -262,8 +275,10 @@ class LiveStreamController:
                 sample_position + delay * self._sample_rate,
             )
             settings.stream_time = max(0.0, sample_position / self._sample_rate)
-            self._drop_old_frames(sample_position)
-            if self._terminal and sample_position >= self._timestamps[-1]:
+            self._drop_old_frames(
+                min(sample_position, sample_position + delay * self._sample_rate)
+            )
+            if self._terminal and self._terminal_reached(scene):
                 self.stop(reset=False, notify=True)
                 return False
             return True
@@ -305,6 +320,8 @@ class LiveStreamController:
         self._terminal = False
         self._stream_clock_started = None
         self._stream_clock_origin = 0
+        self._timeline_frame_start = None
+        self._timeline_frame_end = None
         if stopped_callback is not None:
             stopped_callback()
 

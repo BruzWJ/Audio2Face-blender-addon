@@ -2,17 +2,19 @@
 
 ## System boundary
 
-Audio2Face has one offline Blender-frame bake path and one clocked live path:
+Audio2Face has one offline Blender-frame bake path and one live stream path:
 
 ```text
-Selected WAV -- add-on-owned VSE sound strip --> Blender native playback
-       |
-       +-- mono PCM upload -- per-integer-frame bake requests --------+
-                                                                     |
-external mono f32le PCM -- first chunk auto-starts -- live stream ----+
-                                                                     |
-Blender 5.2 extension -- private audio2face/10 JSONL -- native worker
-                                                                     |
+Selected WAV -- add-on-owned VSE strip --> native timeline/audio clock
+       |                                      |
+       +-- Play: lazy PCM -- live stream -----+-----------------------+
+       |                                                              |
+       +-- Bake: PCM upload -- per-integer-frame requests ------------+
+                                                                      |
+external mono f32le PCM -- live stream -------------------------------+
+                                                                      |
+Blender 5.2 extension -- private audio2face/10 JSONL -- native worker |
+                                                                      |
                      +-----------------------------------------------+------+
                      |                                                      |
             Audio2Emotion v3.0                                   Audio2Face-3D v3.0
@@ -25,17 +27,19 @@ Blender 5.2 extension -- private audio2face/10 JSONL -- native worker
                                                    |
                   +--------------------------------+-------------------+
                   |                                                    |
-     Blender 5.2 layered Shape Key Actions              clocked live Shape Key values
-                  |                                                    |
-     native timeline facial preview                     read-only Mixed Emotion display
+       Blender 5.2 Shape Key Actions               transient live Shape Key values
+                                                                       |
+                                                      read-only Mixed Emotion display
 ```
 
 Blender owns the package-local worker as a child process. The worker opens no
 port, and CUDA, TensorRT, Audio2X, model metadata, and inference executors stay
-outside Blender's process. **Start Worker** launches the child and loads the two
-models. **Stop Worker** exits it and releases model and CUDA resources.
-Installing or enabling the extension does not start the worker. Loading the
-models does not execute audio inference continuously.
+outside Blender's process. **Start Worker** launches the child, loads the two
+models, creates their interactive Audio2Face and Audio2Emotion executors, and
+keeps those executors available for later audio operations. **Stop Worker**
+exits the child and releases the executors, models, and CUDA resources.
+Installing or enabling the extension does not start the worker. Loaded
+executors do not execute audio inference continuously without PCM input.
 
 ## Blender extension
 
@@ -46,18 +50,18 @@ The extension owns:
 - worker launch, handshake, model loading, streaming, asynchronous baking,
   cancellation, and shutdown;
 - one add-on-owned Selected WAV Sequencer strip, native timeline Play/Pause,
-  layered Shape Key Action output, and external PCM ingress;
+  lazy Selected WAV PCM streaming, native Shape Key Action output, and
+  external PCM ingress;
 - Audio2Face and emotion controls and the registered target-object list;
 - strict protocol, model-schema, stream-frame, and bake-frame response
   validation; and
 - Action construction and clocked live delivery on Blender's main thread.
 
-Worker I/O and WAV decoding run on standard-library threads. Those threads
-enqueue validated data and never mutate `bpy`. Live PCM advances by the
-worker's per-chunk dequeue-credit events. Selected bake upload and serial frame
+Selected WAV playback and external live PCM advance through the stream
+protocol's per-chunk dequeue credits. Selected bake upload and serial frame
 requests advance asynchronously through worker responses. A registered Blender
-timer drains those queues; frame evaluation, RNA reads, Action creation, and
-live Shape Key updates stay on the main thread.
+timer advances these operations; frame evaluation, RNA reads, Action creation,
+and live Shape Key updates stay on the main thread.
 
 ### Shape Key targets
 
@@ -78,17 +82,14 @@ next frame.
 
 A Selected WAV bake instead preflights the targets before upload. At least one
 target must contain a Shape Key matching a negotiated channel, and only
-existing matches receive curves. A non-add-on active Action on any compatible
-Shape Key datablock blocks the bake before inference, so artist-owned animation
-is never overwritten.
+existing matches receive curves.
 
 Objects sharing one Shape Key datablock are deduplicated for live assignment
-and for Action output. A successful bake creates one new add-on-owned layered
-Action per unique compatible Key datablock, with a `KEY` slot, layer,
-`KEYFRAME` strip, channel bag, and LINEAR F-curve for each matching Shape Key.
-Repeated bakes assign a fresh owned Action while preserving older Action
-datablocks. Every linked object reflects the same data; independent motion
-requires single-user object data.
+and for Action output. A successful bake writes LINEAR F-curves into the active
+native Action for each unique compatible Key datablock, or creates and assigns
+one when none exists. Matching keys inside the baked span are replaced while
+other animation remains. Every linked object reflects the same data;
+independent motion requires single-user object data.
 
 ## Geometry-to-ARKit solve
 
@@ -121,15 +122,19 @@ duration is `ceil(seconds * fps / fps_base)` frames. The inclusive audio end is
 `frame_start + duration_frames - 1`, and `scene.frame_end` is extended to that
 frame when necessary but never shortened.
 
-**Play/Pause** invokes Blender's native timeline operators. Blender therefore
-owns the sound clock, scrubbing, looping, range behavior, and evaluation of any
-already baked Shape Key Actions. Native playback neither starts nor keeps GPU
-inference running.
+**Play** invokes Blender's native timeline operator and lazily decodes,
+downmixes, and resamples the WAV into model-rate mono f32le. That PCM travels
+through the existing stream protocol. Blender's native timeline and sound
+playback are the presentation clock; incoming stream frames directly update
+matching Shape Key values as transient state without creating an Action.
+**Pause** invokes only Blender's native playback pause operator. A new preview
+starts at `scene.frame_start`; Play after Pause resumes the active stream.
 
-**Bake Shape Key Animation** is the inference trigger. Blender asynchronously
-decodes/downmixes/resamples the entire selected WAV to model-rate mono f32le,
-uploads it in bounded chunks, and prepares an offline track. It then visits
-every integer Blender frame in the inclusive audio range. For each frame it:
+**Bake Shape Key Animation** is a separate persistence operation. Blender
+asynchronously decodes/downmixes/resamples the entire selected WAV to model-rate
+mono f32le, uploads it in bounded chunks, and prepares an offline track. It then
+visits every integer Blender frame in the inclusive audio range. For each frame
+it:
 
 1. calls `scene.frame_set(frame)` so keyframes and drivers evaluate;
 2. maps the frame through effective FPS (`fps / fps_base`) and the evaluated
@@ -138,8 +143,8 @@ every integer Blender frame in the inclusive audio range. For each frame it:
 4. requests and validates one weight row before advancing.
 
 The controller restores the original scene frame when the bake ends or is
-canceled. Only after `bake_ended {"reason":"completed"}` does it create the
-native layered Actions. It reads animated tuning and emotion values but does
+canceled. Only after `bake_ended {"reason":"completed"}` does it write the
+native Shape Key Actions. It reads animated tuning and emotion values but does
 not keyframe those controls; only matching Shape Key `value` curves are output.
 
 ### External PCM
@@ -152,10 +157,11 @@ No network listener is created.
 
 ### Interactive worker execution
 
-Model loading creates one interactive Audio2Emotion executor, one interactive
-Audio2Face/device-blendshape executor, and their shared accumulators on CUDA
-device 0. Both Stream and bake use those executors; there is no incremental
-executor path or mid-stream executor switch.
+Model loading during **Start Worker** creates one interactive Audio2Emotion
+executor, one interactive Audio2Face/device-blendshape executor, and their
+shared accumulators on CUDA device 0. The worker retains them until **Stop
+Worker**. Selected WAV playback, external Stream input, and bake use those same
+executors; there is no incremental executor path or mid-stream executor switch.
 
 For a Stream, the worker retains a bounded, frame-aligned PCM window. It refills
 the accumulators for that window, computes its effective-emotion curve, and
@@ -242,6 +248,9 @@ MODEL_READY --Selected WAV Bake--> BAKE_UPLOADING --> BAKE_PREPARING
                                                       |
                                              MODEL_READY or ERROR
 
+MODEL_READY --Selected WAV Play--> STREAMING --end/cancel--> MODEL_READY
+                                          \--error----------> ERROR
+
 MODEL_READY --first external PCM--> STREAMING --end/cancel--> MODEL_READY
                                            \--error----------> ERROR
 
@@ -250,7 +259,7 @@ Unexpected exit or rejected contract --> ERROR
 ```
 
 One worker accepts at most one inference operation: one Stream or one bake. A
-normal external end drains tail frames. Cancel stops queued execution without
+normal stream end drains tail frames. Cancel stops queued execution without
 draining and returns the model to ready state. **Stop Worker** requests bounded
 shutdown and escalates to process termination if the child misses its
 deadlines.

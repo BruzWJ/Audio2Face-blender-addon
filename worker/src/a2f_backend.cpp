@@ -540,6 +540,8 @@ class Backend::Impl final {
       throw WorkerError("canceled", "Bake was stopped");
     }
     refill_interactive_audio(bake_audio_);
+    install_constant_interactive_emotions(
+        std::vector<float>(emotion_channels_.size(), 0.0F));
     bake_prepared_ = true;
     const std::size_t source_frame_count =
         interactive_executor_->GetTotalNbFrames();
@@ -1229,8 +1231,8 @@ class Backend::Impl final {
     const std::vector<float> window(std::next(retained_audio_.begin(), drop),
                                     retained_audio_.end());
     refill_interactive_audio(window);
-    if (interactive_executor_->GetTotalNbFrames() == 0) return;
     prepare_interactive_settings(interactive_stream_settings_, canceled);
+    if (interactive_executor_->GetTotalNbFrames() == 0) return;
     const std::int64_t safe_through =
         end_of_stream
             ? total_audio_samples_

@@ -175,14 +175,14 @@ def main() -> None:
         stale_labels = {
             call.kwargs.get("text")
             for call in stale_layout.mock_calls
-            if call[0].endswith(".label")
+            if call[0] == "label" or call[0].endswith(".label")
         }
         assert {
             "Inputs",
             "Model Tuning",
             "Preferred Emotion",
             "Emotion Tuning",
-        } <= stale_labels
+        } <= stale_labels, stale_labels
         visible_properties = {
             call.args[1]
             for call in stale_layout.mock_calls
@@ -543,6 +543,7 @@ def main() -> None:
                 tuple(MODEL_CHANNELS),
                 ("Neutral", "Joy"),
                 presentation_stopped=None,
+                timeline_frame_start=int(scene.frame_current),
             )
             controller.active_stream = runtime.ActiveStream(
                 operation_id=routed_operation,
@@ -550,8 +551,8 @@ def main() -> None:
             )
             streamed_frame = [0.0] * len(MODEL_CHANNELS)
             streamed_frame[MODEL_CHANNELS.index("jawOpen")] = 0.375
-            # The current SDK can emit receptive-field frames before sample zero.
-            # They must be accepted and applied directly without animation data.
+            # Selected timeline delivery accepts receptive-field frames before
+            # sample zero and applies them without creating animation data.
             _route_stream_event(
                 controller,
                 routed_operation,
@@ -624,9 +625,30 @@ def main() -> None:
             scene,
             object_name="A2FNativeBakeTarget",
         )
+        existing_bake_target = _make_shape_key_target(
+            scene,
+            object_name="A2FExistingActionBakeTarget",
+        )
+        existing_shape_keys = existing_bake_target.data.shape_keys
+        existing_action = bpy.data.actions.new("A2F Existing Shape Key Action")
+        existing_shape_keys.animation_data_create().action = existing_action
+        existing_curve = existing_action.fcurve_ensure_for_datablock(
+            existing_shape_keys,
+            existing_shape_keys.key_blocks["jawOpen"].path_from_id("value"),
+            index=0,
+            group_name="Artist Curves",
+        )
+        existing_curve.keyframe_points.add(3)
+        for point, co in zip(
+            existing_curve.keyframe_points,
+            ((5.0, 0.1), (8.0, 0.4), (11.0, 0.9)),
+            strict=True,
+        ):
+            point.co = co
+        existing_curve.update()
         bake_plans = plan_bake_targets(
             ("jawOpen",),
-            (bake_target,),
+            (bake_target, existing_bake_target),
         )
         baked_actions = bake_shape_key_actions(
             (7, 9),
@@ -634,8 +656,17 @@ def main() -> None:
             bake_plans,
             bpy.data.actions,
         )
-        assert len(baked_actions) == 1
+        assert len(baked_actions) == 2
         assert bake_target.data.shape_keys.animation_data.action == baked_actions[0]
+        assert baked_actions[1] == existing_action
+        existing_points = [tuple(point.co) for point in existing_curve.keyframe_points]
+        assert [co[0] for co in existing_points] == [5.0, 7.0, 9.0, 11.0]
+        for co, expected in zip(
+            existing_points,
+            (0.1, 0.2, 0.8, 0.9),
+            strict=True,
+        ):
+            _assert_close(co[1], expected, label="existing Action curve value")
         scene.frame_set(7)
         bpy.context.view_layer.update()
         _assert_close(
@@ -643,12 +674,22 @@ def main() -> None:
             0.2,
             label="native bake first frame",
         )
+        _assert_close(
+            existing_shape_keys.key_blocks["jawOpen"].value,
+            0.2,
+            label="existing Action bake first frame",
+        )
         scene.frame_set(9)
         bpy.context.view_layer.update()
         _assert_close(
             bake_target.data.shape_keys.key_blocks["jawOpen"].value,
             0.8,
             label="native bake final frame",
+        )
+        _assert_close(
+            existing_shape_keys.key_blocks["jawOpen"].value,
+            0.8,
+            label="existing Action bake final frame",
         )
     finally:
         if registered:

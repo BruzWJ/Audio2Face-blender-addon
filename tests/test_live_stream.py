@@ -39,6 +39,10 @@ class _Scene:
     name: str
     audio2face: _Settings
     is_editable: bool = True
+    frame_current: int = 1
+    render: SimpleNamespace = field(
+        default_factory=lambda: SimpleNamespace(fps=24, fps_base=1.0)
+    )
 
 
 class _Scenes(list[_Scene]):
@@ -113,6 +117,36 @@ def _prepare_external(controller: object, scene: _Scene, channels: list[str]) ->
     )
 
 
+def _prepare_timeline(
+    live: ModuleType,
+    scene: _Scene,
+    *,
+    stopped: list[str] | None = None,
+    frame_end: int | None = None,
+) -> tuple[object, int]:
+    scene.frame_current = 10
+    controller = live.LiveStreamController()
+    controller.prepare(
+        scene,
+        "stream-1",
+        16_000,
+        tuple(MODEL_CHANNELS),
+        tuple(MODEL_EMOTION_CHANNELS),
+        presentation_stopped=(
+            (lambda: stopped.append("stream-1")) if stopped is not None else None
+        ),
+        timeline_frame_start=10,
+        timeline_frame_end=frame_end,
+    )
+    closed = [0.0] * len(MODEL_CHANNELS)
+    opened = closed.copy()
+    jaw = MODEL_CHANNELS.index("sdkJawOpen")
+    opened[jaw] = 1.0
+    controller.receive("stream-1", 0, closed, [1.0, 0.0])
+    controller.receive("stream-1", 16_000, opened, [0.0, 1.0])
+    return controller, jaw
+
+
 def test_source_free_stream_applies_negative_timestamp_frame_immediately(
     live_module: tuple[ModuleType, _Scene, list[AppliedFrame]],
 ) -> None:
@@ -175,6 +209,60 @@ def test_source_free_stream_interpolates_bursted_frames_on_a_monotonic_clock(
         [0.5, 0.5]
     )
     assert scene.audio2face.stream_time == pytest.approx(0.05)
+
+
+def test_timeline_stream_samples_scene_frame_at_effective_fps(
+    live_module: tuple[ModuleType, _Scene, list[AppliedFrame]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    live, scene, applied = live_module
+    now = [10.0]
+    monkeypatch.setattr(live.time, "monotonic", lambda: now[0])
+    scene.render.fps = 30
+    scene.render.fps_base = 1.25
+    controller, jaw = _prepare_timeline(live, scene)
+
+    scene.frame_current = 22
+    assert controller.tick() is True
+
+    assert applied[-1][1][jaw] == pytest.approx(0.5)
+    assert [item.value for item in scene.audio2face.mixed_emotions] == pytest.approx(
+        [0.5, 0.5]
+    )
+    assert scene.audio2face.stream_time == pytest.approx(0.5)
+    paused_weight = applied[-1][1][jaw]
+    now[0] += 60.0
+    controller.tick()
+
+    assert applied[-1][1][jaw] == pytest.approx(paused_weight)
+    assert scene.audio2face.stream_time == pytest.approx(0.5)
+
+
+def test_terminal_timeline_stream_stops_on_selected_audio_end_frame(
+    live_module: tuple[ModuleType, _Scene, list[AppliedFrame]],
+) -> None:
+    live, scene, _applied = live_module
+    stopped: list[str] = []
+    controller, _jaw = _prepare_timeline(
+        live,
+        scene,
+        stopped=stopped,
+        frame_end=33,
+    )
+
+    controller.mark_terminal("stream-1")
+    assert controller.active is True
+    assert stopped == []
+
+    scene.frame_current = 32
+    assert controller.tick() is True
+    assert controller.active is True
+    assert stopped == []
+
+    scene.frame_current = 33
+    assert controller.tick() is False
+    assert controller.active is False
+    assert stopped == ["stream-1"]
 
 
 def test_live_frames_resolve_the_current_object_targets(

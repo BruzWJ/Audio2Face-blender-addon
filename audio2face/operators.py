@@ -194,7 +194,10 @@ class A2F_OT_remove_target(bpy.types.Operator):
 class A2F_OT_play_pause(bpy.types.Operator):
     bl_idname = "a2f.play_pause"
     bl_label = "Play/Pause Selected Audio"
-    bl_description = "Play or pause Blender's native timeline and selected WAV sound"
+    bl_description = (
+        "Play or pause Blender's native timeline while the selected WAV drives "
+        "live Shape Keys"
+    )
 
     @classmethod
     def poll(cls, context: bpy.types.Context) -> bool:
@@ -223,10 +226,21 @@ class A2F_OT_play_pause(bpy.types.Operator):
             scene = context.scene
             audio_path = bpy.path.abspath(settings.audio_path)
             _strip, audio_end = configure_selected_audio(scene, audio_path)
-            if not scene.frame_start <= scene.frame_current <= audio_end:
-                scene.frame_set(scene.frame_start)
-            bpy.ops.screen.animation_play()
-        except (OSError, ValueError) as exc:
+            controller = get_controller()
+            controller.start_selected_audio(
+                scene,
+                timeline_frame_end=audio_end,
+            )
+            try:
+                playback_result = bpy.ops.screen.animation_play()
+                if playback_result != {"FINISHED"}:
+                    raise RuntimeError(
+                        "Blender could not start native timeline playback"
+                    )
+            except Exception:
+                controller.cancel_selected_audio(scene)
+                raise
+        except (OSError, RuntimeError, SidecarError, ValueError) as exc:
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
         return {"FINISHED"}
@@ -237,7 +251,7 @@ class A2F_OT_bake_animation(bpy.types.Operator):
     bl_label = "Bake Shape Key Animation"
     bl_description = (
         "Evaluate the selected WAV and animated tuning controls at each "
-        "Blender frame, then create native Shape Key Actions"
+        "Blender frame, then write native Shape Key animation"
     )
 
     @classmethod
@@ -249,12 +263,6 @@ class A2F_OT_bake_animation(bpy.types.Operator):
             return False
         if not settings.audio_path:
             cls.poll_message_set("select a WAV file first")
-            return False
-        if not settings.target_objects:
-            cls.poll_message_set("add at least one Shape Key target")
-            return False
-        if controller.active_bake is not None:
-            cls.poll_message_set("an animation bake is already running")
             return False
         if controller.client.state != Lifecycle.RUNNING or not controller.negotiated:
             cls.poll_message_set("start the Audio2Face worker first")

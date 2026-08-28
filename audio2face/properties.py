@@ -38,7 +38,7 @@ STATUS_ITEMS = (
     ("BAKE_UPLOADING", "Uploading Audio", "Uploading selected audio for baking"),
     ("BAKE_PREPARING", "Preparing Bake", "Preparing frame-based inference"),
     ("BAKING", "Baking", "Generating Blender-timeline Shape Key frames"),
-    ("BAKE_ENDING", "Finishing Bake", "Creating native Shape Key Actions"),
+    ("BAKE_ENDING", "Finishing Bake", "Writing native Shape Key animation"),
     ("STOPPING", "Stopping", "Worker is shutting down"),
     ("ERROR", "Error", "The last operation failed"),
 )
