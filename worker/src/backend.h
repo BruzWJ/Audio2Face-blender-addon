@@ -43,7 +43,19 @@ struct StreamFrame {
 };
 
 using StreamFrameCallback = std::function<void(const StreamFrame& frame)>;
-using StreamResetCallback = std::function<void()>;
+
+struct BakeRequest {
+  std::uint32_t sample_rate;
+};
+
+struct BakeFrameRequest {
+  std::int64_t target_sample;
+  json settings;
+};
+
+struct BakeFrame {
+  std::vector<float> weights;
+};
 
 class Backend final {
  public:
@@ -59,11 +71,17 @@ class Backend final {
                     std::atomic_bool& canceled,
                     const StreamFrameCallback& frame);
   void stream_settings(const json& settings,
-                       std::atomic_bool& canceled,
-                       const StreamResetCallback& reset,
-                       const StreamFrameCallback& frame);
+                       std::atomic_bool& canceled);
   void stream_end(std::atomic_bool& canceled,
                   const StreamFrameCallback& frame);
+  json bake_start(const BakeRequest& request);
+  json bake_chunk(const std::vector<float>& audio,
+                  std::atomic_bool& canceled);
+  json bake_prepare(std::atomic_bool& canceled);
+  BakeFrame bake_frame(const BakeFrameRequest& request,
+                       std::atomic_bool& canceled);
+  void bake_end();
+  void interrupt_operation() noexcept;
   void stream_abort() noexcept;
 
  private:

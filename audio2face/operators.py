@@ -6,19 +6,14 @@ from typing import Callable
 
 import bpy
 
-from .live_stream import (
-    PLAYBACK_POSITION_KEY,
-    LiveStreamError,
-    get_live_stream_controller,
-    playback_position,
-    playback_position_maximum,
-)
 from .properties import (
     reset_emotion_settings,
     reset_model_tuning,
-    toggle_preferred_emotion,
 )
 from .runtime import RuntimeController, get_controller
+from .selected_audio_timeline import (
+    configure_selected_audio,
+)
 from .shape_keys import supports_shape_keys
 from .sidecar import Lifecycle, SidecarError
 
@@ -29,7 +24,7 @@ def _run_runtime(
 ) -> set[str]:
     try:
         operation(get_controller())
-    except (OSError, LiveStreamError, SidecarError, ValueError) as exc:
+    except (OSError, SidecarError, ValueError) as exc:
         operator.report({"ERROR"}, str(exc))
         return {"CANCELLED"}
     return {"FINISHED"}
@@ -89,31 +84,6 @@ class A2F_OT_stop_worker(bpy.types.Operator):
 
     def execute(self, context: bpy.types.Context) -> set[str]:
         return _run_runtime(self, lambda controller: controller.stop(context.scene))
-
-
-class A2F_OT_toggle_preferred_emotion(bpy.types.Operator):
-    bl_idname = "a2f.toggle_preferred_emotion"
-    bl_label = "Toggle Preferred Emotion"
-    bl_description = "Load or clear the authored Preferred Emotion mix"
-
-    @classmethod
-    def poll(cls, context: bpy.types.Context) -> bool:
-        settings = context.scene.audio2face
-        available = settings.preferred_emotion_active or bool(
-            settings.preferred_emotions
-        )
-        if not available:
-            cls.poll_message_set("load the Audio2Face model first")
-        return available
-
-    def execute(self, context: bpy.types.Context) -> set[str]:
-        try:
-            toggle_preferred_emotion(context.scene.audio2face)
-        except ValueError as exc:
-            self.report({"ERROR"}, str(exc))
-            return {"CANCELLED"}
-        get_controller().refresh_inference_settings(context.scene)
-        return {"FINISHED"}
 
 
 class A2F_OT_reset_model_tuning(bpy.types.Operator):
@@ -223,53 +193,106 @@ class A2F_OT_remove_target(bpy.types.Operator):
 
 class A2F_OT_play_pause(bpy.types.Operator):
     bl_idname = "a2f.play_pause"
-    bl_label = "Play/Pause Audio2Face"
-    bl_description = "Play or pause selected audio and its live Audio2Face stream"
+    bl_label = "Play/Pause Selected Audio"
+    bl_description = "Play or pause Blender's native timeline and selected WAV sound"
 
     @classmethod
     def poll(cls, context: bpy.types.Context) -> bool:
         settings = context.scene.audio2face
         if settings.input_mode != "SELECTED":
             return False
-        live = get_live_stream_controller()
-        if live.can_seek:
-            return settings.playback_state in {"PLAYING", "PAUSED"}
-        runtime = get_controller()
-        return bool(
-            settings.audio_path
-            and runtime.client.state == Lifecycle.RUNNING
-            and runtime.negotiated
-            and not runtime.operation_in_progress
-        )
+        if not settings.audio_path:
+            cls.poll_message_set("select a WAV file first")
+            return False
+        if context.screen is None:
+            cls.poll_message_set("native playback requires a Blender screen")
+            return False
+        return True
 
     def execute(self, context: bpy.types.Context) -> set[str]:
         settings = context.scene.audio2face
-        live = get_live_stream_controller()
-        if live.can_seek:
-            if settings.playback_state == "PLAYING":
-                return _run_runtime(
-                    self,
-                    lambda controller: controller.pause_selected_audio(context.scene),
-                )
-            if settings.playback_state == "PAUSED":
-                return _run_runtime(
-                    self,
-                    lambda controller: controller.resume_selected_audio(context.scene),
-                )
-            self.report(
-                {"ERROR"},
-                f"invalid playback state {settings.playback_state!r}",
-            )
+        screen = context.screen
+        if screen is None:
+            self.report({"ERROR"}, "native playback requires a Blender screen")
             return {"CANCELLED"}
-        def start(controller: RuntimeController) -> None:
-            position = 0.0
-            if PLAYBACK_POSITION_KEY in settings:
-                position = playback_position(settings)
-                if position >= playback_position_maximum(settings):
-                    position = 0.0
-            controller.start_selected_audio(context.scene, position=position)
+        try:
+            if screen.is_animation_playing:
+                bpy.ops.screen.animation_pause()
+                return {"FINISHED"}
 
-        return _run_runtime(self, start)
+            scene = context.scene
+            audio_path = bpy.path.abspath(settings.audio_path)
+            _strip, audio_end = configure_selected_audio(scene, audio_path)
+            if not scene.frame_start <= scene.frame_current <= audio_end:
+                scene.frame_set(scene.frame_start)
+            bpy.ops.screen.animation_play()
+        except (OSError, ValueError) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        return {"FINISHED"}
+
+
+class A2F_OT_bake_animation(bpy.types.Operator):
+    bl_idname = "a2f.bake_animation"
+    bl_label = "Bake Shape Key Animation"
+    bl_description = (
+        "Evaluate the selected WAV and animated tuning controls at each "
+        "Blender frame, then create native Shape Key Actions"
+    )
+
+    @classmethod
+    def poll(cls, context: bpy.types.Context) -> bool:
+        settings = context.scene.audio2face
+        controller = get_controller()
+        if settings.input_mode != "SELECTED":
+            cls.poll_message_set("baking requires Selected Audio mode")
+            return False
+        if not settings.audio_path:
+            cls.poll_message_set("select a WAV file first")
+            return False
+        if not settings.target_objects:
+            cls.poll_message_set("add at least one Shape Key target")
+            return False
+        if controller.active_bake is not None:
+            cls.poll_message_set("an animation bake is already running")
+            return False
+        if controller.client.state != Lifecycle.RUNNING or not controller.negotiated:
+            cls.poll_message_set("start the Audio2Face worker first")
+            return False
+        if controller.operation_in_progress:
+            cls.poll_message_set("wait for the current Audio2Face operation to finish")
+            return False
+        return True
+
+    def execute(self, context: bpy.types.Context) -> set[str]:
+        return _run_runtime(
+            self,
+            lambda controller: controller.bake_selected_audio(context.scene),
+        )
+
+
+class A2F_OT_cancel_bake(bpy.types.Operator):
+    bl_idname = "a2f.cancel_bake"
+    bl_label = "Cancel Animation Bake"
+    bl_description = "Cancel the active frame-based Shape Key animation bake"
+
+    @classmethod
+    def poll(cls, context: bpy.types.Context) -> bool:
+        bake = get_controller().active_bake
+        available = (
+            bake is not None
+            and bake.scene_name == context.scene.name
+            and not bake.cancel_requested
+        )
+        if not available:
+            cls.poll_message_set("there is no active animation bake")
+        return available
+
+    def execute(self, context: bpy.types.Context) -> set[str]:
+        return _run_runtime(
+            self,
+            lambda controller: controller.cancel_bake(context.scene),
+        )
 
 
 CLASSES = (
@@ -277,10 +300,11 @@ CLASSES = (
     A2F_OT_cancel_model_optimization,
     A2F_OT_start_worker,
     A2F_OT_stop_worker,
-    A2F_OT_toggle_preferred_emotion,
     A2F_OT_reset_model_tuning,
     A2F_OT_reset_emotion_settings,
     A2F_OT_add_selected_targets,
     A2F_OT_remove_target,
     A2F_OT_play_pause,
+    A2F_OT_bake_animation,
+    A2F_OT_cancel_bake,
 )

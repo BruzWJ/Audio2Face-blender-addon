@@ -30,9 +30,10 @@ WorkerError::WorkerError(std::string code, std::string message, json details)
 
 namespace {
 
-constexpr const char* kProtocol = "audio2face/9";
+constexpr const char* kProtocol = "audio2face/10";
 constexpr std::size_t kMaximumRequestBytes = 1024U * 1024U;
 constexpr std::size_t kStreamQueueSeconds = 4;
+constexpr std::size_t kMaximumBakeChunkSamples = 64U * 1024U;
 
 class Emitter {
  public:
@@ -99,6 +100,28 @@ std::uint32_t positive_sample_rate(const json& value) {
     throw WorkerError("invalid_params", "sample_rate must be positive");
   }
   return static_cast<std::uint32_t>(parsed);
+}
+
+std::int64_t required_nonnegative_int64(const json& value,
+                                        const char* name) {
+  if (!value.is_number_integer()) {
+    throw WorkerError("invalid_params",
+                      std::string(name) + " must be a JSON integer");
+  }
+  if (value.is_number_unsigned()) {
+    const std::uint64_t parsed = value.get<std::uint64_t>();
+    if (parsed >
+        static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+      throw WorkerError("invalid_params", std::string(name) + " is out of range");
+    }
+    return static_cast<std::int64_t>(parsed);
+  }
+  const std::int64_t parsed = value.get<std::int64_t>();
+  if (parsed < 0) {
+    throw WorkerError("invalid_params",
+                      std::string(name) + " must be non-negative");
+  }
+  return parsed;
 }
 
 std::string required_string(const json& object, const char* name) {
@@ -250,10 +273,24 @@ std::vector<float> decode_f32le_base64(const json& value,
 struct StreamCommand {
   enum class Kind { Chunk, Settings, End };
   Kind kind;
+  json request_id;
   std::vector<float> audio;
   json settings;
   std::future<void> response_gate;
 };
+
+struct BakeCommand {
+  enum class Kind { Chunk, Prepare, Frame, End };
+  Kind kind;
+  json request_id;
+  std::vector<float> audio;
+  std::int64_t target_sample{0};
+  json settings;
+};
+
+enum class OperationKind { None, Stream, Bake };
+
+enum class BakePhase { None, Uploading, Preparing, Prepared, Ending };
 
 class Server {
  public:
@@ -341,7 +378,7 @@ class Server {
     if (method == "hello") {
       require_exact_keys(params, {});
       emitter_.response(
-          id, {{"worker_profile", "nvidia-a2f3-a2e3-gpu-arkit52/9"},
+          id, {{"worker_profile", "nvidia-a2f3-a2e3-gpu-arkit52/10"},
                {"worker_version", A2F_WORKER_VERSION}});
       negotiated_ = true;
       return;
@@ -379,6 +416,31 @@ class Server {
       enqueue_stream_end(id, params);
       return;
     }
+    if (method == "bake_start") {
+      require_negotiated();
+      start_bake(id, params);
+      return;
+    }
+    if (method == "bake_chunk") {
+      require_negotiated();
+      enqueue_bake_chunk(id, params);
+      return;
+    }
+    if (method == "bake_prepare") {
+      require_negotiated();
+      enqueue_bake_prepare(id, params);
+      return;
+    }
+    if (method == "bake_frame") {
+      require_negotiated();
+      enqueue_bake_frame(id, params);
+      return;
+    }
+    if (method == "bake_end") {
+      require_negotiated();
+      enqueue_bake_end(id, params);
+      return;
+    }
     if (method == "cancel") {
       require_negotiated();
       cancel_operation(id, params);
@@ -412,12 +474,8 @@ class Server {
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
       current_operation_id_ = std::move(state_operation_id);
+      operation_kind_ = OperationKind::Stream;
       stream_sample_rate_ = request.sample_rate;
-      stream_end_queued_ = false;
-      terminal_committed_ = false;
-      stream_queue_.clear();
-      stream_queued_samples_ = 0;
-      cancel_response_signal_ = {};
     }
     canceled_.store(false, std::memory_order_release);
     try {
@@ -456,8 +514,8 @@ class Server {
     std::vector<float> audio =
         decode_f32le_base64(params.at("audio_f32le_base64"), sample_rate);
     std::promise<void> response_gate;
-    StreamCommand command{StreamCommand::Kind::Chunk, std::move(audio), {},
-                          response_gate.get_future()};
+    StreamCommand command{StreamCommand::Kind::Chunk, {}, std::move(audio),
+                          {}, response_gate.get_future()};
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
       require_stream_locked(requested_operation_id);
@@ -482,27 +540,29 @@ class Server {
     if (!params.at("settings").is_object()) {
       throw WorkerError("invalid_params", "settings must be an object");
     }
-    std::promise<void> response_gate;
-    StreamCommand command{StreamCommand::Kind::Settings, {},
-                          params.at("settings"),
-                          response_gate.get_future()};
+    StreamCommand command{StreamCommand::Kind::Settings, request_id, {},
+                          params.at("settings"), {}};
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
       require_stream_locked(requested_operation_id);
       if (stream_end_queued_) {
         throw WorkerError("invalid_state", "stream_end is already queued");
       }
+      if (stream_settings_pending_) {
+        throw WorkerError("stream_backpressure",
+                          "Wait for the pending stream settings response");
+      }
+      stream_settings_pending_ = true;
       stream_queue_.push_back(std::move(command));
     }
     stream_condition_.notify_one();
-    respond_and_release(request_id, response_gate);
   }
 
   void enqueue_stream_end(const json& request_id, const json& params) {
     require_exact_keys(params, {"operation_id"});
     const std::string requested_operation_id = required_operation_id(params);
     std::promise<void> response_gate;
-    StreamCommand command{StreamCommand::Kind::End, {}, {},
+    StreamCommand command{StreamCommand::Kind::End, {}, {}, {},
                           response_gate.get_future()};
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
@@ -515,6 +575,134 @@ class Server {
     }
     stream_condition_.notify_one();
     respond_and_release(request_id, response_gate);
+  }
+
+  void start_bake(const json& request_id, const json& params) {
+    join_or_reject_active("An operation is already running");
+    require_exact_keys(params, {"operation_id", "sample_rate"});
+    const std::string operation_id = required_operation_id(params);
+    const std::uint32_t sample_rate =
+        positive_sample_rate(params.at("sample_rate"));
+    std::promise<void> start_gate;
+    std::future<void> start_signal = start_gate.get_future();
+    json response = backend_.bake_start(BakeRequest{sample_rate});
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      current_operation_id_ = operation_id;
+      operation_kind_ = OperationKind::Bake;
+      bake_phase_ = BakePhase::Uploading;
+    }
+    canceled_.store(false, std::memory_order_release);
+    try {
+      operation_thread_ = std::thread(
+          [this, operation_id,
+           start_signal = std::move(start_signal)]() mutable {
+            bake_loop(operation_id, std::move(start_signal));
+          });
+    } catch (...) {
+      backend_.stream_abort();
+      finish_active();
+      throw;
+    }
+    try {
+      emitter_.response(request_id, std::move(response));
+      start_gate.set_value();
+    } catch (...) {
+      start_gate.set_exception(std::current_exception());
+      operation_thread_.join();
+      throw;
+    }
+  }
+
+  void enqueue_bake_chunk(const json& request_id, const json& params) {
+    require_exact_keys(params, {"operation_id", "audio_f32le_base64"});
+    const std::string operation_id = required_operation_id(params);
+    std::vector<float> audio = decode_f32le_base64(
+        params.at("audio_f32le_base64"), kMaximumBakeChunkSamples);
+    BakeCommand command{BakeCommand::Kind::Chunk, request_id,
+                        std::move(audio), 0, {}};
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      require_bake_locked(operation_id);
+      if (bake_phase_ != BakePhase::Uploading) {
+        throw WorkerError("invalid_state",
+                          "Bake audio upload is already complete");
+      }
+      constexpr std::size_t maximum_queued =
+          kMaximumBakeChunkSamples * 2U;
+      if (command.audio.size() > maximum_queued - bake_queued_samples_) {
+        throw WorkerError("stream_backpressure", "Bake PCM queue is full",
+                          {{"maximum_queued_samples", maximum_queued}});
+      }
+      bake_queued_samples_ += command.audio.size();
+      bake_queue_.push_back(std::move(command));
+    }
+    stream_condition_.notify_one();
+  }
+
+  void enqueue_bake_prepare(const json& request_id, const json& params) {
+    require_exact_keys(params, {"operation_id"});
+    const std::string operation_id = required_operation_id(params);
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      require_bake_locked(operation_id);
+      if (bake_phase_ != BakePhase::Uploading) {
+        throw WorkerError("invalid_state", "bake_prepare is already queued");
+      }
+      bake_phase_ = BakePhase::Preparing;
+      bake_queue_.push_back(
+          BakeCommand{BakeCommand::Kind::Prepare, request_id, {}, 0, {}});
+    }
+    stream_condition_.notify_one();
+  }
+
+  void enqueue_bake_frame(const json& request_id, const json& params) {
+    require_exact_keys(params, {"operation_id", "target_sample", "settings"});
+    const std::string operation_id = required_operation_id(params);
+    if (!params.at("settings").is_object()) {
+      throw WorkerError("invalid_params", "settings must be an object");
+    }
+    BakeCommand command{
+        BakeCommand::Kind::Frame,
+        request_id,
+        {},
+        required_nonnegative_int64(params.at("target_sample"),
+                                   "target_sample"),
+        params.at("settings")};
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      require_bake_locked(operation_id);
+      if (bake_phase_ != BakePhase::Prepared) {
+        throw WorkerError("invalid_state", "bake_prepare has not completed");
+      }
+      if (bake_frame_pending_) {
+        throw WorkerError("stream_backpressure",
+                          "Wait for the pending bake frame response");
+      }
+      bake_frame_pending_ = true;
+      bake_queue_.push_back(std::move(command));
+    }
+    stream_condition_.notify_one();
+  }
+
+  void enqueue_bake_end(const json& request_id, const json& params) {
+    require_exact_keys(params, {"operation_id"});
+    const std::string operation_id = required_operation_id(params);
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      require_bake_locked(operation_id);
+      if (bake_phase_ != BakePhase::Prepared) {
+        throw WorkerError("invalid_state", "Bake cannot end in its current phase");
+      }
+      if (bake_frame_pending_) {
+        throw WorkerError("stream_backpressure",
+                          "Wait for the pending bake frame response");
+      }
+      bake_phase_ = BakePhase::Ending;
+      bake_queue_.push_back(
+          BakeCommand{BakeCommand::Kind::End, request_id, {}, 0, {}});
+    }
+    stream_condition_.notify_one();
   }
 
   void cancel_operation(const json& request_id, const json& params) {
@@ -535,6 +723,7 @@ class Server {
       canceled_.store(true, std::memory_order_release);
     }
     stream_condition_.notify_all();
+    backend_.interrupt_operation();
     respond_and_release(request_id, response_gate);
   }
 
@@ -547,6 +736,41 @@ class Server {
       response_gate.set_exception(std::current_exception());
       throw;
     }
+  }
+
+  void respond_to_active_bake(const std::string& operation_id,
+                              const json& request_id,
+                              json result,
+                              bool completes_frame = false) {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    if (canceled_.load(std::memory_order_acquire)) {
+      throw WorkerError("canceled", "Bake was stopped");
+    }
+    if (!current_operation_id_ || *current_operation_id_ != operation_id ||
+        operation_kind_ != OperationKind::Bake || terminal_committed_) {
+      throw WorkerError("operation_not_found", "The bake is no longer active",
+                        {{"operation_id", operation_id}});
+    }
+    // Keep the operation-state lock through the write. A cancel accepted before
+    // this point suppresses the stale response; one accepted after it is
+    // unambiguously ordered after the response.
+    emitter_.response(request_id, std::move(result));
+    if (completes_frame) bake_frame_pending_ = false;
+  }
+
+  void respond_to_active_stream_settings(const std::string& operation_id,
+                                         const json& request_id) {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    if (canceled_.load(std::memory_order_acquire)) {
+      throw WorkerError("canceled", "Stream was stopped");
+    }
+    if (!current_operation_id_ || *current_operation_id_ != operation_id ||
+        operation_kind_ != OperationKind::Stream || terminal_committed_) {
+      throw WorkerError("operation_not_found", "The stream is no longer active",
+                        {{"operation_id", operation_id}});
+    }
+    emitter_.response(request_id, json::object());
+    stream_settings_pending_ = false;
   }
 
   void emit_active_stream_event(const std::string& operation_id,
@@ -574,9 +798,6 @@ class Server {
            {"weights", frame.weights},
            {"effective_emotions", frame.effective_emotions}});
     };
-    const auto emit_reset = [this, &operation_id]() {
-      emit_active_stream_event(operation_id, "stream_reset", json::object());
-    };
     try {
       while (true) {
         StreamCommand command;
@@ -591,16 +812,19 @@ class Server {
           stream_queue_.pop_front();
           stream_queued_samples_ -= command.audio.size();
         }
-        command.response_gate.get();
-        if (canceled_.load(std::memory_order_acquire)) break;
+        if (command.kind != StreamCommand::Kind::Settings) {
+          command.response_gate.get();
+          if (canceled_.load(std::memory_order_acquire)) break;
+        }
         if (command.kind == StreamCommand::Kind::Chunk) {
           emit_active_stream_event(operation_id, "stream_credit", json::object());
           backend_.stream_chunk(command.audio, canceled_, emit_frame);
           continue;
         }
         if (command.kind == StreamCommand::Kind::Settings) {
-          backend_.stream_settings(command.settings, canceled_,
-                                   emit_reset, emit_frame);
+          backend_.stream_settings(command.settings, canceled_);
+          respond_to_active_stream_settings(operation_id,
+                                            command.request_id);
           continue;
         }
         backend_.stream_end(canceled_, emit_frame);
@@ -622,6 +846,148 @@ class Server {
       emit_stream_error_or_ended(operation_id, "internal_error", error.what());
     }
     finish_active();
+  }
+
+  void bake_loop(const std::string& operation_id,
+                 std::future<void> start_signal) {
+    try {
+      start_signal.get();
+    } catch (...) {
+      backend_.stream_abort();
+      finish_active();
+      return;
+    }
+    try {
+      while (true) {
+        BakeCommand command;
+        {
+          std::unique_lock<std::mutex> lock(state_mutex_);
+          stream_condition_.wait(lock, [this] {
+            return canceled_.load(std::memory_order_acquire) ||
+                   !bake_queue_.empty();
+          });
+          if (canceled_.load(std::memory_order_acquire)) break;
+          command = std::move(bake_queue_.front());
+          bake_queue_.pop_front();
+          bake_queued_samples_ -= command.audio.size();
+        }
+        if (canceled_.load(std::memory_order_acquire)) break;
+        if (command.kind == BakeCommand::Kind::Chunk) {
+          respond_to_active_bake(
+              operation_id, command.request_id,
+              backend_.bake_chunk(command.audio, canceled_));
+          continue;
+        }
+        if (command.kind == BakeCommand::Kind::Prepare) {
+          json result = backend_.bake_prepare(canceled_);
+          {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            if (canceled_.load(std::memory_order_acquire)) {
+              throw WorkerError("canceled", "Bake was stopped");
+            }
+            if (!current_operation_id_ ||
+                *current_operation_id_ != operation_id ||
+                operation_kind_ != OperationKind::Bake ||
+                terminal_committed_) {
+              throw WorkerError("operation_not_found",
+                                "The bake is no longer active",
+                                {{"operation_id", operation_id}});
+            }
+            bake_phase_ = BakePhase::Prepared;
+            emitter_.response(command.request_id, std::move(result));
+          }
+          continue;
+        }
+        if (command.kind == BakeCommand::Kind::Frame) {
+          const BakeFrame result = backend_.bake_frame(
+              BakeFrameRequest{command.target_sample, std::move(command.settings)},
+              canceled_);
+          respond_to_active_bake(
+              operation_id, command.request_id,
+              {{"weights", result.weights}},
+              true);
+          continue;
+        }
+
+        if (canceled_.load(std::memory_order_acquire)) {
+          throw WorkerError("canceled", "Bake was stopped");
+        }
+        backend_.bake_end();
+        {
+          std::lock_guard<std::mutex> lock(state_mutex_);
+          if (canceled_.load(std::memory_order_acquire)) {
+            throw WorkerError("canceled", "Bake was stopped");
+          }
+          if (!current_operation_id_ ||
+              *current_operation_id_ != operation_id ||
+              operation_kind_ != OperationKind::Bake ||
+              terminal_committed_) {
+            throw WorkerError("operation_not_found",
+                              "The bake is no longer active",
+                              {{"operation_id", operation_id}});
+          }
+          terminal_committed_ = true;
+          emitter_.response(command.request_id, json::object());
+          emitter_.event("bake_ended", {{"reason", "completed"}},
+                         operation_id);
+        }
+        finish_active();
+        return;
+      }
+      backend_.stream_abort();
+      emit_bake_ended(operation_id);
+    } catch (const WorkerError& error) {
+      backend_.stream_abort();
+      if (error.code() == "canceled" ||
+          canceled_.load(std::memory_order_acquire)) {
+        emit_bake_ended(operation_id);
+      } else {
+        emit_operation_error(operation_id, error.code(), error.what());
+      }
+    } catch (const std::exception& error) {
+      backend_.stream_abort();
+      if (canceled_.load(std::memory_order_acquire)) {
+        emit_bake_ended(operation_id);
+      } else {
+        emit_operation_error(operation_id, "internal_error", error.what());
+      }
+    }
+    finish_active();
+  }
+
+  void emit_bake_ended(const std::string& operation_id) {
+    std::shared_future<void> signal;
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      terminal_committed_ = true;
+      if (canceled_.load(std::memory_order_acquire)) {
+        signal = cancel_response_signal_;
+      }
+    }
+    if (signal.valid()) {
+      try {
+        signal.get();
+      } catch (...) {
+      }
+    }
+    emitter_.event("bake_ended", {{"reason", "canceled"}}, operation_id);
+  }
+
+  void emit_operation_error(const std::string& operation_id,
+                            const std::string& code,
+                            const std::string& message) {
+    bool canceled = false;
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      canceled = canceled_.load(std::memory_order_acquire);
+      if (!canceled) terminal_committed_ = true;
+    }
+    if (canceled) {
+      emit_bake_ended(operation_id);
+      return;
+    }
+    emitter_.event("error", {{"code", code}, {"message", message}},
+                   operation_id);
   }
 
   void emit_stream_ended(const std::string& operation_id) {
@@ -662,8 +1028,19 @@ class Server {
   void require_stream_locked(const std::string& operation_id) const {
     if (!current_operation_id_.has_value() ||
         *current_operation_id_ != operation_id ||
+        operation_kind_ != OperationKind::Stream ||
         canceled_.load(std::memory_order_acquire) || terminal_committed_) {
       throw WorkerError("operation_not_found", "The requested stream is not active",
+                        {{"operation_id", operation_id}});
+    }
+  }
+
+  void require_bake_locked(const std::string& operation_id) const {
+    if (!current_operation_id_.has_value() ||
+        *current_operation_id_ != operation_id ||
+        operation_kind_ != OperationKind::Bake ||
+        canceled_.load(std::memory_order_acquire) || terminal_committed_) {
+      throw WorkerError("operation_not_found", "The requested bake is not active",
                         {{"operation_id", operation_id}});
     }
   }
@@ -692,17 +1069,24 @@ class Server {
   void finish_active() noexcept {
     std::lock_guard<std::mutex> lock(state_mutex_);
     current_operation_id_.reset();
+    operation_kind_ = OperationKind::None;
     stream_sample_rate_ = 0;
     stream_end_queued_ = false;
     terminal_committed_ = false;
     stream_queue_.clear();
     stream_queued_samples_ = 0;
+    stream_settings_pending_ = false;
     cancel_response_signal_ = {};
+    bake_phase_ = BakePhase::None;
+    bake_queue_.clear();
+    bake_queued_samples_ = 0;
+    bake_frame_pending_ = false;
   }
 
   void stop_operation() {
     if (operation_thread_.joinable()) {
       canceled_.store(true, std::memory_order_release);
+      backend_.interrupt_operation();
       stream_condition_.notify_all();
       operation_thread_.join();
     }
@@ -714,12 +1098,18 @@ class Server {
   mutable std::mutex state_mutex_;
   std::condition_variable stream_condition_;
   std::optional<std::string> current_operation_id_;
+  OperationKind operation_kind_{OperationKind::None};
   std::uint32_t stream_sample_rate_{0};
   std::deque<StreamCommand> stream_queue_;
   std::size_t stream_queued_samples_{0};
+  bool stream_settings_pending_{false};
   bool stream_end_queued_{false};
   bool terminal_committed_{false};
   std::shared_future<void> cancel_response_signal_;
+  BakePhase bake_phase_{BakePhase::None};
+  std::deque<BakeCommand> bake_queue_;
+  std::size_t bake_queued_samples_{0};
+  bool bake_frame_pending_{false};
   std::thread operation_thread_;
   bool shutting_down_{false};
   bool negotiated_{false};

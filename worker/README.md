@@ -155,18 +155,22 @@ external model root or its generated engine.
 ## Runtime contract
 
 The process is silent until `hello {}` and communicates only through strict
-`audio2face/9` UTF-8 JSON Lines on stdin/stdout. It reports worker profile
-`nvidia-a2f3-a2e3-gpu-arkit52/9`.
+`audio2face/10` UTF-8 JSON Lines on stdin/stdout. It reports worker profile
+`nvidia-a2f3-a2e3-gpu-arkit52/10`.
 
-One non-interactive diffusion/device-blendshape executor and one Audio2Emotion
-executor serve both input modes on CUDA device 0. The worker reports the
-model-owned channel, emotion, and Audio2Face defaults; accepts ordered streaming
-audio and complete settings snapshots; and emits incremental frames containing
-aligned ARKit weights and effective post-processed emotion values. It opens no
-socket, and an idle loaded model does not run inference.
+Model loading creates one interactive Audio2Emotion executor, one interactive
+Audio2Face/device-blendshape executor, and their shared accumulators on CUDA
+device 0. The same executors serve Stream and bake.
 
-The exact transport, settings, model schema, streaming, cancellation, and
-shutdown contracts are in [`docs/protocol.md`](../docs/protocol.md). Process
-ownership, package-local runtime validation, target delivery, and
-audio-clocked playback are in
-[`docs/architecture.md`](../docs/architecture.md).
+For live PCM, the worker keeps a bounded aligned audio window, computes its
+effective-emotion curve, and invokes targeted Audio2Face `ComputeFrame` calls
+only for safe unpublished indices. A settings command reconfigures those
+executors at its ordered queue position without replacing published frames. An
+offline bake fills the accumulators from the complete PCM and computes the one
+or two source frames needed for each requested target sample before linear
+interpolation. Cancellation calls the active interactive executor's
+cross-thread `Interrupt()`.
+
+The worker opens no socket and an idle loaded model does not run inference. See
+the exact [protocol](../docs/protocol.md) and the Blender-side
+[architecture](../docs/architecture.md).

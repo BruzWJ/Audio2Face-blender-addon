@@ -51,10 +51,11 @@ def main() -> None:
     assert runtime._load_post_handler in bpy.app.handlers.load_post
     operator_names = set(dir(bpy.ops.a2f))
     assert {
+        "bake_animation",
+        "cancel_bake",
         "play_pause",
         "reset_emotion_settings",
         "reset_model_tuning",
-        "toggle_preferred_emotion",
     } <= operator_names
     runtime.get_controller().poll()
     assert bpy.context.scene.audio2face.status == "IDLE"
@@ -107,7 +108,6 @@ def main() -> None:
         "prediction_delay",
         "auto_audio2emotion",
         "preferred_emotions",
-        "preferred_emotion_active",
         "mixed_emotions",
         *emotion_property_defaults,
         *AUDIO2FACE_DEFAULTS,
@@ -117,22 +117,24 @@ def main() -> None:
             properties.A2FSceneSettings.bl_rna.properties[name].default
             == default
         )
+        assert properties.A2FSceneSettings.bl_rna.properties[name].is_animatable
     for name, default in emotion_property_defaults.items():
         assert properties.A2FSceneSettings.bl_rna.properties[name].default == default
+        assert properties.A2FSceneSettings.bl_rna.properties[name].is_animatable
     emotion_strength_property = properties.A2FSceneSettings.bl_rna.properties[
         "a2e_emotion_strength"
     ]
     assert emotion_strength_property.hard_max == 2.0
+    assert properties.A2FSceneSettings.bl_rna.properties[
+        "auto_audio2emotion"
+    ].is_animatable
+    assert properties.A2FPreferredEmotionItem.bl_rna.properties[
+        "value"
+    ].is_animatable
     assert emotion_strength_property.subtype == "NONE"
     assert not properties.A2FSceneSettings.bl_rna.properties[
         "preferred_emotions"
     ].is_skip_save
-    assert not properties.A2FSceneSettings.bl_rna.properties[
-        "preferred_emotion_active"
-    ].is_skip_save
-    assert properties.A2FSceneSettings.bl_rna.properties[
-        "preferred_emotion_active"
-    ].default is False
     assert properties.A2FSceneSettings.bl_rna.properties[
         "mixed_emotions"
     ].is_skip_save

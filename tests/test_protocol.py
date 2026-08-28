@@ -38,7 +38,7 @@ def test_windows_native_transport_uses_binary_stdio() -> None:
 
 
 def test_native_worker_mirrors_the_python_wire_identity() -> None:
-    assert WORKER_PROFILE.rpartition("/")[2] == "9"
+    assert WORKER_PROFILE.rpartition("/")[2] == "10"
     assert f'constexpr const char* kProtocol = "{PROTOCOL_VERSION}";' in (
         WORKER_PROTOCOL_SOURCE
     )
@@ -72,12 +72,13 @@ def test_request_round_trip_is_compact_utf8_and_one_record() -> None:
     "line",
     [
         "{}\n",
-        '{"protocol":"audio2face/9","type":"response","id":"1","result":{}}',
+        f'{{"protocol":"{PROTOCOL_VERSION}","type":"response","id":"1","result":{{}}}}',
+        '{"protocol":"audio2face/9","type":"response","id":"1","result":{}}\n',
         '{"protocol":"audio2face/999","type":"response","id":"1","result":{}}\n',
-        '{"protocol":"audio2face/9","type":"response","id":"1","result":{}}\n{}\n',
-        '{"protocol":"audio2face/9","type":"response","id":"1","result":{}}\n\n',
+        f'{{"protocol":"{PROTOCOL_VERSION}","type":"response","id":"1","result":{{}}}}\n{{}}\n',
+        f'{{"protocol":"{PROTOCOL_VERSION}","type":"response","id":"1","result":{{}}}}\n\n',
         b"\xff\n",
-        '{"protocol":"audio2face/9","type":"response","id":"1","id":"2","result":{}}\n',
+        f'{{"protocol":"{PROTOCOL_VERSION}","type":"response","id":"1","id":"2","result":{{}}}}\n',
     ],
 )
 def test_decode_rejects_malformed_noncanonical_records(line: str | bytes) -> None:
@@ -162,6 +163,7 @@ def test_canonical_stream_event_requires_operation_id_and_exact_fields() -> None
     with pytest.raises(ProtocolError, match="missing fields: operation_id"):
         encode_message(without_operation)
 
+
 def test_stream_methods_and_events_are_canonical_protocol_members() -> None:
     for method in ("stream_start", "stream_chunk", "stream_settings", "stream_end"):
         request = make_request(method, {})
@@ -170,7 +172,6 @@ def test_stream_methods_and_events_are_canonical_protocol_members() -> None:
     for event_name in (
         "stream_credit",
         "stream_frame",
-        "stream_reset",
         "stream_ended",
     ):
         data = (
@@ -191,12 +192,53 @@ def test_stream_methods_and_events_are_canonical_protocol_members() -> None:
         }
         assert decode_message(encode_message(event)) == event
 
+
+def test_bake_methods_and_events_are_canonical_protocol_members() -> None:
+    for method in (
+        "bake_start",
+        "bake_chunk",
+        "bake_prepare",
+        "bake_frame",
+        "bake_end",
+    ):
+        request = make_request(method, {})
+        assert decode_message(encode_message(request)) == request
+
+    for reason in ("completed", "canceled"):
+        ended = {
+            "protocol": PROTOCOL_VERSION,
+            "type": "event",
+            "event": "bake_ended",
+            "operation_id": "bake-1",
+            "data": {"reason": reason},
+        }
+        assert decode_message(encode_message(ended)) == ended
+
 def test_native_stream_settings_is_one_ordered_queue_command() -> None:
     assert 'if (method == "stream_settings")' in WORKER_PROTOCOL_SOURCE
     assert "enqueue_stream_settings(id, params);" in WORKER_PROTOCOL_SOURCE
     assert 'require_exact_keys(params, {"operation_id", "settings"});' in (
         WORKER_PROTOCOL_SOURCE
     )
+    enqueue_start = WORKER_PROTOCOL_SOURCE.index("  void enqueue_stream_settings(")
+    enqueue_end = WORKER_PROTOCOL_SOURCE.index(
+        "  void enqueue_stream_end(", enqueue_start
+    )
+    enqueue_source = WORKER_PROTOCOL_SOURCE[enqueue_start:enqueue_end]
+    assert "stream_settings_pending_" in enqueue_source
+    assert "Wait for the pending stream settings response" in enqueue_source
+    assert "respond_and_release" not in enqueue_source
+
+    loop_start = WORKER_PROTOCOL_SOURCE.index("  void stream_loop(")
+    loop_end = WORKER_PROTOCOL_SOURCE.index(
+        "  void emit_bake_ended(", loop_start
+    )
+    loop_source = WORKER_PROTOCOL_SOURCE[loop_start:loop_end]
+    apply_settings = loop_source.index(
+        "backend_.stream_settings(command.settings, canceled_);"
+    )
+    acknowledge = loop_source.index("respond_to_active_stream_settings(")
+    assert apply_settings < acknowledge
 
 
 def test_native_stream_chunk_emits_one_dequeue_credit() -> None:
@@ -226,9 +268,67 @@ def test_native_stream_chunk_emits_one_dequeue_credit() -> None:
     assert "backend_.stream_settings(command.settings" in (
         WORKER_PROTOCOL_SOURCE
     )
-    assert (
-        'emit_active_stream_event(operation_id, "stream_reset", json::object());'
-        in WORKER_PROTOCOL_SOURCE
+def test_native_worker_exposes_the_bake_protocol_members() -> None:
+    for method in (
+        "bake_start",
+        "bake_chunk",
+        "bake_prepare",
+        "bake_frame",
+        "bake_end",
+    ):
+        assert f'if (method == "{method}")' in WORKER_PROTOCOL_SOURCE
+    assert '"bake_ended"' in WORKER_PROTOCOL_SOURCE
+    bake_loop = WORKER_PROTOCOL_SOURCE[
+        WORKER_PROTOCOL_SOURCE.index("  void bake_loop(") :
+        WORKER_PROTOCOL_SOURCE.index("  void emit_bake_ended(")
+    ]
+    assert '{{"weights", result.weights}}' in bake_loop
+
+
+def test_native_bake_keeps_one_frame_in_flight_and_cancel_suppresses_responses() -> None:
+    enqueue_start = WORKER_PROTOCOL_SOURCE.index("  void enqueue_bake_frame(")
+    enqueue_end = WORKER_PROTOCOL_SOURCE.index("  void enqueue_bake_end(", enqueue_start)
+    enqueue_source = WORKER_PROTOCOL_SOURCE[enqueue_start:enqueue_end]
+    assert "if (bake_frame_pending_)" in enqueue_source
+    assert "bake_frame_pending_ = true;" in enqueue_source
+
+    response_start = WORKER_PROTOCOL_SOURCE.index("  void respond_to_active_bake(")
+    response_end = WORKER_PROTOCOL_SOURCE.index(
+        "  void emit_active_stream_event(", response_start
+    )
+    response_source = WORKER_PROTOCOL_SOURCE[response_start:response_end]
+    cancel_check = response_source.index(
+        "canceled_.load(std::memory_order_acquire)"
+    )
+    response = response_source.index("emitter_.response(")
+    release = response_source.index("bake_frame_pending_ = false")
+    assert cancel_check < response < release
+
+    loop_start = WORKER_PROTOCOL_SOURCE.index("  void bake_loop(")
+    loop_end = WORKER_PROTOCOL_SOURCE.index("  void emit_bake_ended(", loop_start)
+    loop_source = WORKER_PROTOCOL_SOURCE[loop_start:loop_end]
+    assert "backend_.bake_chunk(command.audio, canceled_)" in loop_source
+    assert "canceled_);" in loop_source
+
+
+def test_native_cancel_interrupts_interactive_compute_before_waiting() -> None:
+    cancel_start = WORKER_PROTOCOL_SOURCE.index("  void cancel_operation(")
+    cancel_end = WORKER_PROTOCOL_SOURCE.index(
+        "  void respond_and_release(", cancel_start
+    )
+    cancel_source = WORKER_PROTOCOL_SOURCE[cancel_start:cancel_end]
+    cancel_flag = cancel_source.index(
+        "canceled_.store(true, std::memory_order_release);"
+    )
+    interrupt = cancel_source.index("backend_.interrupt_operation();")
+    response = cancel_source.index("respond_and_release(request_id, response_gate);")
+    assert cancel_flag < interrupt < response
+
+    stop_start = WORKER_PROTOCOL_SOURCE.index("  void stop_operation(")
+    stop_source = WORKER_PROTOCOL_SOURCE[stop_start:]
+    assert "backend_.interrupt_operation();" in stop_source
+    assert stop_source.index("backend_.interrupt_operation();") < stop_source.index(
+        "operation_thread_.join();"
     )
 
 
@@ -308,7 +408,7 @@ def test_protocol_normalizes_non_utf8_text_errors() -> None:
         encode_message(message)
 
     line = (
-        '{"protocol":"audio2face/9","type":"response","id":"1",'
+        f'{{"protocol":"{PROTOCOL_VERSION}","type":"response","id":"1",'
         '"result":{"value":"\ud800"}}\n'
     )
     with pytest.raises(ProtocolError, match="UTF-8"):

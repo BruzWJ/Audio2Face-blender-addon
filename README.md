@@ -10,8 +10,9 @@ obtained separately.
 
 The extension produces 52-channel ARKit coefficients from a selected WAV or
 incremental mono float32 PCM and drives existing Shape Key `value` properties
-on listed Mesh, Curve, Surface, and Lattice objects. Inference starts
-automatically with WAV playback or incoming PCM.
+on listed Mesh, Curve, Surface, and Lattice objects. Selected WAV inference is
+an explicit Blender-frame bake into native Shape Key Actions; external PCM
+remains a clocked live stream.
 
 ## Requirements
 
@@ -108,7 +109,7 @@ CI](https://docs.nvidia.com/cuda/archive/12.9.1/cuda-installation-guide-linux/in
 Blender owns the extension lifecycle. To remove Audio2Face, open **Preferences →
 Get Extensions**, find Audio2Face, open the down-arrow menu on its card, and
 choose **Uninstall**. Blender disables the add-on before removing its package
-and bundled runtime, so normal worker, stream, and playback cleanup runs. The
+and bundled runtime, so normal worker and active-inference cleanup runs. The
 selected external model repositories and their `network.trt` engines remain in
 place, as do selected WAV files, `.blend` files, object data, and shared NVIDIA
 driver caches.
@@ -117,78 +118,68 @@ driver caches.
 
 1. Install and enable Audio2Face from its remote repository, then select and
    optimize both models in Add-on Preferences.
-2. In the Audio2Face sidebar, choose **Selected WAV** or **Stream**. The
-   **Playback** controls appear immediately below this mode selector.
+2. In the Audio2Face sidebar, choose **Selected WAV** or **Stream**. Selected
+   WAV mode shows Blender timeline playback and bake controls.
 3. In Selected WAV mode, choose a WAV. In Stream mode, a Blender integration
    supplies live mono f32le PCM through
    [`audio2face.streaming`](audio2face/streaming.py).
-4. Optionally select Mesh, Curve, Surface, or Lattice objects and click
-   **Add Selected Objects**.
+4. Select Mesh, Curve, Surface, or Lattice objects and click **Add Selected
+   Objects**. Selected WAV baking requires at least one target with a matching
+   model channel; targets remain optional for a live Stream.
 5. Click **Start Worker**. Blender launches the verified package-local worker,
    negotiates the protocol, and loads both selected models.
-6. Configure the saved **Preferred Emotion** sliders. They drive emotion
-   directly when **Auto Audio2Emotion** is off; with it on, **Load/Clear** adds
-   or removes them from the generated mix. **Mixed Emotion** is read-only
-   worker output.
-7. In Selected WAV mode, press **Play**. Playback automatically starts
-   incremental inference and drives matching Shape Keys as frames arrive.
-   **Pause** freezes both audio and source pacing; seek and loop restart
-   the inference stream at the requested position without restarting the
-   worker.
+6. Configure the saved, animatable **Preferred Emotion** sliders. Any nonzero
+   value enables that source; set every value to zero to clear it. **Mixed
+   Emotion** is read-only live Stream output.
+7. In Selected WAV mode, click **Bake Shape Key Animation**. Blender uploads
+   the WAV asynchronously, evaluates inference at every integer scene frame,
+   and assigns a native Action to each compatible Shape Key datablock. Then use
+   **Play/Pause** or Blender's timeline controls to preview the Sequencer sound
+   strip and baked Actions together.
 8. In Stream mode, the first `push_audio_f32le` call automatically starts the
    inference stream. `end_pcm_stream` marks normal end-of-input after all
    queued chunks. **Stop Worker** exits the child process and releases its
    models and CUDA resources.
 
 Installing or enabling the extension does not start the worker. Loading the
-models does not start continuous inference. GPU inference runs only while
-Selected WAV playback or an external PCM stream is active. **Start Worker** and
-**Stop Worker** control the GPU/model process lifecycle; audio playback and PCM
+models does not start continuous inference. GPU inference runs only during a
+Selected WAV bake or an external PCM stream. **Start Worker** and **Stop
+Worker** control the GPU/model process lifecycle; the bake command and PCM
 arrival control inference within that lifecycle.
 
 ## Shape Key targets and channel delivery
 
-Every Mesh, Curve, Surface, or Lattice in the target list receives the model
-channel stream, with no existing-Shape-Key admission check. These are all
-object types on which Blender 5.2 supports Shape Keys. At each frame, Blender
-uses each exact model-provided channel name to look up a Shape Key on each
-listed target. The target collection is resolved again for every delivered
-frame, so adding or removing an object takes effect on the next frame without
-restarting playback or inference. An empty list simply suppresses Blender
-writes; it does not stop the audio or worker stream.
-If that key exists, its value is assigned; if it does not, that channel is
-skipped for that target. Names are never translated or remapped, and there is
-no per-target multiplier.
+**Add Selected Objects** accepts Mesh, Curve, Surface, and Lattice objects.
+Each exact model-provided channel name drives the matching Shape Key; missing
+keys are skipped and names are never remapped. Targets do not need the NVIDIA
+reference topology.
 
-The loaded model supplies the exact ordered 52-channel list. A target can
-contain all, some, or none of those Shape Keys. Several objects may share one
-Shape Key datablock; delivery writes that shared datablock once per frame, so
-linked objects reflect the same values. Use single-user object data when
-objects need independent values.
+Stream targets are resolved for every delivered frame, so edits to the list
+take effect without restarting inference. An empty list suppresses Blender
+writes without stopping the stream.
 
-The selected Blender object does not need the Audio2Face reference topology.
-The default Audio2Face-3D v3.0 model repository carries its own
-identity-specific 24,002-vertex neutral basis and 52 pose bases. Inside the
-worker, NVIDIA's GPU blendshape solver converts the model's raw geometry output
-against that internal basis into 52 scalar coefficients. Only those named
-coefficients cross into Blender, where matching target Shape Keys receive the
-values and absent names are skipped. The model basis is never used to deform a
-Blender target directly.
+A bake requires at least one matching Shape Key. It stops before inference if
+a compatible Key datablock has an artist-owned active Action, and a successful
+bake assigns a new add-on-owned Action without deleting earlier Actions.
+Objects sharing one Key datablock share one result; make the object data
+single-user when independent animation is required.
 
 ## Audio modes and playback
 
-**Selected WAV** uses one stateful **Play/Pause** button. Pressing Play
-incrementally decodes, downmixes, and resamples the WAV, starts an internal
-`stream_start` / chunk / `stream_end` operation, and begins audible playback
-after the worker's required input lead is queued. ARKit frames are sampled
-against Blender's audio-device clock as they arrive. **Pause** freezes both
-audio and WAV pacing. **Loop** and the duration-based seek control
-restart that stream at the requested audio position while keeping the worker
-and models loaded. The seek control is an editable Blender slider whose native
-range is `0` through the selected WAV's duration, not a normalized progress
-display. The elapsed / duration timecode and **Prediction Delay**
-from `-1.0` to `1.0` seconds remain playback controls. Positive delay advances
-facial motion relative to audible audio; negative delay makes it lag.
+Choosing a **Selected WAV** creates or updates one add-on-owned sound strip in
+Blender's Video Sequencer at `scene.frame_start`. The add-on preserves unrelated
+strips and never shortens the scene range.
+
+The add-on's **Play/Pause** button calls Blender's native timeline playback and
+pause controls. Scrubbing, looping, audio output, and Action evaluation use
+Blender's normal timeline. Playback never starts inference and an existing
+bake plays without an active worker.
+
+**Bake Shape Key Animation** is asynchronous and separate from playback. It
+evaluates the selected WAV and animated Audio2Face controls at each integer
+scene frame, then writes LINEAR Shape Key curves. **Prediction Delay** shifts
+the sampled audio position; positive values advance the face and negative
+values make it lag. Canceling a bake leaves artist-owned Actions untouched.
 
 **Stream** accepts external model-rate mono f32le chunks. Call
 `get_pcm_stream_requirements(scene)` to obtain `(sample_rate, None)` before
@@ -200,76 +191,25 @@ the worker acknowledges it. Subsequent requirements return
 chunk. The integration owns capture, resampling, and audible monitoring. No
 port or network listener is opened.
 
-The worker reports an initial model-rate `prebuffer_samples` requirement that
-covers both Audio2Face and Audio2Emotion readiness, so automatic emotion can be
-toggled during an active stream. Streamed frames are buffered and sampled
-against the local audio or presentation clock; scene FPS is not used for
-synchronization.
-
 ## Model-driven emotion
 
-`load_model` returns a self-describing `model_schema` with exactly `channels`,
-`emotion_channels`, and `audio2face_defaults`. Blender builds target-channel
-delivery and emotion controls from the first two values and seeds its
-fixed Audio2Face controls from the model-reported defaults. It does not define
-an independent output or emotion name list. The worker uses the Audio2Face
-model's default identity at SDK index `0` internally; Blender has no identity
-selector or identity state.
+The loaded models define the channel list, emotion names, and Audio2Face
+defaults shown in Blender. **Preferred Emotion** values are saved and
+animatable; any nonzero channel enables that source and setting all channels to
+zero clears it. **Mixed Emotion** is transient, read-only live Stream output
+and never overwrites Preferred values.
 
-`stream_start` installs the fixed 18-field `audio2face` object and one
-compositional `emotion_driver`. Its generated and loaded-Preferred sources are
-independent; an absent source contributes zero. Blender presents saved,
-editable **Preferred Emotion** and transient, read-only **Mixed Emotion**.
-
-```json
-{
-  "emotion_strength": 0.6,
-  "generated": {
-    "emotion_contrast": 1.0,
-    "max_emotions": 6,
-    "live_blend_coef": 0.7,
-    "transition_smoothing": 0.5
-  },
-  "preferred": null
-}
-```
-
-Preferred and Mixed never synchronize. Editing Preferred while it is not loaded
-changes only its saved editor state. **Load/Clear** includes or removes that
-source without copying either collection. For generated values `G`, loaded
-Preferred `P`, mix weight `p`, and strength `e`, the worker applies
-`e * (pP + (1-p)G)`; absent sources are zero. **Emotion Strength** ranges from
-`0.0` to `2.0` without changing **Skin Strength**.
-Individual emotion values and the preferred-mix weight remain in `[0.0, 1.0]`.
-Equal emotion values are learned model-conditioning weights, not equal visual
-deformation amplitudes, so different emotions can remain perceptually uneven.
-
-Audio2Face's emotion callback is the sole Mixed Emotion source. Each frame
-carries the exact effective tensor used with its ARKit weights; Blender never
-derives it from Preferred. Mixed is transient, unsaved, unclamped, and reset to
-zero before a new stream or replay supplies fresh worker frames.
-
-The same complete settings contract applies to Selected WAV and Stream. A
-control edit queues one complete replacement snapshot on the active operation.
-The worker resets only its inference state, replays a bounded recent PCM
-context, and publishes replacement face frames on the same timeline. The
-operation ID, audible playback, play/pause state, external PCM ingress, loaded
-models, and worker process remain unchanged. The exact fields, types, ranges,
-and replay boundary are defined in
-[`docs/protocol.md`](docs/protocol.md#settings-document). Internal graph nodes
-and tensors are not controls.
+During a bake, keyframes and drivers on tuning and emotion controls affect the
+generated Shape Key curves. During a Stream, edits apply to subsequent audio
+without restarting the worker or replacing already presented frames. Exact
+settings fields and ranges are in the [protocol](docs/protocol.md#settings-document).
 
 ## Output contract
 
-The worker reports the default v3 model's exact 52 unique channel names in
-model order. It resolves eye-look values into the corresponding model-provided
-channel slots without reordering the list. Both modes receive incremental
-`stream_frame` records in that negotiated order. Each record also carries one
-effective, post-processed emotion value per `emotion_channels` entry in model
-order. Coefficients are finite and within `[0.0, 1.0]`; effective emotions are
-finite but are not clamped by NVIDIA's SDK. Both vectors share one integer
-audio-sample timestamp. Raw geometry, jaw transforms, eye rotations, and
-internal solver meshes never leave the worker.
+A bake returns 52 finite ARKit coefficients in model order for each requested
+Blender frame. Live Stream frames also return aligned effective emotion values.
+Only those scalars enter Blender; internal geometry, solver meshes, and
+transforms remain in the worker.
 
 See [architecture](docs/architecture.md), [protocol](docs/protocol.md), and the
 [worker build guide](worker/README.md) for the full contracts.
