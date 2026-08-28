@@ -110,6 +110,9 @@ class LiveStreamController:
         self._weights: list[tuple[float, ...]] = []
         self._effective_emotions: list[tuple[float, ...]] = []
         self._presentation_stopped: Callable[[], None] | None = None
+        self._timeline_playback_requested: Callable[[], None] | None = None
+        self._timeline_playback_started = False
+        self._last_timeline_frame: int | None = None
         self._terminal = False
         self._stream_clock_started: float | None = None
         self._stream_clock_origin = 0
@@ -129,6 +132,7 @@ class LiveStreamController:
         emotion_channels: tuple[str, ...],
         *,
         presentation_stopped: Callable[[], None] | None,
+        timeline_playback_requested: Callable[[], None] | None = None,
         timeline_frame_start: int | None = None,
         timeline_frame_end: int | None = None,
     ) -> None:
@@ -142,8 +146,20 @@ class LiveStreamController:
         self._channels = channels
         self._emotion_channels = emotion_channels
         self._presentation_stopped = presentation_stopped
+        self._timeline_playback_requested = timeline_playback_requested
         self._timeline_frame_start = timeline_frame_start
         self._timeline_frame_end = timeline_frame_end
+
+    def request_timeline_playback(self, callback: Callable[[], None]) -> None:
+        """Start or resume native playback once its current frame is buffered."""
+
+        if not self.active or self._timeline_frame_start is None:
+            raise LiveStreamError("selected-audio timeline playback is not active")
+        self._timeline_playback_requested = callback
+        scene = bpy.data.scenes.get(self._scene_name)
+        if scene is None or not scene.is_editable:
+            raise LiveStreamError("stream scene is no longer editable")
+        self._start_timeline_playback_if_ready(scene)
 
     def receive(
         self,
@@ -173,7 +189,7 @@ class LiveStreamController:
         if scene is None or not scene.is_editable:
             raise LiveStreamError("stream scene is no longer editable")
         if self._timeline_frame_start is not None:
-            self.tick()
+            self._start_timeline_playback_if_ready(scene)
             return
         if self._stream_clock_started is None:
             self._stream_clock_started = time.monotonic()
@@ -189,6 +205,10 @@ class LiveStreamController:
             not self._timestamps
             or scene is None
             or not scene.is_editable
+            or (
+                self._timeline_playback_requested is not None
+                and self._timestamps[-1] < self._requested_sample_position(scene)
+            )
             or self._terminal_reached(scene)
         ):
             self.stop(reset=False, notify=True)
@@ -216,6 +236,24 @@ class LiveStreamController:
         return self._stream_clock_origin + (
             time.monotonic() - self._stream_clock_started
         ) * self._sample_rate
+
+    def _requested_sample_position(self, scene: bpy.types.Scene) -> float:
+        delay = float(scene.audio2face.prediction_delay)
+        if not math.isfinite(delay):
+            raise LiveStreamError("prediction delay must be finite")
+        return self._stream_sample_position(scene) + delay * self._sample_rate
+
+    def _start_timeline_playback_if_ready(self, scene: bpy.types.Scene) -> None:
+        callback = self._timeline_playback_requested
+        if (
+            callback is None
+            or not self._timestamps
+            or self._timestamps[-1] < self._requested_sample_position(scene)
+        ):
+            return
+        self._timeline_playback_requested = None
+        callback()
+        self._timeline_playback_started = True
 
     def _drop_old_frames(self, sample_position: float) -> None:
         if len(self._timestamps) < 3:
@@ -265,19 +303,26 @@ class LiveStreamController:
         settings = scene.audio2face
         if not self._timestamps:
             return True
-        sample_position = self._stream_sample_position(scene)
         try:
-            delay = float(settings.prediction_delay)
-            if not math.isfinite(delay):
-                raise LiveStreamError("prediction delay must be finite")
-            self._apply_sampled_frame(
-                settings,
-                sample_position + delay * self._sample_rate,
-            )
+            sample_position = self._stream_sample_position(scene)
+            requested_sample = self._requested_sample_position(scene)
+            if self._timeline_frame_start is not None:
+                if not self._timeline_playback_started:
+                    return True
+                timeline_frame = int(scene.frame_current)
+                if timeline_frame == self._last_timeline_frame:
+                    self._drop_old_frames(requested_sample)
+                    return True
+                self._last_timeline_frame = timeline_frame
+                if requested_sample > self._timestamps[-1]:
+                    settings.stream_time = max(
+                        0.0, sample_position / self._sample_rate
+                    )
+                    self._drop_old_frames(requested_sample)
+                    return True
+            self._apply_sampled_frame(settings, requested_sample)
             settings.stream_time = max(0.0, sample_position / self._sample_rate)
-            self._drop_old_frames(
-                min(sample_position, sample_position + delay * self._sample_rate)
-            )
+            self._drop_old_frames(min(sample_position, requested_sample))
             if self._terminal and self._terminal_reached(scene):
                 self.stop(reset=False, notify=True)
                 return False
@@ -317,6 +362,9 @@ class LiveStreamController:
         self._weights.clear()
         self._effective_emotions.clear()
         self._presentation_stopped = None
+        self._timeline_playback_requested = None
+        self._timeline_playback_started = False
+        self._last_timeline_frame = None
         self._terminal = False
         self._stream_clock_started = None
         self._stream_clock_origin = 0

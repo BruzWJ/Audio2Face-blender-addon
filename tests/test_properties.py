@@ -255,7 +255,8 @@ def test_selected_play_operator_calls_blender_native_timeline_transport() -> Non
     assert "configure_selected_audio" in OPERATORS_SOURCE
     assert "controller.start_selected_audio(" in OPERATORS_SOURCE
     assert "controller.cancel_selected_audio(scene)" in OPERATORS_SOURCE
-    assert OPERATORS_SOURCE.index("controller.start_selected_audio(") < (
+    assert "playback_requested=start_native_playback" in OPERATORS_SOURCE
+    assert OPERATORS_SOURCE.index("def start_native_playback()") < (
         OPERATORS_SOURCE.index("bpy.ops.screen.animation_play()")
     )
 

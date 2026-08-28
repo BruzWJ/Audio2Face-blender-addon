@@ -121,6 +121,7 @@ def _prepare_timeline(
     live: ModuleType,
     scene: _Scene,
     *,
+    playback_started: list[str] | None = None,
     stopped: list[str] | None = None,
     frame_end: int | None = None,
 ) -> tuple[object, int]:
@@ -135,6 +136,11 @@ def _prepare_timeline(
         presentation_stopped=(
             (lambda: stopped.append("stream-1")) if stopped is not None else None
         ),
+        timeline_playback_requested=(
+            (lambda: playback_started.append("stream-1"))
+            if playback_started is not None
+            else (lambda: None)
+        ),
         timeline_frame_start=10,
         timeline_frame_end=frame_end,
     )
@@ -145,6 +151,36 @@ def _prepare_timeline(
     controller.receive("stream-1", 0, closed, [1.0, 0.0])
     controller.receive("stream-1", 16_000, opened, [0.0, 1.0])
     return controller, jaw
+
+
+def test_timeline_playback_waits_for_frame_start_coverage(
+    live_module: tuple[ModuleType, _Scene, list[AppliedFrame]],
+) -> None:
+    live, scene, applied = live_module
+    started: list[str] = []
+    scene.frame_current = 10
+    controller = live.LiveStreamController()
+    controller.prepare(
+        scene,
+        "stream-1",
+        16_000,
+        tuple(MODEL_CHANNELS),
+        tuple(MODEL_EMOTION_CHANNELS),
+        presentation_stopped=None,
+        timeline_playback_requested=lambda: started.append("stream-1"),
+        timeline_frame_start=10,
+    )
+    weights = [0.25] * len(MODEL_CHANNELS)
+
+    controller.receive("stream-1", -160, weights, MODEL_EMOTIONS.copy())
+    assert (started, applied) == ([], [])
+
+    controller.receive("stream-1", 0, weights, MODEL_EMOTIONS.copy())
+    assert started == ["stream-1"]
+    assert applied == []
+
+    assert controller.tick() is True
+    assert applied == [(tuple(MODEL_CHANNELS), tuple(weights))]
 
 
 def test_source_free_stream_applies_negative_timestamp_frame_immediately(
@@ -231,11 +267,34 @@ def test_timeline_stream_samples_scene_frame_at_effective_fps(
     )
     assert scene.audio2face.stream_time == pytest.approx(0.5)
     paused_weight = applied[-1][1][jaw]
+    applied_count = len(applied)
     now[0] += 60.0
     controller.tick()
 
     assert applied[-1][1][jaw] == pytest.approx(paused_weight)
+    assert len(applied) == applied_count
     assert scene.audio2face.stream_time == pytest.approx(0.5)
+
+
+def test_late_timeline_frames_never_update_a_frozen_blender_frame(
+    live_module: tuple[ModuleType, _Scene, list[AppliedFrame]],
+) -> None:
+    live, scene, applied = live_module
+    controller, jaw = _prepare_timeline(live, scene)
+    controller.tick()
+    applied_count = len(applied)
+
+    scene.frame_current = 46
+    assert controller.tick() is True
+    assert len(applied) == applied_count
+
+    late = [0.0] * len(MODEL_CHANNELS)
+    late[jaw] = 0.75
+    controller.receive("stream-1", 19_000, late, [0.5, 0.5])
+    controller.tick()
+
+    assert len(applied) == applied_count
+    assert controller._timestamps == [19_000]
 
 
 def test_terminal_timeline_stream_stops_on_selected_audio_end_frame(
@@ -262,6 +321,39 @@ def test_terminal_timeline_stream_stops_on_selected_audio_end_frame(
     scene.frame_current = 33
     assert controller.tick() is False
     assert controller.active is False
+    assert stopped == ["stream-1"]
+
+
+def test_terminal_timeline_stream_stops_when_start_frame_was_never_ready(
+    live_module: tuple[ModuleType, _Scene, list[AppliedFrame]],
+) -> None:
+    live, scene, _applied = live_module
+    stopped: list[str] = []
+    started: list[str] = []
+    scene.frame_current = 10
+    controller = live.LiveStreamController()
+    controller.prepare(
+        scene,
+        "stream-1",
+        16_000,
+        tuple(MODEL_CHANNELS),
+        tuple(MODEL_EMOTION_CHANNELS),
+        presentation_stopped=lambda: stopped.append("stream-1"),
+        timeline_playback_requested=lambda: started.append("stream-1"),
+        timeline_frame_start=10,
+        timeline_frame_end=20,
+    )
+    controller.receive(
+        "stream-1",
+        -160,
+        [0.0] * len(MODEL_CHANNELS),
+        MODEL_EMOTIONS.copy(),
+    )
+
+    controller.mark_terminal("stream-1")
+
+    assert controller.active is False
+    assert started == []
     assert stopped == ["stream-1"]
 
 

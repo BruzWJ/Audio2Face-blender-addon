@@ -128,14 +128,14 @@ driver caches.
    model channel; targets remain optional for a live Stream.
 5. Click **Start Worker**. Blender launches the verified package-local worker,
    negotiates the protocol, loads both selected models, and keeps their
-   interactive Audio2Face and Audio2Emotion executors ready for use.
+   incremental Audio2Face and Audio2Emotion executors ready for playback.
 6. Configure the saved, animatable **Preferred Emotion** sliders. Any nonzero
    value enables that source; set every value to zero to clear it. **Mixed
    Emotion** is read-only output from live Selected WAV playback or Stream
    input.
-7. In Selected WAV mode, click **Play**. Blender starts its native timeline and
-   sound playback while the add-on lazily feeds the WAV through the live stream
-   protocol. Incoming frames update matching Shape Keys transiently. Click
+7. In Selected WAV mode, click **Play**. The add-on primes inference, then starts
+   Blender's native timeline and sound playback when the starting frame is
+   available. Incoming frames update matching Shape Keys transiently. Click
    **Bake Shape Key Animation** separately when those results should become
    native Shape Key Actions.
 8. In Stream mode, the first `push_audio_f32le` call automatically starts the
@@ -144,8 +144,8 @@ driver caches.
    models and CUDA resources.
 
 Installing or enabling the extension does not start the worker. Loading the
-models creates and retains the interactive executors but does not continuously
-execute audio inference. GPU work is driven by Selected WAV playback, a
+models creates and retains the incremental streaming executors but does not
+continuously execute audio inference. GPU work is driven by Selected WAV playback, a
 Selected WAV bake, or an external PCM stream. **Start Worker** and **Stop
 Worker** control the GPU/model process lifecycle; each audio operation uses the
 already loaded executors within that lifecycle.
@@ -172,12 +172,14 @@ Choosing a **Selected WAV** creates or updates one add-on-owned sound strip in
 Blender's Video Sequencer at `scene.frame_start`. The add-on preserves unrelated
 strips and never shortens the scene range.
 
-**Play** calls Blender's native timeline playback and lazily decodes,
-downmixes, and resamples the selected WAV into model-rate PCM. The add-on sends
+**Play** lazily decodes, downmixes, and resamples the selected WAV into
+model-rate PCM. The add-on sends
 that PCM through the existing `stream_start` / `stream_chunk` / `stream_end`
-protocol. Blender's native timeline and audio playback are the presentation
-clock, and incoming stream frames directly update matching Shape Key values as
-transient preview state without creating an Action. **Pause** only calls
+protocol, then calls Blender's native timeline playback after inference covers
+the current frame. Blender's native timeline and audio playback are the
+presentation clock; received frames are buffered and sampled only when the
+Blender frame changes. Shape Key values therefore remain frozen while paused.
+Preview values are transient and do not create an Action. **Pause** only calls
 Blender's native playback pause control. A new preview begins at
 `scene.frame_start`; Play after Pause resumes that active preview.
 

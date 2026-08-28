@@ -47,9 +47,9 @@ def test_worker_schema_uses_model_reported_values() -> None:
 
 def test_worker_reports_exact_model_owned_audio2face_defaults() -> None:
     for expression in (
-        "nva2f::GetInteractiveExecutorInputStrength(",
-        "nva2f::GetInteractiveExecutorSkinParameters(",
-        "nva2f::GetInteractiveExecutorEyesParameters(",
+        "nva2f::GetExecutorInputStrength(",
+        "nva2f::GetExecutorSkinParameters(",
+        "nva2f::GetExecutorEyesParameters(",
         '{"audio2face_defaults",',
     ):
         assert expression in SOURCE
@@ -68,11 +68,11 @@ def test_worker_reports_exact_model_owned_audio2face_defaults() -> None:
     defaults = SOURCE[SOURCE.index("Audio2FaceSettings audio2face_defaults;") :]
     defaults = defaults[: defaults.index("audio2face_defaults_ = audio2face_defaults;")]
     for getter in (
-        "GetInteractiveExecutorInputStrength",
-        "GetInteractiveExecutorSkinParameters",
-        "GetInteractiveExecutorEyesParameters",
+        "GetExecutorInputStrength",
+        "GetExecutorSkinParameters",
+        "GetExecutorEyesParameters",
     ):
-        assert re.search(rf"{getter}\(\s*\*interactive_executor_,", defaults)
+        assert re.search(rf"{getter}\(\s*geometry_executor\(\),", defaults)
 
 
 def test_audio2emotion_output_matches_the_effective_emotion_schema() -> None:
@@ -169,7 +169,7 @@ def test_output_keeps_model_order_and_named_eye_resolution() -> None:
         "interactive_executor_->GetWeightCount() != kArkit52ChannelCount"
         in SOURCE
     )
-    assert "pending.weights->Data()[channel]" in SOURCE
+    assert "copy_finite_values(\n        *pending.weights" in SOURCE
     assert not re.search(r"weights\[\d+\]\s*=", SOURCE)
     resolver = re.search(
         r"ArkitEyeLookIndices resolve_arkit_eye_look_indices\(.*?\n\}",
@@ -183,18 +183,24 @@ def test_output_keeps_model_order_and_named_eye_resolution() -> None:
 def test_stream_frames_carry_the_model_channel_order() -> None:
     assert '{"channels", std::move(output_channels)}' in SOURCE
     assert "capture.weight_count = interactive_executor_->GetWeightCount()" in SOURCE
+    assert "capture.weight_count = executor().GetWeightCount()" in SOURCE
     assert "capture.emotion_count = emotion_channels_.size()" in SOURCE
-    assert "pending.weights->Data()[channel]" in SOURCE
+    assert "copy_finite_values(\n        *pending.weights" in SOURCE
     assert "effective_emotions_at(timestamp)" in SOURCE
-    assert "frame_callback(local);" in SOURCE
+    assert "frame_callback(make_stream_frame(" in SOURCE
 
 
 def test_interactive_arkit_solve_initializes_all_sdk_postprocessors() -> None:
     assert "constexpr std::size_t kDefaultIdentityIndex = 0" in SOURCE
-    assert "ReadDiffusionBlendshapeSolveModelInfo(" in SOURCE
+    assert "ReadDiffusionBlendshapeSolveExecutorBundle(" in SOURCE
+    assert "&geometry_model_info" in SOURCE
+    assert "&blendshape_model_info" in SOURCE
     assert "ExecutionOption::All" in SOURCE
-    assert SOURCE.count("ExecutionOption::Skin") == 2
-    assert "ExecutionOption::Skin |" not in SOURCE
+    assert "ExecutionOption::Skin |" in SOURCE
+    interactive_setup = SOURCE[SOURCE.index("  void ensure_interactive_executors()") :]
+    interactive_setup = interactive_setup[: interactive_setup.index("  void require_model_locked()")]
+    assert "ExecutionOption::All" in interactive_setup
+    assert "ExecutionOption::Skin," in interactive_setup
     assert "blendshape_parameters.initializationSkinParams" in SOURCE
     assert "kDefaultIdentityIndex, true" in SOURCE
     assert "CreateDeviceBlendshapeSolveInteractiveExecutor(" in SOURCE
@@ -286,7 +292,7 @@ def test_worker_uses_one_compositional_emotion_driver() -> None:
     assert "amount < 0.0F || amount > 1.0F" in SOURCE
 
 
-def test_stream_uses_one_monotonic_interactive_timeline() -> None:
+def test_stream_uses_incremental_regular_executors() -> None:
     start = re.search(
         r"  json stream_start\(.*?(?=\n  void stream_chunk\()",
         SOURCE,
@@ -302,10 +308,9 @@ def test_stream_uses_one_monotonic_interactive_timeline() -> None:
     )
     assert begin is not None
     begin_source = begin.group(0)
-    assert "const std::size_t base_capacity = prebuffer_samples_ + sample_rate_;" in (
-        begin_source
-    )
-    assert "base_capacity + frame_alignment_samples_ - 1" in begin_source
+    assert "ensure_stream_executors();" in begin_source
+    assert "retained_audio_capacity_ = prebuffer_samples_ + sample_rate_;" in begin_source
+    assert "reset_stream_inference(settings);" in begin_source
 
     update = re.search(
         r"  void stream_settings\(.*?(?=\n  void stream_end\()",
@@ -314,37 +319,50 @@ def test_stream_uses_one_monotonic_interactive_timeline() -> None:
     )
     assert update is not None
     update_source = update.group(0)
-    assert "parse_settings(settings)" in update_source
-    assert "interactive_stream_settings_ = settings;" in update_source
-    assert "configure_interactive_audio2face(parsed.audio2face);" in update_source
-    assert "configure_interactive_generated_emotion();" in update_source
+    assert "reset_stream_inference(settings);" in update_source
+    assert "timestamp_offset_" in update_source
+    assert "accumulate_audio(replay.data(), replay.size());" in update_source
+    assert "interactive" not in update_source
 
-    assert "retain_audio(audio);" in SOURCE
-    assert "while (retained_audio_.size() > retained_audio_capacity_)" in SOURCE
-    interactive = re.search(
-        r"  void evaluate_interactive_stream\(.*?"
-        r"(?=\n  BakeFrame compute_bake_frame\()",
+    chunk = re.search(
+        r"  void stream_chunk\(.*?(?=\n  void stream_settings\()",
         SOURCE,
         flags=re.DOTALL,
     )
-    assert interactive is not None
-    interactive_source = interactive.group(0)
-    assert "refill_interactive_audio(window);" in interactive_source
-    assert "prepare_interactive_settings(interactive_stream_settings_" in interactive_source
-    assert (
-        interactive_source.index("refill_interactive_audio(window);")
-        < interactive_source.index(
-            "prepare_interactive_settings(interactive_stream_settings_"
-        )
-        < interactive_source.index("GetTotalNbFrames()")
+    assert chunk is not None
+    chunk_source = chunk.group(0)
+    assert "accumulate_audio(audio.data(), audio.size());" in chunk_source
+    assert "retain_audio(audio);" in chunk_source
+    assert "drain_ready(canceled, frame);" in chunk_source
+    assert "interactive" not in chunk_source
+    assert "while (retained_audio_.size() > retained_audio_capacity_)" in SOURCE
+    drain = re.search(
+        r"  void drain_interleaved_ready\(.*?"
+        r"(?=\n  void execute_generated_emotion_once\()",
+        SOURCE,
+        flags=re.DOTALL,
     )
-    assert "compute_interactive_frame(index, canceled)" in interactive_source
-    assert "timestamp <= *previous_timestamp_" in interactive_source
-    assert "timestamp > safe_through" in interactive_source
-    assert "previous_timestamp_ = timestamp;" in interactive_source
+    assert drain is not None
+    assert "GetNbReadyTracks(executor())" in drain.group(0)
+    assert "GetNbReadyTracks(*emotion_executor_)" in drain.group(0)
+    assert "evaluate_interactive_stream" not in SOURCE
 
 
-def test_interactive_path_uses_supported_setters_and_closed_inputs() -> None:
+def test_stream_and_bake_swap_executor_families() -> None:
+    bake_start = SOURCE[SOURCE.index("  json bake_start(") :]
+    bake_start = bake_start[: bake_start.index("  json bake_chunk(")]
+    assert bake_start.index("clear_stream_executors();") < bake_start.index(
+        "ensure_interactive_executors();"
+    )
+
+    bake_end = SOURCE[SOURCE.index("  void bake_end()") :]
+    bake_end = bake_end[: bake_end.index("  void interrupt_operation()")]
+    assert bake_end.index("clear_interactive_executors();") < bake_end.index(
+        "ensure_stream_executors();"
+    )
+
+
+def test_bake_path_uses_supported_interactive_setters_and_closed_inputs() -> None:
     for expression in (
         "CreateDiffusionGeometryInteractiveExecutor(",
         "CreateDeviceBlendshapeSolveInteractiveExecutor(",
@@ -367,9 +385,7 @@ def test_interactive_path_uses_supported_setters_and_closed_inputs() -> None:
         flags=re.DOTALL,
     )
     assert stream_update is not None
-    assert "SetExecutor" not in stream_update.group(0)
-    assert "configure_interactive_audio2face(parsed.audio2face);" in stream_update.group(0)
-    assert "configure_interactive_generated_emotion();" in stream_update.group(0)
+    assert "interactive" not in stream_update.group(0)
 
 
 def test_bake_frame_computes_only_neighbor_frames_then_interpolates() -> None:
@@ -408,4 +424,6 @@ def test_bake_frame_computes_only_neighbor_frames_then_interpolates() -> None:
 
 
 def test_interactive_face_path_computes_only_the_requested_frame() -> None:
-    assert "ComputeAllFrames" not in SOURCE[SOURCE.index("  StreamFrame compute_interactive_frame(") : SOURCE.index("  void evaluate_interactive_stream(")]
+    face = SOURCE[SOURCE.index("  StreamFrame compute_interactive_frame(") :]
+    face = face[: face.index("  void accumulate_audio(")]
+    assert "ComputeAllFrames" not in face

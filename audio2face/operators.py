@@ -227,19 +227,22 @@ class A2F_OT_play_pause(bpy.types.Operator):
             audio_path = bpy.path.abspath(settings.audio_path)
             _strip, audio_end = configure_selected_audio(scene, audio_path)
             controller = get_controller()
-            controller.start_selected_audio(
-                scene,
-                timeline_frame_end=audio_end,
-            )
-            try:
-                playback_result = bpy.ops.screen.animation_play()
+            window = context.window
+
+            def start_native_playback() -> None:
+                with bpy.context.temp_override(window=window, screen=window.screen):
+                    playback_result = bpy.ops.screen.animation_play()
                 if playback_result != {"FINISHED"}:
+                    controller.cancel_selected_audio(scene)
                     raise RuntimeError(
                         "Blender could not start native timeline playback"
                     )
-            except Exception:
-                controller.cancel_selected_audio(scene)
-                raise
+
+            controller.start_selected_audio(
+                scene,
+                timeline_frame_end=audio_end,
+                playback_requested=start_native_playback,
+            )
         except (OSError, RuntimeError, SidecarError, ValueError) as exc:
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}

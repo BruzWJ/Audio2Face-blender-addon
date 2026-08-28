@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 from collections import deque
+from collections.abc import Callable
 import math
 import os
 import queue
@@ -747,6 +748,7 @@ class RuntimeController:
         *,
         audio_path: Path | None = None,
         wav_source: WavStreamSource | None = None,
+        timeline_playback_requested: Callable[[], None] | None = None,
         timeline_frame_start: int | None = None,
         timeline_frame_end: int | None = None,
     ) -> None:
@@ -770,6 +772,7 @@ class RuntimeController:
                 scene.name,
                 operation_id,
             ),
+            timeline_playback_requested=timeline_playback_requested,
             timeline_frame_start=timeline_frame_start,
             timeline_frame_end=timeline_frame_end,
         )
@@ -807,8 +810,9 @@ class RuntimeController:
         scene: bpy.types.Scene,
         *,
         timeline_frame_end: int,
+        playback_requested: Callable[[], None],
     ) -> None:
-        """Feed the selected WAV to the loaded interactive executors."""
+        """Feed the selected WAV to the loaded streaming executors."""
 
         self._require_editable_scene(scene)
         audio_path = self._selected_path(
@@ -822,6 +826,9 @@ class RuntimeController:
             and stream.audio_path == audio_path
             and not stream.stop_requested
         ):
+            get_live_stream_controller().request_timeline_playback(
+                playback_requested
+            )
             return
 
         self._require_operation_idle()
@@ -841,6 +848,7 @@ class RuntimeController:
                 scene,
                 audio_path=audio_path,
                 wav_source=wav_source,
+                timeline_playback_requested=playback_requested,
                 timeline_frame_start=scene.frame_start,
                 timeline_frame_end=timeline_frame_end,
             )

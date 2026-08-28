@@ -535,6 +535,7 @@ def main() -> None:
 
         live = runtime.get_live_stream_controller()
         routed_operation = "blender-smoke-stream"
+        playback_started: list[None] = []
         try:
             live.prepare(
                 scene,
@@ -543,6 +544,7 @@ def main() -> None:
                 tuple(MODEL_CHANNELS),
                 ("Neutral", "Joy"),
                 presentation_stopped=None,
+                timeline_playback_requested=lambda: playback_started.append(None),
                 timeline_frame_start=int(scene.frame_current),
             )
             controller.active_stream = runtime.ActiveStream(
@@ -551,8 +553,8 @@ def main() -> None:
             )
             streamed_frame = [0.0] * len(MODEL_CHANNELS)
             streamed_frame[MODEL_CHANNELS.index("jawOpen")] = 0.375
-            # Selected timeline delivery accepts receptive-field frames before
-            # sample zero and applies them without creating animation data.
+            # Selected timeline delivery buffers receptive-field frames until
+            # the native start frame has model coverage.
             _route_stream_event(
                 controller,
                 routed_operation,
@@ -563,6 +565,25 @@ def main() -> None:
                     "effective_emotions": [0.25, 1.25],
                 },
             )
+            assert playback_started == []
+            _assert_close(
+                target.data.shape_keys.key_blocks["jawOpen"].value,
+                0.0,
+                label="buffered live-stream jawOpen",
+            )
+            _assert_close(settings.stream_time, 0.0, label="negative stream time clamp")
+            _route_stream_event(
+                controller,
+                routed_operation,
+                "stream_frame",
+                {
+                    "timestamp_sample": 0,
+                    "weights": streamed_frame,
+                    "effective_emotions": [0.75, 0.25],
+                },
+            )
+            assert playback_started == [None]
+            assert live.tick() is True
             for keyed_target in (
                 target,
                 extra_target,
@@ -576,28 +597,6 @@ def main() -> None:
                     0.375,
                     label=f"{keyed_target.name} live-stream jawOpen",
                 )
-            _assert_close(settings.stream_time, 0.0, label="negative stream time clamp")
-            _assert_close(
-                settings.mixed_emotions[0].value,
-                0.25,
-                label="mixed Neutral",
-            )
-            _assert_close(
-                settings.mixed_emotions[1].value,
-                1.25,
-                label="mixed Joy",
-            )
-            _route_stream_event(
-                controller,
-                routed_operation,
-                "stream_frame",
-                {
-                    "timestamp_sample": 0,
-                    "weights": streamed_frame,
-                    "effective_emotions": [0.75, 0.25],
-                },
-            )
-            assert live.tick() is True
             _assert_close(
                 settings.mixed_emotions[0].value,
                 0.75,

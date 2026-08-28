@@ -35,9 +35,9 @@ Blender 5.2 extension -- private audio2face/10 JSONL -- native worker |
 Blender owns the package-local worker as a child process. The worker opens no
 port, and CUDA, TensorRT, Audio2X, model metadata, and inference executors stay
 outside Blender's process. **Start Worker** launches the child, loads the two
-models, creates their interactive Audio2Face and Audio2Emotion executors, and
-keeps those executors available for later audio operations. **Stop Worker**
-exits the child and releases the executors, models, and CUDA resources.
+models, and creates the regular Audio2Face and Audio2Emotion streaming
+executors. **Stop Worker** exits the child and releases the executors, models,
+and CUDA resources.
 Installing or enabling the extension does not start the worker. Loaded
 executors do not execute audio inference continuously without PCM input.
 
@@ -122,11 +122,13 @@ duration is `ceil(seconds * fps / fps_base)` frames. The inclusive audio end is
 `frame_start + duration_frames - 1`, and `scene.frame_end` is extended to that
 frame when necessary but never shortened.
 
-**Play** invokes Blender's native timeline operator and lazily decodes,
-downmixes, and resamples the WAV into model-rate mono f32le. That PCM travels
-through the existing stream protocol. Blender's native timeline and sound
-playback are the presentation clock; incoming stream frames directly update
-matching Shape Key values as transient state without creating an Action.
+**Play** lazily decodes, downmixes, and resamples the WAV into model-rate mono
+f32le and begins feeding it through the existing stream protocol. Blender's
+native timeline operator is invoked only after a worker frame covers the
+current start-frame sample. The native timeline and sound playback then become
+the sole presentation clock. Incoming frames only extend the buffer; matching
+Shape Key values are sampled once per changed Blender frame, so a paused frame
+cannot continue changing as results arrive.
 **Pause** invokes only Blender's native playback pause operator. A new preview
 starts at `scene.frame_start`; Play after Pause resumes the active stream.
 
@@ -155,26 +157,25 @@ resampling, and audible monitoring. The main-thread poll starts the operation,
 flushes the bounded FIFO in order, and applies worker credits as backpressure.
 No network listener is created.
 
-### Interactive worker execution
+### Native executor lifecycles
 
-Model loading during **Start Worker** creates one interactive Audio2Emotion
-executor, one interactive Audio2Face/device-blendshape executor, and their
-shared accumulators on CUDA device 0. The worker retains them until **Stop
-Worker**. Selected WAV playback, external Stream input, and bake use those same
-executors; there is no incremental executor path or mid-stream executor switch.
+Model loading during **Start Worker** creates regular Audio2Emotion and
+Audio2Face/device-blendshape executors on CUDA device 0. Selected WAV playback
+and external Stream input append each PCM chunk once. A face-first,
+emotion-second readiness loop executes whichever retained regular executor can
+advance, publishes strictly increasing timestamps, and drops only input that
+both consumers have processed. Normal end-of-input closes the accumulators and
+drains their tail.
 
-For a Stream, the worker retains a bounded, frame-aligned PCM window. It refills
-the accumulators for that window, computes its effective-emotion curve, and
-calls the Audio2Face executor's targeted `ComputeFrame` only for safe frame
-indices that have not already been published. Window-local timestamps are
-translated to one strictly increasing operation timeline; lookahead frames wait
-for more PCM, and normal end-of-input releases the tail.
-
-For a bake, the worker fills the accumulators from the complete uploaded PCM.
+Interactive executors are created only for bake. Before bake begins, the worker
+destroys the regular family; this prevents two copies of the Audio2Face and
+Audio2Emotion TensorRT contexts from occupying GPU memory. For a bake, the
+worker fills the interactive accumulators from the complete uploaded PCM.
 Each requested Blender frame supplies its evaluated settings and target sample;
 the worker calls `ComputeFrame` for the one or two source frames bracketing that
 sample and linearly interpolates their weights. This avoids computing and
-caching a complete face track for every settings snapshot.
+caching a complete face track for every settings snapshot. Bake completion
+destroys the interactive family and recreates the regular streaming family.
 
 ## Model schema and inference settings
 
@@ -194,10 +195,13 @@ controls from the returned defaults.
 
 Each operation uses a complete `audio2face` and compositional `emotion_driver`
 snapshot defined by the [protocol](protocol.md#settings-document). A Stream
-installs snapshots at ordered queue boundaries on the same interactive
-executors and only unpublished frames use the replacement. A bake sends the
-RNA-evaluated snapshot for each requested Blender frame, so keyframes and
-drivers can shape the generated curves without the add-on keyframing those
+installs its initial snapshot before regular execution. The SDK does not permit
+regular executor setters after execution starts, so an ordered settings change
+resets only the native executor state, replays its bounded retained context,
+and suppresses timestamps that were already published. It does not restart the
+worker, emit a presentation reset, or replace Blender's buffered frames. A bake
+sends the RNA-evaluated snapshot for each requested Blender frame, so keyframes
+and drivers can shape the generated curves without the add-on keyframing those
 controls.
 
 Preferred and Mixed Emotion have disjoint ownership. Blender owns the saved,

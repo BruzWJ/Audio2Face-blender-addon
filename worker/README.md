@@ -158,18 +158,19 @@ The process is silent until `hello {}` and communicates only through strict
 `audio2face/10` UTF-8 JSON Lines on stdin/stdout. It reports worker profile
 `nvidia-a2f3-a2e3-gpu-arkit52/10`.
 
-Model loading creates one interactive Audio2Emotion executor, one interactive
-Audio2Face/device-blendshape executor, and their shared accumulators on CUDA
-device 0. The same executors serve Stream and bake.
+Model loading creates regular Audio2Emotion and Audio2Face/device-blendshape
+executors on CUDA device 0. Live PCM is accumulated once and drained with the
+SDK's readiness APIs, so stream timestamps progress with the incoming audio
+instead of recomputing a rolling whole-track window.
 
-For live PCM, the worker keeps a bounded aligned audio window, computes its
-effective-emotion curve, and invokes targeted Audio2Face `ComputeFrame` calls
-only for safe unpublished indices. A settings command reconfigures those
-executors at its ordered queue position without replacing published frames. An
-offline bake fills the accumulators from the complete PCM and computes the one
-or two source frames needed for each requested target sample before linear
-interpolation. Cancellation calls the active interactive executor's
-cross-thread `Interrupt()`.
+An offline bake swaps out the regular executor family before creating the
+interactive Audio2Emotion and Audio2Face executors. It fills their accumulators
+from the complete PCM and computes the one or two source frames needed for each
+requested target sample before linear interpolation. The regular family is
+recreated when bake ends, avoiding duplicate resident TensorRT contexts.
+Cancellation calls the active interactive executor's cross-thread
+`Interrupt()` during bake; live stream cancellation is cooperative between
+regular executions.
 
 The worker opens no socket and an idle loaded model does not run inference. See
 the exact [protocol](../docs/protocol.md) and the Blender-side

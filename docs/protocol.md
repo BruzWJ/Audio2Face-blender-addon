@@ -171,8 +171,8 @@ and every `bake_frame` carries one complete snapshot.
 Parameters contain exactly `operation_id`, `sample_rate`, and `settings`.
 `operation_id` is non-empty and at most 128 characters, `sample_rate` equals the
 rate returned by `load_model`, and `settings` is the complete object defined
-under **Settings document**. The worker initializes an interactive stream with
-that snapshot and returns exactly:
+under **Settings document**. The worker resets its retained regular executors,
+installs that snapshot, and returns exactly:
 
 ```json
 {"sample_rate":16000,"prebuffer_samples":60000}

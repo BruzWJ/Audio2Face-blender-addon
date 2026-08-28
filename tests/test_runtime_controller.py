@@ -109,6 +109,7 @@ class _LiveController:
         self.terminal_calls: list[str] = []
         self.stop_calls: list[dict[str, object]] = []
         self.prepare_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+        self.timeline_playback_requests: list[object] = []
 
     def tick(self) -> bool:
         return False
@@ -130,6 +131,9 @@ class _LiveController:
 
     def mark_terminal(self, operation_id: str) -> None:
         self.terminal_calls.append(operation_id)
+
+    def request_timeline_playback(self, callback: object) -> None:
+        self.timeline_playback_requests.append(callback)
 
 
 class _Timers:
@@ -353,7 +357,11 @@ def _start_selected_audio(runtime, bpy, monkeypatch, tmp_path, *, frame=1):  # t
     controller.client.request = lambda method, params: (
         requests.append((method, params)) or f"request-{len(requests)}"
     )
-    controller.start_selected_audio(scene, timeline_frame_end=24)
+    controller.start_selected_audio(
+        scene,
+        timeline_frame_end=24,
+        playback_requested=lambda: None,
+    )
     stream = controller.active_stream
     assert stream is not None
     return controller, stream.wav_source, requests
@@ -1549,11 +1557,28 @@ def test_selected_audio_starts_existing_stream_without_eager_wav_decode(
         "timeline_frame_start"
     ] == 1
     assert runtime._test_live_controller.prepare_calls[0][1]["timeline_frame_end"] == 24
+    assert callable(
+        runtime._test_live_controller.prepare_calls[0][1][
+            "timeline_playback_requested"
+        ]
+    )
     assert bpy.data.scenes[0].frame_current == 1
 
     controller._poll_selected_audio()
 
     assert (source.advances, len(requests)) == (0, 1)
+
+    resumed: list[None] = []
+
+    def resume() -> None:
+        resumed.append(None)
+
+    controller.start_selected_audio(
+        bpy.data.scenes[0],
+        timeline_frame_end=24,
+        playback_requested=resume,
+    )
+    assert runtime._test_live_controller.timeline_playback_requests == [resume]
 
     replacement = tmp_path / "replacement.wav"
     replacement.write_bytes(b"fixture")
