@@ -396,12 +396,10 @@ class Backend::Impl final {
           nva2f::ReadDiffusionBlendshapeSolveModelInfo(
               request.audio2face_model_path.c_str()),
           "Reading diffusion blendshape solver", "model_invalid");
-      const auto execution_option =
-          nva2f::IGeometryExecutor::ExecutionOption::Skin |
-          nva2f::IGeometryExecutor::ExecutionOption::Eyes;
       const auto blendshape_parameters =
           blendshape_model_info_->GetExecutorCreationParameters(
-              execution_option, kDefaultIdentityIndex);
+              nva2f::IGeometryExecutor::ExecutionOption::Skin,
+              kDefaultIdentityIndex);
       std::vector<std::string> output_channels =
           skin_pose_names(blendshape_parameters.initializationSkinParams);
       validate_arkit52_channels(output_channels);
@@ -807,12 +805,10 @@ class Backend::Impl final {
     const nva2x::IEmotionAccumulator* emotion_accumulator =
         interactive_emotion_accumulator_.get();
     geometry_parameters.sharedEmotionAccumulators = &emotion_accumulator;
-    const auto execution_option =
-        nva2f::IGeometryExecutor::ExecutionOption::Skin |
-        nva2f::IGeometryExecutor::ExecutionOption::Eyes;
     const auto diffusion_parameters =
         geometry_model_info_->GetExecutorCreationParameters(
-            execution_option, kDefaultIdentityIndex, true);
+            nva2f::IGeometryExecutor::ExecutionOption::All,
+            kDefaultIdentityIndex, true);
     auto geometry = require_sdk_ptr(
         nva2f::CreateDiffusionGeometryInteractiveExecutor(
             geometry_parameters, diffusion_parameters, 0),
@@ -820,7 +816,8 @@ class Backend::Impl final {
 
     const auto solve_parameters =
         blendshape_model_info_->GetExecutorCreationParameters(
-            execution_option, kDefaultIdentityIndex);
+            nva2f::IGeometryExecutor::ExecutionOption::Skin,
+            kDefaultIdentityIndex);
     nva2f::DeviceBlendshapeSolveExecutorCreationParameters blendshape_parameters;
     blendshape_parameters.initializationSkinParams =
         solve_parameters.initializationSkinParams;

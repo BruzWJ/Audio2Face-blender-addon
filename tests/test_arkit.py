@@ -189,11 +189,14 @@ def test_stream_frames_carry_the_model_channel_order() -> None:
     assert "frame_callback(local);" in SOURCE
 
 
-def test_arkit_solve_uses_the_model_owned_default_identity() -> None:
+def test_interactive_arkit_solve_initializes_all_sdk_postprocessors() -> None:
     assert "constexpr std::size_t kDefaultIdentityIndex = 0" in SOURCE
     assert "ReadDiffusionBlendshapeSolveModelInfo(" in SOURCE
+    assert "ExecutionOption::All" in SOURCE
+    assert SOURCE.count("ExecutionOption::Skin") == 2
+    assert "ExecutionOption::Skin |" not in SOURCE
     assert "blendshape_parameters.initializationSkinParams" in SOURCE
-    assert "execution_option, kDefaultIdentityIndex, true" in SOURCE
+    assert "kDefaultIdentityIndex, true" in SOURCE
     assert "CreateDeviceBlendshapeSolveInteractiveExecutor(" in SOURCE
 
 
