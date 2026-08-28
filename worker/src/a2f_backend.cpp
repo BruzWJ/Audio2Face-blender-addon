@@ -36,7 +36,6 @@ constexpr std::size_t kEyesRotationCount = 6;
 constexpr std::size_t kArkit52ChannelCount = 52;
 constexpr std::uint32_t kMaximumSupportedSampleRate = 384000;
 constexpr std::size_t kDefaultIdentityIndex = 0;
-constexpr std::size_t kInteractiveEmotionBatchSize = 128;
 constexpr std::size_t kInteractiveEmotionCountPerBuffer = 300;
 constexpr std::size_t kMaximumBakeChunkSamples = 64U * 1024U;
 
@@ -886,8 +885,7 @@ class Backend::Impl final {
         std::max(prebuffer_samples_, audio2emotion_input_window_samples);
     interactive_emotion_executor_ = require_sdk_ptr(
         nva2e::CreateClassifierEmotionInteractiveExecutor(
-            emotion_parameters, classifier_parameters,
-            kInteractiveEmotionBatchSize),
+            emotion_parameters, classifier_parameters, 1),
         "Creating Audio2Emotion interactive executor", "gpu_error");
     if (interactive_emotion_executor_->GetSamplingRate() != sample_rate_ ||
         interactive_emotion_executor_->GetEmotionsSize() !=

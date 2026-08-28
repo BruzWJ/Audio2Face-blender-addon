@@ -212,6 +212,15 @@ def test_callbacks_follow_the_sdk_result_stream_contract() -> None:
     assert "results.cudaStream !=" not in SOURCE
 
 
+def test_interactive_audio2emotion_matches_the_one_track_engine_profile() -> None:
+    creation = re.search(
+        r"CreateClassifierEmotionInteractiveExecutor\(\s*"
+        r"emotion_parameters, classifier_parameters, 1\)",
+        SOURCE,
+    )
+    assert creation is not None
+
+
 def test_worker_uses_one_compositional_emotion_driver() -> None:
     assert re.search(
         r"struct EmotionDriver\s*\{\s*float emotion_strength.*?"
