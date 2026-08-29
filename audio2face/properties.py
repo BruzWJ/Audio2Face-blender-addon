@@ -35,10 +35,9 @@ STATUS_ITEMS = (
     ("STREAM_STARTING", "Starting Stream", "Preparing incremental PCM inference"),
     ("STREAMING", "Streaming", "Incremental PCM is driving model channel values"),
     ("STREAM_ENDING", "Ending Stream", "Draining the stream's final model frames"),
-    ("BAKE_UPLOADING", "Uploading Audio", "Uploading selected audio for baking"),
-    ("BAKE_PREPARING", "Preparing Bake", "Preparing frame-based inference"),
+    ("TRACK_UPLOADING", "Uploading Audio", "Uploading the selected WAV"),
+    ("TRACK_PREPARING", "Preparing Audio", "Rendering continuous inference"),
     ("BAKING", "Baking", "Generating Blender-timeline Shape Key frames"),
-    ("BAKE_ENDING", "Finishing Bake", "Writing native Shape Key animation"),
     ("STOPPING", "Stopping", "Worker is shutting down"),
     ("ERROR", "Error", "The last operation failed"),
 )
@@ -168,7 +167,7 @@ def _preferred_emotion_updated(
 def _configure_selected_audio_timeline(
     settings: bpy.types.PropertyGroup,
     scene: bpy.types.Scene,
-) -> int | None:
+) -> tuple[int, int] | None:
     from .selected_audio_timeline import (
         configure_selected_audio,
         remove_selected_audio_strips,
@@ -178,7 +177,7 @@ def _configure_selected_audio_timeline(
         return None
     audio_path = bpy.path.abspath(settings.audio_path)
     try:
-        frame_end = configure_selected_audio(
+        frame_span = configure_selected_audio(
             scene,
             audio_path,
             first_frame=settings.audio_first_frame,
@@ -188,7 +187,7 @@ def _configure_selected_audio_timeline(
         settings.status = "ERROR"
         settings.status_message = str(exc)
         return None
-    return frame_end
+    return frame_span
 
 
 def _audio_path_updated(
@@ -203,32 +202,49 @@ def _audio_path_updated(
     scene = _update_scene(context)
     if scene is None:
         return
-    get_controller().discard_selected_audio(scene)
+    controller = get_controller()
     if not settings.audio_path:
+        controller.selected_audio_changed(scene)
         remove_selected_audio_strips(scene)
         return
-    _configure_selected_audio_timeline(settings, scene)
+    if _configure_selected_audio_timeline(settings, scene) is None:
+        try:
+            controller.selected_audio_changed(scene)
+        except (OSError, RuntimeError, ValueError) as exc:
+            settings.status = "ERROR"
+            settings.status_message = str(exc)
+        return
+    controller.selected_audio_changed(scene)
 
 
 def _audio_first_frame_updated(
     settings: bpy.types.PropertyGroup,
     context: bpy.types.Context,
 ) -> None:
-    """Move the Selected WAV and cached samples to a new First Frame."""
+    """Move the Selected WAV and recompute the current Blender frame."""
 
-    from .live_stream import get_live_stream_controller
+    from .runtime import get_controller
 
     scene = _update_scene(context)
     if scene is None:
         return
-    frame_end = _configure_selected_audio_timeline(settings, scene)
-    if frame_end is None:
+    if _configure_selected_audio_timeline(settings, scene) is None:
         return
-    get_live_stream_controller().remap_timeline(
-        scene,
-        int(settings.audio_first_frame),
-        frame_end,
-    )
+    get_controller().request_selected_frame(scene)
+
+
+def _selected_frame_mapping_updated(
+    _settings: bpy.types.PropertyGroup,
+    context: bpy.types.Context,
+) -> None:
+    """Recompute the paused Selected preview after its sample mapping changes."""
+
+    from .runtime import get_controller
+
+    scene = _update_scene(context)
+    if scene is None:
+        return
+    get_controller().request_selected_frame(scene)
 
 
 def _input_mode_updated(
@@ -555,6 +571,7 @@ class A2FSceneSettings(bpy.types.PropertyGroup):
         min=-1.0,
         max=1.0,
         unit="TIME",
+        update=_selected_frame_mapping_updated,
     )
     stream_time: FloatProperty(
         name="Stream Time", default=0.0, min=0.0, unit="TIME", options={"SKIP_SAVE"}

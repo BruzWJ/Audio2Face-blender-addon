@@ -1,95 +1,59 @@
-# Worker protocol `audio2face/10`
+# Worker protocol `audio2face/12`
 
-## Transport and envelopes
+## Transport
 
-Blender starts one local child process and exchanges UTF-8 JSON Lines over its
-stdin and stdout. The worker is silent until `hello {}`. stdout is
-protocol-only and diagnostics use stderr. No socket or separately hosted
-service is involved.
+Blender owns one local worker child and exchanges UTF-8 JSON Lines over stdin
+and stdout. stdout is protocol-only; diagnostics use stderr. Every record is one
+JSON object followed by LF, with a 1 MiB payload limit. Duplicate keys,
+non-finite numbers, malformed UTF-8, CR, blank records, and multiple records on
+one line are rejected.
 
-Each record is exactly one JSON object followed by LF. The JSON payload before
-that LF is limited to 1 MiB. Duplicate keys, non-finite JSON numbers, malformed
-UTF-8, blank records, carriage returns, and multiple records on one line are
-rejected.
-
-A request contains exactly:
+A request, response, request error, and asynchronous event have these exact
+envelopes:
 
 ```json
-{"protocol":"audio2face/10","type":"request","id":"1","method":"hello","params":{}}
+{"protocol":"audio2face/12","type":"request","id":"1","method":"hello","params":{}}
+{"protocol":"audio2face/12","type":"response","id":"1","result":{}}
+{"protocol":"audio2face/12","type":"error","id":"1","error":{"code":"invalid_params","message":"invalid request","details":{}}}
+{"protocol":"audio2face/12","type":"event","event":"stream_ended","operation_id":"stream-1","data":{}}
 ```
 
-`id` is a non-empty string of at most 128 characters. A successful response
-repeats it and contains an object `result`:
+Request IDs and operation IDs are non-empty strings of at most 128 characters.
+The only methods are `hello`, `load_model`, `stream_start`, `stream_chunk`,
+`stream_settings`, `stream_end`, `track_start`, `track_chunk`, `track_prepare`,
+`track_render`, `cancel`, and `shutdown`. Events are `stream_credit`,
+`stream_frame`, `stream_ended`, `track_preview`, `track_frame_batch`,
+`track_ended`, and `error`.
+
+One worker accepts one active audio operation: either a sequential Stream or a
+persistent Selected track.
+
+## Handshake and model
+
+`hello` takes `{}` and returns exactly:
 
 ```json
-{"protocol":"audio2face/10","type":"response","id":"1","result":{}}
+{"worker_profile":"nvidia-a2f3-a2e3-gpu-arkit52/12","worker_version":"0.1.0"}
 ```
 
-A request error contains exact `code`, `message`, and `details` fields. `id` is
-included only when it could be recovered safely:
-
-```json
-{"protocol":"audio2face/10","type":"error","id":"1","error":{"code":"invalid_params","message":"invalid request","details":{}}}
-```
-
-An asynchronous event contains exact `event`, `operation_id`, and object `data`
-fields in addition to `protocol` and `type`:
-
-```json
-{"protocol":"audio2face/10","type":"event","event":"stream_ended","operation_id":"stream-1","data":{}}
-```
-
-The only request methods are `hello`, `load_model`, `stream_start`,
-`stream_chunk`, `stream_settings`, `stream_end`, `bake_start`, `bake_chunk`,
-`bake_prepare`, `bake_frame`, `bake_end`, `cancel`, and `shutdown`. The only
-events are `stream_credit`, `stream_frame`, `stream_ended`, `bake_ended`, and
-`error`.
-
-The worker accepts one active inference operation: either a live stream or an
-offline bake. Method-specific response and event ordering is defined below.
-
-## `hello`
-
-Parameters are exactly `{}`. The result is exactly:
-
-```json
-{"worker_profile":"nvidia-a2f3-a2e3-gpu-arkit52/10","worker_version":"0.1.0"}
-```
-
-Blender requires that exact profile and a non-empty worker version. `hello`
-must complete before model or inference methods. It does not allocate CUDA or
-model resources.
-
-## `load_model`
-
-Parameters contain exactly:
+`load_model` takes the two validated absolute top-level descriptors:
 
 ```json
 {
-  "audio2face_model_path": "/absolute/user-selected/audio2face/model.json",
-  "audio2emotion_model_path": "/absolute/user-selected/audio2emotion/model.json"
+  "audio2face_model_path": "/models/audio2face/model.json",
+  "audio2emotion_model_path": "/models/audio2emotion/model.json"
 }
 ```
 
-Both values are absolute paths to validated top-level `model.json` files. The
-worker selects Audio2Face identity index `0`; identity is not a protocol field.
-
-Loading allocates the device-0 Audio2Face, blendshape-solver, and Audio2Emotion
-resources but does not execute audio inference.
-
-The response contains exactly `sample_rate` and `model_schema`. `sample_rate`
-is a positive integer. `model_schema` contains exactly `channels`,
-`emotion_channels`, and `audio2face_defaults`: `channels` is 52 unique non-empty
-strings in model order; `emotion_channels` is an ordered array of exact
-`{name, default}` objects with unique names and finite defaults in `[0.0, 1.0]`;
-and `audio2face_defaults` is the exact 18-field `audio2face` object defined below,
-populated from the loaded executor. Internal graph nodes, tensors, geometry,
-identities, and parameter structures are outside the schema.
+It allocates device-0 resources and returns exactly `sample_rate` and
+`model_schema`. The schema contains `channels` (52 unique names in model order),
+ordered `emotion_channels` records with `name` and `default`, and the loaded
+model's `audio2face_defaults`. Identity is fixed to SDK index 0 and is not a
+protocol option.
 
 ## Settings document
 
-Every `stream_start`, `stream_settings`, and `bake_frame` settings field uses
-this exact object:
+`stream_start`, `stream_settings`, and `track_render` carry one complete object:
 
 ```json
 {
@@ -115,285 +79,184 @@ this exact object:
   },
   "emotion_driver": {
     "emotion_strength": 0.6,
-    "generated": null,
-    "preferred": null
+    "generated": {
+      "emotion_contrast": 1.0,
+      "max_emotions": 6,
+      "live_blend_coef": 0.7,
+      "transition_smoothing": 0.5
+    },
+    "preferred": {
+      "values": {"<every model emotion>": 0.0},
+      "strength": 0.5
+    }
   }
 }
 ```
 
-`audio2face` contains exactly the 18 keys shown. All fields except
-`eye_saccade_seed` are finite JSON floats. Their inclusive ranges are:
+Unknown or partial fields are rejected. `generated` and `preferred` may each
+be null. Preferred `values` contains every advertised emotion exactly once.
+All values are finite. Ranges are:
 
-- `input_strength`: `[0.0, 3.0]`;
-- `lower_face_smoothing`, `upper_face_smoothing`: `[0.0, 0.1]`;
-- `lower_face_strength`, `upper_face_strength`, `skin_strength`,
-  `blink_strength`, `eyeballs_strength`, `saccade_strength`: `[0.0, 2.0]`;
-- `face_mask_level`: `[0.0, 1.0]` and `face_mask_softness`: `[0.001, 0.5]`;
-- `eyelid_open_offset`: `[-1.0, 1.0]` and `lip_open_offset`: `[-0.2, 0.2]`;
-- the four `*_eye_rot_*_offset` fields: `[-10.0, 10.0]`; and
-- `eye_saccade_seed`: JSON integer in `[0, 4999]`.
+- `input_strength`: `[0, 3]`;
+- face smoothing: `[0, 0.1]`;
+- face, blink, eyeball, and saccade strengths: `[0, 2]`;
+- `face_mask_level`: `[0, 1]`; `face_mask_softness`: `[0.001, 0.5]`;
+- `eyelid_open_offset`: `[-1, 1]`; `lip_open_offset`: `[-0.2, 0.2]`;
+- eye rotation offsets: `[-10, 10]`; `eye_saccade_seed`: integer `[0, 4999]`;
+- emotion strength: `[0, 2]`; contrast: `[0.1, 3]`;
+- max emotions: integer `1..emotion_count`;
+- live blend, preferred values, and preferred strength: `[0, 1]`; and
+- transition smoothing: `[0.1, 1]` seconds.
 
-`emotion_driver` has exactly `emotion_strength`, `generated`, and `preferred`.
-`emotion_strength` is a finite float in `[0.0, 2.0]`. The generated source is
-`null` or exactly:
+## Sequential Stream
 
-```json
-{
-  "emotion_contrast": 1.0,
-  "max_emotions": 6,
-  "live_blend_coef": 0.7,
-  "transition_smoothing": 0.5
-}
-```
+### `stream_start`
 
-Its fields are:
-
-- `emotion_contrast`: finite float in `[0.1, 3.0]`;
-- `max_emotions`: integer from `1` through the classifier's emotion count;
-- `live_blend_coef`: finite float in `[0.0, 1.0]`;
-- `transition_smoothing`: finite seconds in `[0.1, 1.0]`.
-
-The Preferred source is `null` or exactly
-`{"values":{"<every emotion>":0.5},"strength":0.5}`. `values` contains every
-advertised emotion name exactly once with finite values in `[0.0, 1.0]`, and
-`strength` is finite in `[0.0, 1.0]`.
-
-Generated `G` is zero when its source is absent. With Preferred `P` and mix
-weight `p`, the mixer is `pP + (1-p)G`; without Preferred it is `G`. Global
-strength multiplies that result. Thus both absent produces zero, while
-Preferred without generated produces the constant `emotion_strength * pP`.
-Partial documents and unknown keys are rejected. `stream_start` installs one
-complete snapshot, `stream_settings` replaces it at an ordered queue boundary,
-and every `bake_frame` carries one complete snapshot.
-
-## `stream_start`
-
-Parameters contain exactly `operation_id`, `sample_rate`, and `settings`.
-`operation_id` is non-empty and at most 128 characters, `sample_rate` equals the
-rate returned by `load_model`, and `settings` is the complete object defined
-under **Settings document**. The worker resets its retained regular executors,
-installs that snapshot, and returns exactly:
+Parameters are exactly `operation_id`, the model `sample_rate`, and `settings`.
+The worker initializes the regular sequential executor family and returns:
 
 ```json
 {"sample_rate":16000,"prebuffer_samples":60000}
 ```
 
-`prebuffer_samples` is a non-negative integer at the model rate and is always
-the greater of the Audio2Face input lead and Audio2Emotion readiness window.
-It does not change when automatic emotion is toggled.
+### `stream_chunk`
 
-## `stream_chunk`
-
-Parameters contain exactly:
+Parameters are exactly:
 
 ```json
 {"operation_id":"stream-1","audio_f32le_base64":"AAAAAA=="}
 ```
 
-The base64 text must be canonical and decode to a non-empty mono block of
-little-endian IEEE-754 float32 samples. Every sample is finite. One chunk
-covers at most one model-rate second. The ID must name the active stream, no
-chunks are accepted after `stream_end` is queued, and the worker bounds queued
-PCM to four seconds.
+The canonical base64 payload is a non-empty, finite, mono little-endian float32
+block. One request contains at most one model-rate second; the worker bounds
+queued PCM to four seconds. Acceptance returns `{}`. When the worker dequeues a
+chunk, before frames unlocked by it, it emits `stream_credit {}`.
 
-The worker replies `{}` when it accepts the chunk. After dequeuing that chunk
-for inference, and before publishing any frame unlocked by it, the worker emits
-one capacity credit:
-
-```json
-{"protocol":"audio2face/10","type":"event","event":"stream_credit","operation_id":"stream-1","data":{}}
-```
-
-Cancellation may end a stream without a credit for its final queued chunk. A
-frame event has exact data fields `timestamp_sample`, `weights`, and
-`effective_emotions`:
+Each `stream_frame` event contains exactly:
 
 ```json
 {
-  "protocol": "audio2face/10",
-  "type": "event",
-  "event": "stream_frame",
-  "operation_id": "stream-1",
-  "data": {"timestamp_sample": 0, "weights": [0.0], "effective_emotions": [0.0]}
+  "timestamp_sample": 0,
+  "weights": [0.0],
+  "effective_emotions": [0.0]
 }
 ```
 
-The abbreviated `weights` array contains exactly 52 finite values in
-`[0.0, 1.0]`, ordered by `model_schema.channels`. The abbreviated
-`effective_emotions` array contains exactly one finite value for each entry in
-`model_schema.emotion_channels`, in that order. These are the effective values
-sampled by Audio2Face after Audio2Emotion post-processing and optional preferred
-emotion mixing, not the raw classifier output. NVIDIA's SDK does not constrain
-effective emotions to `[0.0, 1.0]`, so the transport preserves every finite
-value. Both arrays describe the same Audio2Face frame and timestamp.
+`weights` has 52 finite values in `[0, 1]` in schema order.
+`effective_emotions` has one finite value per emotion channel and is not clamped
+to `[0, 1]`. Timestamps are model-rate sample positions and strictly increase.
 
-`timestamp_sample` is a signed 64-bit position at the model sample rate and is
-strictly increasing for the operation. Events do not repeat channel names.
+### `stream_settings`
 
-## `stream_settings`
+Parameters are exactly `operation_id` and a complete `settings` document. The
+command is serialized between queued chunks and returns `{}` after applying the
+regular Audio2Face and Audio2Emotion setters. It does not reset executors,
+retain or replay audio, move timestamps, or affect media transport.
 
-Parameters contain exactly `operation_id` and `settings`. The `settings` value
-is one complete object with the exact two top-level fields and compositional shape
-defined under **Settings document**; partial objects and unknown keys remain
-invalid.
+### `stream_end`
 
-The command occupies one position in the same queue as `stream_chunk` and
-`stream_end`. All chunks queued before it are processed with the prior
-snapshot, and all chunks queued after it are processed with the new snapshot.
-The operation ID, models, audio transport, and strictly increasing published
-timestamp sequence remain active. The response is exactly `{}` and is emitted
-only after the operation thread has installed that queued snapshot. The worker
-accepts at most one unapplied settings command; an additional direct request
-returns `stream_backpressure`.
+Parameters are `{"operation_id":"stream-1"}`. The response is `{}`. The worker
+closes input, drains final frames, then emits `stream_ended {}`. All final frame
+events precede the terminal event.
 
-Subsequent PCM uses the new snapshot and the published timestamp sequence
-remains strictly increasing.
+## Persistent Selected track
 
-## `stream_end`
+### Upload
 
-Parameters are exactly `{"operation_id":"stream-1"}`. The worker replies `{}`,
-processes the remaining safe frames, and then emits:
+`track_start` takes `operation_id` and model `sample_rate`, creates the
+interactive executor family, and returns `{}`. `track_chunk` accepts the same
+canonical PCM encoding as Stream, with at most 65,536 samples per request and
+at most two maximum blocks queued. Each accepted chunk returns `{}`.
 
-```json
-{"protocol":"audio2face/10","type":"event","event":"stream_ended","operation_id":"stream-1","data":{}}
-```
+`track_prepare` takes only `operation_id`, installs and closes the complete
+audio input, releases the upload buffer, and returns `{}`. It does not run
+inference or change Blender transport.
 
-Every final `stream_frame` precedes `stream_ended`. Both models remain loaded,
-ready for another stream.
+### `track_render`
 
-## `bake_start`
-
-Parameters contain exactly:
-
-```json
-{"operation_id":"bake-1","sample_rate":16000}
-```
-
-`operation_id` follows the normal operation-ID rules and `sample_rate` must
-equal the rate returned by `load_model`. No settings are installed at start.
-The result contains exactly:
-
-```json
-{"sample_rate":16000,"max_chunk_samples":65536}
-```
-
-The response is emitted before upload begins. Starting a bake while a stream or
-another bake is active returns `busy`.
-
-## `bake_chunk`
-
-Parameters contain exactly:
-
-```json
-{"operation_id":"bake-1","audio_f32le_base64":"AAAAAA=="}
-```
-
-The canonical base64 payload decodes to a non-empty mono block of finite
-little-endian IEEE-754 float32 samples at the model rate. A block contains at
-most the `max_chunk_samples` returned by `bake_start`. At most two maximum-size
-blocks may wait in the worker queue; excess input returns
-`stream_backpressure`. Each result is exactly:
-
-```json
-{"accepted_samples":1,"total_samples":1}
-```
-
-`accepted_samples` is the decoded block length and `total_samples` is the
-cumulative uploaded length. Chunks are accepted only during the upload phase.
-
-## `bake_prepare`
-
-Parameters are exactly `{"operation_id":"bake-1"}`. It closes the completed
-PCM input. Empty audio and a second prepare request are rejected. The response
-contains exactly:
+After preparation, the request is exactly:
 
 ```json
 {
-  "audio_samples": 48000,
-  "source_frame_count": 91,
-  "source_frame_rate_numerator": 30,
-  "source_frame_rate_denominator": 1,
-  "first_source_timestamp_sample": 0,
-  "last_source_timestamp_sample": 48000,
-  "sampling": "linear"
+  "operation_id": "track-1",
+  "revision": 7,
+  "settings": {"audio2face": {}, "emotion_driver": {}},
+  "preview_sample": 22400
 }
 ```
 
-`audio_samples` is the positive uploaded sample count; `source_frame_count`
-and both frame-rate components are positive integers; the source timestamps
-are signed 64-bit sample positions with first not greater than last; and
-`sampling` is exactly `"linear"`.
+The abbreviated `settings` above denotes the complete Settings document.
+`revision` is a strictly increasing positive integer. `preview_sample` is null
+or an in-range non-negative audio sample.
 
-## `bake_frame`
+The worker applies settings. When the emotion-driver snapshot changed, it
+computes all Audio2Emotion frames into a timestamped emotion accumulator;
+otherwise it reuses that curve. It then computes all Audio2Face frames. These
+continuous SDK passes preserve temporal smoothing and recurrent state. A
+single-frame SDK call is never used as cache or bake source.
 
-After preparation, the client submits one target-sample request at a time. With
-`SETTINGS` denoting the complete Settings document, the request is:
-
-```text
-{"operation_id":"bake-1","target_sample":22400,"settings":SETTINGS}
-```
-
-`SETTINGS` is the complete object defined under **Settings document**.
-`target_sample` is a non-negative signed 64-bit integer in
-`[0, audio_samples - 1]`. Under that snapshot, the worker computes the one or
-two source frames bracketing `target_sample` and linearly interpolates them,
-clamping to an endpoint when needed. The response contains exactly:
+When `preview_sample` is present, the worker linearly samples the completed
+continuous result and emits `track_preview` before transferring cache batches:
 
 ```json
 {
-  "weights": [0.25]
+  "revision": 7,
+  "timestamp_sample": 22400,
+  "weights": [0.25],
+  "effective_emotions": [0.0]
 }
 ```
 
-The result contains exactly `weights`: 52 finite values in `[0.0, 1.0]`, in
-`model_schema.channels` order. Only one bake-frame request may be outstanding;
-a concurrent request returns `stream_backpressure`. There is no asynchronous
-bake-frame event.
+The timestamp equals the requested preview sample. Its values are identical to
+sampling the cache rows that follow; the event itself does not publish a cache.
 
-## `bake_end`
-
-After the last bake-frame response, parameters are exactly
-`{"operation_id":"bake-1"}`. The worker responds `{}`, releases the active
-bake state, and then emits:
+A completed candidate is emitted in ordered batches of 1 through 64 rows:
 
 ```json
-{"protocol":"audio2face/10","type":"event","event":"bake_ended","operation_id":"bake-1","data":{"reason":"completed"}}
+{
+  "revision": 7,
+  "offset": 0,
+  "total_frames": 67,
+  "timestamp_samples": [0, 267],
+  "weights": [[0.1], [0.2]],
+  "effective_emotions": [[0.0], [0.1]]
+}
 ```
 
-`bake_ended` data contains exactly `reason`, which is either `completed` or
-`canceled`. A non-cancellation operation failure emits the exact `error` event
-instead of `bake_ended`. Both models remain loaded.
+The three arrays are parallel; timestamps strictly increase; `offset` is the
+first row's zero-based position. Every `track_frame_batch` for a revision
+precedes its completion response:
 
-## `cancel`
+```json
+{"revision":7,"frame_count":67,"superseded":false}
+```
 
-Parameters are exactly `{"operation_id":"<active-id>"}`. A matching active
-operation receives an immediate `{}` response. Queued input and execution stop
-without draining. A stream emits `stream_ended {}`; a bake emits
-`bake_ended {"reason":"canceled"}`. The terminal event follows the cancel
-response. An unknown, inactive, or already terminal ID returns
+That response is the publication barrier. Blender commits the staged cache
+only when all `frame_count` rows arrived and `superseded` is false.
+
+A newer revision replaces any queued render and interrupts an active
+interactive compute without canceling the resident track. Displaced requests
+receive `{"revision":N,"frame_count":0,"superseded":true}`; stale frame events
+are suppressed or ignored. Cancel is reserved for ending the track.
+
+## Cancel, shutdown, and errors
+
+`cancel` takes the active `operation_id` and immediately returns `{}`. It stops
+queued execution without draining. A Stream emits `stream_ended {}`; a track
+emits `track_ended {"reason":"canceled"}`. Unknown or terminal IDs return
 `operation_not_found`.
 
-## `shutdown`
+`shutdown` takes and returns `{}`, stops and joins any operation, and exits.
 
-Parameters and result are both `{}`. Shutdown stops and joins any active
-operation, responds, and exits the protocol loop.
-
-## Terminal operation errors
-
-An asynchronous inference failure uses an `error` event with exact `code` and
-`message` data:
+An operation failure is asynchronous:
 
 ```json
-{"protocol":"audio2face/10","type":"event","event":"error","operation_id":"stream-1","data":{"code":"inference_failed","message":"operation failed"}}
+{"protocol":"audio2face/12","type":"event","event":"error","operation_id":"track-1","data":{"code":"inference_failed","message":"operation failed"}}
 ```
 
-Request validation failures use the request error envelope. Worker error codes
-used by the implementation include:
-
-- `invalid_json`, `invalid_request`, `request_too_large`,
-  `protocol_mismatch`, `method_not_found`, `invalid_params`, `invalid_state`,
-  and `busy`;
-- `model_invalid` and `model_not_loaded`;
-- `operation_not_found`, `sample_rate_mismatch`, `stream_backpressure`, and
-  `inference_failed`; and
-- `sdk_error`, `gpu_error`, and `internal_error`.
+Validation failures use request error envelopes. Worker codes include
+`invalid_json`, `invalid_request`, `request_too_large`, `protocol_mismatch`,
+`method_not_found`, `invalid_params`, `invalid_state`, `busy`, `model_invalid`,
+`model_not_loaded`, `operation_not_found`, `sample_rate_mismatch`,
+`backpressure`, `inference_failed`, `sdk_error`, `gpu_error`, and
+`internal_error`.

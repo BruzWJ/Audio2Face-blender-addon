@@ -444,14 +444,3 @@ class WavStreamSource:
                 self.close()
 
         return chunks()
-
-
-def wav_duration_seconds(path: str | os.PathLike[str]) -> float:
-    """Return validated WAV duration without decoding its samples."""
-
-    with WavStreamSource(
-        path,
-        output_sample_rate=MIN_SAMPLE_RATE,
-        chunk_frames=1,
-    ) as source:
-        return source.metadata.input_frames / source.metadata.source_sample_rate

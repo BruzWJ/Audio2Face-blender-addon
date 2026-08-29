@@ -12,7 +12,6 @@ from audio2face.wav_stream import (
     MAX_CHUNK_FRAMES,
     WavStreamError,
     WavStreamSource,
-    wav_duration_seconds,
 )
 
 OUTPUT_SAMPLE_RATE = 16_000
@@ -144,9 +143,6 @@ def test_metadata_chunks_and_context_lifecycle(tmp_path: Path) -> None:
     assert _unpack_chunks(chunks) == pytest.approx(
         (-1.0, -0.5, 0.0, 0.5, 32_767 / 32_768)
     )
-    assert wav_duration_seconds(path) == pytest.approx(5 / 16_000)
-
-
 @pytest.mark.parametrize(
     ("sample_width", "scale"),
     [(1, 128), (2, 32_768), (3, 8_388_608), (4, 2_147_483_648)],

@@ -33,6 +33,21 @@ AUDIO2FACE_DEFAULTS: dict[str, float | int] = {
 }
 
 
+def _assert_native_transport_handlers(runtime: object) -> None:
+    def owned(handlers: object) -> tuple[object, ...]:
+        return tuple(
+            handler
+            for handler in handlers
+            if getattr(handler, "__module__", None) == runtime.__name__
+        )
+
+    assert owned(bpy.app.handlers.animation_playback_pre) == ()
+    assert owned(bpy.app.handlers.animation_playback_post) == ()
+    assert owned(bpy.app.handlers.frame_change_post) == (
+        runtime._frame_change_post_handler,
+    )
+
+
 def main() -> None:
     assert bpy.app.version[:2] == (5, 2)
     addon_names = [
@@ -50,13 +65,7 @@ def main() -> None:
     assert bpy.app.timers.is_registered(runtime._timer_callback)
     assert runtime._load_pre_handler in bpy.app.handlers.load_pre
     assert runtime._load_post_handler in bpy.app.handlers.load_post
-    assert runtime._animation_playback_pre_handler in (
-        bpy.app.handlers.animation_playback_pre
-    )
-    assert runtime._animation_playback_post_handler in (
-        bpy.app.handlers.animation_playback_post
-    )
-    assert runtime._frame_change_post_handler in bpy.app.handlers.frame_change_post
+    _assert_native_transport_handlers(runtime)
     operator_names = set(dir(bpy.ops.a2f))
     assert "play_pause" not in operator_names
     assert {

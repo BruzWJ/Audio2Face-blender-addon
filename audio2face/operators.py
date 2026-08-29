@@ -192,8 +192,8 @@ class A2F_OT_bake_animation(bpy.types.Operator):
     bl_idname = "a2f.bake_animation"
     bl_label = "Bake Shape Key Animation"
     bl_description = (
-        "Evaluate the selected WAV and animated tuning controls at each "
-        "Blender frame, then write native Shape Key animation"
+        "Sample the selected WAV's continuous result at each Blender frame, "
+        "then write native Shape Key animation"
     )
 
     @classmethod
@@ -209,8 +209,8 @@ class A2F_OT_bake_animation(bpy.types.Operator):
         if controller.client.state != Lifecycle.RUNNING or not controller.negotiated:
             cls.poll_message_set("start the Audio2Face worker first")
             return False
-        if controller.operation_in_progress:
-            cls.poll_message_set("wait for the current Audio2Face operation to finish")
+        if controller.active_bake is not None:
+            cls.poll_message_set("an animation bake is already running")
             return False
         return True
 
@@ -232,7 +232,6 @@ class A2F_OT_cancel_bake(bpy.types.Operator):
         available = (
             bake is not None
             and bake.scene_name == context.scene.name
-            and not bake.cancel_requested
         )
         if not available:
             cls.poll_message_set("there is no active animation bake")

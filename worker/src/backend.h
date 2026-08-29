@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -44,18 +45,19 @@ struct StreamFrame {
 
 using StreamFrameCallback = std::function<void(const StreamFrame& frame)>;
 
-struct BakeRequest {
+struct TrackRequest {
   std::uint32_t sample_rate;
 };
 
-struct BakeFrameRequest {
-  std::int64_t target_sample;
+struct TrackRenderRequest {
+  std::uint64_t revision;
   json settings;
+  std::optional<std::int64_t> preview_sample;
 };
 
-struct BakeFrame {
-  std::vector<float> weights;
-};
+using TrackPreviewCallback = std::function<void(const StreamFrame& frame)>;
+using TrackCacheCallback =
+    std::function<void(const std::vector<StreamFrame>& frames)>;
 
 class Backend final {
  public:
@@ -74,15 +76,18 @@ class Backend final {
                        std::atomic_bool& canceled);
   void stream_end(std::atomic_bool& canceled,
                   const StreamFrameCallback& frame);
-  json bake_start(const BakeRequest& request);
-  json bake_chunk(const std::vector<float>& audio,
-                  std::atomic_bool& canceled);
-  json bake_prepare(std::atomic_bool& canceled);
-  BakeFrame bake_frame(const BakeFrameRequest& request,
-                       std::atomic_bool& canceled);
-  void bake_end();
+  void track_start(const TrackRequest& request);
+  void track_chunk(const std::vector<float>& audio,
+                   std::atomic_bool& canceled);
+  void track_prepare(std::atomic_bool& canceled);
+  std::size_t track_render(
+      const TrackRenderRequest& request,
+      std::atomic_bool& canceled,
+      const std::atomic<std::uint64_t>& latest_revision,
+      const TrackPreviewCallback& preview,
+      const TrackCacheCallback& cache);
   void interrupt_operation() noexcept;
-  void stream_abort() noexcept;
+  void abort_operation() noexcept;
 
  private:
   class Impl;

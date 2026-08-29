@@ -186,7 +186,7 @@ def test_stream_frames_carry_the_model_channel_order() -> None:
     assert "capture.weight_count = executor().GetWeightCount()" in SOURCE
     assert "capture.emotion_count = emotion_channels_.size()" in SOURCE
     assert "copy_finite_values(\n        *pending.weights" in SOURCE
-    assert "effective_emotions_at(timestamp)" in SOURCE
+    assert "interactive_effective_emotions_" in SOURCE
     assert "frame_callback(make_stream_frame(" in SOURCE
 
 
@@ -241,9 +241,10 @@ def test_worker_uses_one_compositional_emotion_driver() -> None:
     assert "#include <variant>" not in SOURCE
     assert not re.search(r"(?:Manual|Automatic)EmotionDriver", SOURCE)
 
-    prepare = SOURCE[SOURCE.index("  void prepare_interactive_settings(") :]
-    prepare = prepare[: prepare.index("  StreamFrame compute_interactive_frame(")]
-    assert "if (interactive_emotion_driver_.generated)" in prepare
+    prepare = SOURCE[SOURCE.index("  bool prepare_interactive_settings(") :]
+    prepare = prepare[: prepare.index("  static std::vector<float> copy_finite_values(")]
+    assert "const bool generated = parsed.emotion_driver.generated.has_value();" in prepare
+    assert "if (generated)" in prepare
     assert "install_interactive_driver_emotions();" in prepare
     driver = SOURCE[SOURCE.index("  void install_interactive_driver_emotions(") :]
     driver = driver[: driver.index("  void configure_interactive_generated_emotion(")]
@@ -252,7 +253,7 @@ def test_worker_uses_one_compositional_emotion_driver() -> None:
 
     configure = re.search(
         r"  void configure_interactive_generated_emotion\(.*?"
-        r"(?=\n  void generate_interactive_emotions\()",
+        r"(?=\n  static bool render_is_superseded\()",
         SOURCE,
         flags=re.DOTALL,
     )
@@ -309,33 +310,18 @@ def test_stream_uses_incremental_regular_executors() -> None:
     assert begin is not None
     begin_source = begin.group(0)
     assert "ensure_stream_executors();" in begin_source
-    assert "retained_audio_capacity_ = prebuffer_samples_ + sample_rate_;" in begin_source
     assert "reset_stream_inference(settings);" in begin_source
 
-    update = re.search(
-        r"  void stream_settings\(.*?(?=\n  void stream_end\()",
-        SOURCE,
-        flags=re.DOTALL,
-    )
-    assert update is not None
-    update_source = update.group(0)
-    assert "reset_stream_inference(settings);" in update_source
-    assert "timestamp_offset_" in update_source
-    assert "accumulate_audio(replay.data(), replay.size());" in update_source
-    assert "interactive" not in update_source
-
     chunk = re.search(
-        r"  void stream_chunk\(.*?(?=\n  void stream_settings\()",
+        r"  void stream_chunk\(.*?(?=\n  void stream_end\()",
         SOURCE,
         flags=re.DOTALL,
     )
     assert chunk is not None
     chunk_source = chunk.group(0)
     assert "accumulate_audio(audio.data(), audio.size());" in chunk_source
-    assert "retain_audio(audio);" in chunk_source
     assert "drain_ready(canceled, frame);" in chunk_source
     assert "interactive" not in chunk_source
-    assert "while (retained_audio_.size() > retained_audio_capacity_)" in SOURCE
     drain = re.search(
         r"  void drain_interleaved_ready\(.*?"
         r"(?=\n  void execute_generated_emotion_once\()",
@@ -348,21 +334,29 @@ def test_stream_uses_incremental_regular_executors() -> None:
     assert "evaluate_interactive_stream" not in SOURCE
 
 
-def test_stream_and_bake_swap_executor_families() -> None:
-    bake_start = SOURCE[SOURCE.index("  json bake_start(") :]
-    bake_start = bake_start[: bake_start.index("  json bake_chunk(")]
-    assert bake_start.index("clear_stream_executors();") < bake_start.index(
+def test_stream_settings_update_executors_without_reset_or_audio_replay() -> None:
+    update = re.search(
+        r"  void stream_settings\(.*?(?=\n  void stream_end\()",
+        SOURCE,
+        flags=re.DOTALL,
+    )
+    assert update is not None
+    update_source = update.group(0)
+    assert "InferenceSettings parsed = parse_settings(settings);" in update_source
+    assert "configure_audio2face(parsed.audio2face);" in update_source
+    assert "configure_stream_emotion(parsed.emotion_driver);" in update_source
+    for removed in ("Reset(", "reset_stream_inference", "accumulate_audio", "retain_audio"):
+        assert removed not in update_source
+
+
+def test_track_start_swaps_to_the_interactive_executor_family() -> None:
+    track_start = SOURCE[SOURCE.index("  void track_start(") :]
+    track_start = track_start[: track_start.index("  void track_chunk(")]
+    assert track_start.index("clear_stream_executors();") < track_start.index(
         "ensure_interactive_executors();"
     )
 
-    bake_end = SOURCE[SOURCE.index("  void bake_end()") :]
-    bake_end = bake_end[: bake_end.index("  void interrupt_operation()")]
-    assert bake_end.index("clear_interactive_executors();") < bake_end.index(
-        "ensure_stream_executors();"
-    )
-
-
-def test_bake_path_uses_supported_interactive_setters_and_closed_inputs() -> None:
+def test_track_path_uses_supported_interactive_setters_and_closed_inputs() -> None:
     for expression in (
         "CreateDiffusionGeometryInteractiveExecutor(",
         "CreateDeviceBlendshapeSolveInteractiveExecutor(",
@@ -373,57 +367,65 @@ def test_bake_path_uses_supported_interactive_setters_and_closed_inputs() -> Non
         "SetInteractiveExecutorPostProcessParameters(",
         "interactive_audio_accumulator_->Close()",
         "interactive_emotion_accumulator_->Close()",
-        "executor.ComputeFrame(*frame_index)",
         "executor.ComputeAllFrames()",
-        "active->Interrupt()",
+        "generate_interactive_emotions(revision, canceled",
+        "active_interactive_compute_->Interrupt()",
+        '"Synchronizing streaming audio upload"',
+        '"Synchronizing interactive audio upload"',
+        '"Synchronizing constant interactive emotions"',
     ):
         assert expression in SOURCE
-
-    stream_update = re.search(
-        r"  void stream_settings\(.*?(?=\n  void stream_end\()",
-        SOURCE,
-        flags=re.DOTALL,
-    )
-    assert stream_update is not None
-    assert "interactive" not in stream_update.group(0)
+    assert "ComputeFrame" not in SOURCE
 
 
-def test_bake_frame_computes_only_neighbor_frames_then_interpolates() -> None:
+def test_track_render_builds_one_continuous_timestamped_cache() -> None:
     prepare = re.search(
-        r"  json bake_prepare\(.*?(?=\n  BakeFrame bake_frame\()",
+        r"  void track_prepare\(.*?(?=\n  std::size_t track_render\()",
         SOURCE,
         flags=re.DOTALL,
     )
     assert prepare is not None
     prepare_source = prepare.group(0)
-    assert (
-        prepare_source.index("refill_interactive_audio(bake_audio_);")
-        < prepare_source.index("install_constant_interactive_emotions(")
-        < prepare_source.index("GetTotalNbFrames()")
-    )
+    assert "refill_interactive_audio(track_audio_);" in prepare_source
+    assert "install_constant_interactive_emotions(" not in prepare_source
+    assert "ComputeFrame" not in prepare_source
 
-    bake = re.search(
-        r"  BakeFrame bake_frame\(.*?(?=\n  void bake_end\()",
+    track = re.search(
+        r"  std::size_t track_render\(.*?(?=\n  void interrupt_operation\()",
         SOURCE,
         flags=re.DOTALL,
     )
-    assert bake is not None
-    assert "prepare_interactive_settings(request.settings, canceled)" in bake.group(0)
-    assert "compute_bake_frame(request, canceled)" in bake.group(0)
+    assert track is not None
+    assert "compute_track_render(request, canceled, latest_revision" in track.group(0)
 
-    interpolation = re.search(
-        r"  BakeFrame compute_bake_frame\(.*?(?=\n  void begin_operation\()",
+    render = re.search(
+        r"  std::size_t compute_track_render\(.*?(?=\n  void accumulate_audio\()",
         SOURCE,
         flags=re.DOTALL,
     )
-    assert interpolation is not None
-    source = interpolation.group(0)
-    assert "compute_interactive_frame(before_index, canceled)" in source
-    assert "compute_interactive_frame(after_index, canceled)" in source
-    assert "interpolate_values(before.weights, after.weights" in source
+    assert render is not None
+    source = render.group(0)
+    assert "prepare_interactive_settings(request.settings, request.revision" in source
+    assert "compute_interactive(*interactive_executor_, canceled," in source
+    assert "candidate.reserve(capture.frames.size());" in source
+    assert "preview(sample_track_frames(candidate, *request.preview_sample));" in source
+    assert "cache(candidate);" in source
+    assert "return superseded() ? 0 : candidate.size();" in source
+
+    assert "emotion_settings == interactive_emotion_settings_" in SOURCE
+    assert "interactive_emotions_valid_ = true;" in SOURCE
 
 
-def test_interactive_face_path_computes_only_the_requested_frame() -> None:
-    face = SOURCE[SOURCE.index("  StreamFrame compute_interactive_frame(") :]
-    face = face[: face.index("  void accumulate_audio(")]
-    assert "ComputeAllFrames" not in face
+def test_generated_emotion_is_a_continuous_timestamped_pass() -> None:
+    emotion = re.search(
+        r"  bool generate_interactive_emotions\(.*?"
+        r"(?=\n  static std::vector<float> interpolate_values\()",
+        SOURCE,
+        flags=re.DOTALL,
+    )
+    assert emotion is not None
+    source = emotion.group(0)
+    assert "compute_interactive(*interactive_emotion_executor_" in source
+    assert "interactive_emotion_accumulator_->Close()" in source
+    assert "for (auto& [timestamp, frame] : emotion_frames)" in source
+    assert "interactive_effective_emotions_.swap(effective_emotions);" in source

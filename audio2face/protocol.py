@@ -10,8 +10,8 @@ from typing import Any
 from .strict_json import duplicate_key_hook, invalid_constant_hook
 
 
-PROTOCOL_VERSION = "audio2face/10"
-WORKER_PROFILE = "nvidia-a2f3-a2e3-gpu-arkit52/10"
+PROTOCOL_VERSION = "audio2face/12"
+WORKER_PROFILE = "nvidia-a2f3-a2e3-gpu-arkit52/12"
 MAX_CONTROL_LINE_BYTES = 1_048_576
 _CONTROL_TYPES = frozenset({"request", "response", "error", "event"})
 _REQUEST_METHODS = frozenset(
@@ -22,11 +22,10 @@ _REQUEST_METHODS = frozenset(
         "stream_chunk",
         "stream_settings",
         "stream_end",
-        "bake_start",
-        "bake_chunk",
-        "bake_prepare",
-        "bake_frame",
-        "bake_end",
+        "track_start",
+        "track_chunk",
+        "track_prepare",
+        "track_render",
         "cancel",
         "shutdown",
     }
@@ -36,7 +35,9 @@ _EVENT_NAMES = frozenset(
         "stream_credit",
         "stream_frame",
         "stream_ended",
-        "bake_ended",
+        "track_preview",
+        "track_frame_batch",
+        "track_ended",
         "error",
     }
 )

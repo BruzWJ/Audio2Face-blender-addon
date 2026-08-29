@@ -176,14 +176,9 @@ def test_selected_audio_callbacks_manage_source_placement_and_mode(
         lambda scene: calls.append(("remove", scene))
     )
     monkeypatch.setitem(sys.modules, timeline.__name__, timeline)
-    live = SimpleNamespace(
-        remap_timeline=lambda *args: calls.append(("remap", *args))
-    )
-    live_stream = ModuleType("audio2face.live_stream")
-    live_stream.get_live_stream_controller = lambda: live  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, live_stream.__name__, live_stream)
     controller = SimpleNamespace(
-        discard_selected_audio=lambda scene: calls.append(("discard", scene)),
+        selected_audio_changed=lambda scene: calls.append(("source", scene)),
+        request_selected_frame=lambda scene: calls.append(("frame", scene)),
         input_mode_changed=lambda scene: calls.append(("mode", scene)),
     )
     runtime = ModuleType("audio2face.runtime")
@@ -208,15 +203,15 @@ def test_selected_audio_callbacks_manage_source_placement_and_mode(
     properties_module._input_mode_updated(settings, context)
 
     assert calls == [
-        ("discard", scene),
         ("configure", scene, "first.wav", 12),
+        ("source", scene),
         ("configure", scene, "first.wav", -3),
-        ("remap", scene, -3, 42),
-        ("discard", scene),
+        ("frame", scene),
+        ("source", scene),
         ("remove", scene),
         ("mode", scene),
         ("configure", scene, "second.wav", -3),
-        ("remap", scene, -3, 42),
+        ("frame", scene),
         ("mode", scene),
         ("remove", scene),
     ]
@@ -373,13 +368,29 @@ def test_mixed_emotion_display_preserves_worker_values_without_mutating_preferre
     assert [item.value for item in settings.preferred_emotions] == [0.5, 0.2]
 
 
-def test_prediction_delay_is_not_an_inference_refresh_trigger(
+def test_prediction_delay_recomputes_the_current_selected_frame(
     properties_module: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    calls: list[object] = []
+    controller = SimpleNamespace(
+        request_selected_frame=lambda scene: calls.append(scene)
+    )
+    runtime = ModuleType("audio2face.runtime")
+    runtime.get_controller = lambda: controller  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, runtime.__name__, runtime)
+    scene = SimpleNamespace(audio2face=object())
+
+    properties_module._selected_frame_mapping_updated(
+        None,
+        SimpleNamespace(scene=scene),
+    )
+
+    assert calls == [scene]
     annotation = properties_module.A2FSceneSettings.__annotations__[
         "prediction_delay"
     ]
-    assert "update" not in annotation
+    assert "update=_selected_frame_mapping_updated" in annotation
 
 
 def test_reset_helpers_only_unset_their_owned_rna_properties(

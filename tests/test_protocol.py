@@ -38,7 +38,7 @@ def test_windows_native_transport_uses_binary_stdio() -> None:
 
 
 def test_native_worker_mirrors_the_python_wire_identity() -> None:
-    assert WORKER_PROFILE.rpartition("/")[2] == "10"
+    assert WORKER_PROFILE.rpartition("/")[2] == "12"
     assert f'constexpr const char* kProtocol = "{PROTOCOL_VERSION}";' in (
         WORKER_PROTOCOL_SOURCE
     )
@@ -165,7 +165,12 @@ def test_canonical_stream_event_requires_operation_id_and_exact_fields() -> None
 
 
 def test_stream_methods_and_events_are_canonical_protocol_members() -> None:
-    for method in ("stream_start", "stream_chunk", "stream_settings", "stream_end"):
+    for method in (
+        "stream_start",
+        "stream_chunk",
+        "stream_settings",
+        "stream_end",
+    ):
         request = make_request(method, {})
         assert decode_message(encode_message(request)) == request
 
@@ -193,58 +198,63 @@ def test_stream_methods_and_events_are_canonical_protocol_members() -> None:
         assert decode_message(encode_message(event)) == event
 
 
-def test_bake_methods_and_events_are_canonical_protocol_members() -> None:
+def test_track_methods_and_events_are_canonical_protocol_members() -> None:
     for method in (
-        "bake_start",
-        "bake_chunk",
-        "bake_prepare",
-        "bake_frame",
-        "bake_end",
+        "track_start",
+        "track_chunk",
+        "track_prepare",
+        "track_render",
     ):
         request = make_request(method, {})
         assert decode_message(encode_message(request)) == request
 
-    for reason in ("completed", "canceled"):
-        ended = {
+    for event_name, data in (
+        (
+            "track_preview",
+            {
+                "revision": 1,
+                "timestamp_sample": 0,
+                "weights": [0.0],
+                "effective_emotions": [0.0],
+            },
+        ),
+        (
+            "track_frame_batch",
+            {
+                "revision": 1,
+                "offset": 0,
+                "total_frames": 1,
+                "timestamp_samples": [0],
+                "weights": [[0.0]],
+                "effective_emotions": [[0.0]],
+            },
+        ),
+        ("track_ended", {"reason": "canceled"}),
+    ):
+        event = {
             "protocol": PROTOCOL_VERSION,
             "type": "event",
-            "event": "bake_ended",
-            "operation_id": "bake-1",
-            "data": {"reason": reason},
+            "event": event_name,
+            "operation_id": "track-1",
+            "data": data,
         }
-        assert decode_message(encode_message(ended)) == ended
+        assert decode_message(encode_message(event)) == event
 
-def test_native_stream_settings_is_one_ordered_queue_command() -> None:
-    assert 'if (method == "stream_settings")' in WORKER_PROTOCOL_SOURCE
-    assert "enqueue_stream_settings(id, params);" in WORKER_PROTOCOL_SOURCE
-    assert 'require_exact_keys(params, {"operation_id", "settings"});' in (
-        WORKER_PROTOCOL_SOURCE
-    )
-    enqueue_start = WORKER_PROTOCOL_SOURCE.index("  void enqueue_stream_settings(")
-    enqueue_end = WORKER_PROTOCOL_SOURCE.index(
-        "  void enqueue_stream_end(", enqueue_start
-    )
-    enqueue_source = WORKER_PROTOCOL_SOURCE[enqueue_start:enqueue_end]
-    assert "stream_settings_pending_" in enqueue_source
-    assert "Wait for the pending stream settings response" in enqueue_source
-    assert "respond_and_release" not in enqueue_source
 
-    loop_start = WORKER_PROTOCOL_SOURCE.index("  void stream_loop(")
-    loop_end = WORKER_PROTOCOL_SOURCE.index(
-        "  void emit_bake_ended(", loop_start
-    )
-    loop_source = WORKER_PROTOCOL_SOURCE[loop_start:loop_end]
-    apply_settings = loop_source.index(
-        "backend_.stream_settings(command.settings, canceled_);"
-    )
-    acknowledge = loop_source.index("respond_to_active_stream_settings(")
-    assert apply_settings < acknowledge
+@pytest.mark.parametrize(
+    "method",
+    ["track_frame", "track_end"],
+)
+def test_removed_operation_aliases_are_rejected(method: str) -> None:
+    with pytest.raises(ProtocolError, match="unsupported request method"):
+        encode_message(make_request(method, {}))
+    assert f'if (method == "{method}")' not in WORKER_PROTOCOL_SOURCE
 
 
 def test_native_stream_chunk_emits_one_dequeue_credit() -> None:
     enqueue_start = WORKER_PROTOCOL_SOURCE.index("  void enqueue_stream_chunk(")
     enqueue_end = WORKER_PROTOCOL_SOURCE.index(
-        "  void enqueue_stream_settings(", enqueue_start
+        "  void enqueue_stream_end(", enqueue_start
     )
     enqueue_source = WORKER_PROTOCOL_SOURCE[enqueue_start:enqueue_end]
     assert "respond_and_release(request_id, response_gate);" in enqueue_source
@@ -263,52 +273,49 @@ def test_native_stream_chunk_emits_one_dequeue_credit() -> None:
         "backend_.stream_chunk(command.audio, canceled_, emit_frame);"
     )
     assert pop < response_gate < credit < inference
-    assert "StreamCommand::Kind::Settings" in WORKER_PROTOCOL_SOURCE
     assert "stream_queue_.push_back(std::move(command));" in WORKER_PROTOCOL_SOURCE
-    assert "backend_.stream_settings(command.settings" in (
-        WORKER_PROTOCOL_SOURCE
-    )
-def test_native_worker_exposes_the_bake_protocol_members() -> None:
+
+
+def test_native_worker_exposes_the_track_protocol_members() -> None:
     for method in (
-        "bake_start",
-        "bake_chunk",
-        "bake_prepare",
-        "bake_frame",
-        "bake_end",
+        "track_start",
+        "track_chunk",
+        "track_prepare",
+        "track_render",
     ):
         assert f'if (method == "{method}")' in WORKER_PROTOCOL_SOURCE
-    assert '"bake_ended"' in WORKER_PROTOCOL_SOURCE
-    bake_loop = WORKER_PROTOCOL_SOURCE[
-        WORKER_PROTOCOL_SOURCE.index("  void bake_loop(") :
-        WORKER_PROTOCOL_SOURCE.index("  void emit_bake_ended(")
+    assert '"track_ended"' in WORKER_PROTOCOL_SOURCE
+    assert "bake_" not in WORKER_PROTOCOL_SOURCE
+    track_loop = WORKER_PROTOCOL_SOURCE[
+        WORKER_PROTOCOL_SOURCE.index("  void track_loop(") :
+        WORKER_PROTOCOL_SOURCE.index("  void emit_track_ended(")
     ]
-    assert '{{"weights", result.weights}}' in bake_loop
+    assert '"track_preview"' in track_loop
+    assert '"track_frame_batch"' in track_loop
+    assert '{"timestamp_samples", std::move(timestamp_samples)}' in track_loop
+    assert '{"weights", std::move(weights)}' in track_loop
+    assert 'std::move(effective_emotions)' in track_loop
 
 
-def test_native_bake_keeps_one_frame_in_flight_and_cancel_suppresses_responses() -> None:
-    enqueue_start = WORKER_PROTOCOL_SOURCE.index("  void enqueue_bake_frame(")
-    enqueue_end = WORKER_PROTOCOL_SOURCE.index("  void enqueue_bake_end(", enqueue_start)
+def test_native_track_supersedes_old_renders_and_batches_the_publish() -> None:
+    enqueue_start = WORKER_PROTOCOL_SOURCE.index("  void enqueue_track_render(")
+    enqueue_end = WORKER_PROTOCOL_SOURCE.index("  void cancel_operation(", enqueue_start)
     enqueue_source = WORKER_PROTOCOL_SOURCE[enqueue_start:enqueue_end]
-    assert "if (bake_frame_pending_)" in enqueue_source
-    assert "bake_frame_pending_ = true;" in enqueue_source
+    assert "if (revision <= latest)" in enqueue_source
+    assert "latest_track_revision_.store(revision" in enqueue_source
+    assert "track_queue_.erase(it)" in enqueue_source
+    assert "backend_.interrupt_operation();" in enqueue_source
 
-    response_start = WORKER_PROTOCOL_SOURCE.index("  void respond_to_active_bake(")
-    response_end = WORKER_PROTOCOL_SOURCE.index(
-        "  void emit_active_stream_event(", response_start
-    )
-    response_source = WORKER_PROTOCOL_SOURCE[response_start:response_end]
-    cancel_check = response_source.index(
-        "canceled_.load(std::memory_order_acquire)"
-    )
-    response = response_source.index("emitter_.response(")
-    release = response_source.index("bake_frame_pending_ = false")
-    assert cancel_check < response < release
-
-    loop_start = WORKER_PROTOCOL_SOURCE.index("  void bake_loop(")
-    loop_end = WORKER_PROTOCOL_SOURCE.index("  void emit_bake_ended(", loop_start)
+    loop_start = WORKER_PROTOCOL_SOURCE.index("  void track_loop(")
+    loop_end = WORKER_PROTOCOL_SOURCE.index("  void emit_track_ended(", loop_start)
     loop_source = WORKER_PROTOCOL_SOURCE[loop_start:loop_end]
-    assert "backend_.bake_chunk(command.audio, canceled_)" in loop_source
-    assert "canceled_);" in loop_source
+    assert "constexpr std::size_t kMaximumTrackFramesPerBatch = 64;" in (
+        WORKER_PROTOCOL_SOURCE
+    )
+    batch = loop_source.index('"track_frame_batch"')
+    render = loop_source.index("backend_.track_render(")
+    response = loop_source.index("respond_to_track_render(", render)
+    assert batch < render < response
 
 
 def test_native_cancel_interrupts_interactive_compute_before_waiting() -> None:

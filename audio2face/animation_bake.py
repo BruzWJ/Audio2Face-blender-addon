@@ -8,6 +8,7 @@ from typing import Any, Iterable
 
 ACTION_NAME = "Audio2Face Shape Key Bake"
 ACTION_GROUP_NAME = "Audio2Face Bake"
+ACTION_OWNER_KEY = "audio2face_shape_key_bake"
 
 
 class AnimationBakeError(ValueError):
@@ -61,12 +62,13 @@ def _write_action(
     shape_keys = plan.shape_keys
     animation_data = shape_keys.animation_data_create()
     action = animation_data.action
-    if action is None:
+    if action is None or action.get(ACTION_OWNER_KEY) is not True:
         action = actions.new(name=f"{ACTION_NAME} - {shape_keys.name}")
+        action[ACTION_OWNER_KEY] = True
         animation_data.action = action
 
-    first_frame = float(min(frames))
-    last_frame = float(max(frames))
+    for layer in tuple(action.layers):
+        action.layers.remove(layer)
 
     for channel_index, data_path in plan.channels:
         fcurve = action.fcurve_ensure_for_datablock(
@@ -76,13 +78,9 @@ def _write_action(
             group_name=ACTION_GROUP_NAME,
         )
         points = fcurve.keyframe_points
-        for point in tuple(points):
-            if first_frame <= float(point.co[0]) <= last_frame:
-                points.remove(point, fast=True)
-        first_new_point = len(points)
         points.add(len(frames))
         for offset, (frame, row) in enumerate(zip(frames, weights, strict=True)):
-            point = points[first_new_point + offset]
+            point = points[offset]
             point.co = (float(frame), row[channel_index])
             point.interpolation = "LINEAR"
         fcurve.update()

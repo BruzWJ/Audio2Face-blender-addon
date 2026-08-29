@@ -28,6 +28,7 @@ from _bpy_restrict_state import RestrictBlend  # noqa: E402
 
 import audio2face  # noqa: E402
 from audio2face.animation_bake import (  # noqa: E402
+    ACTION_OWNER_KEY,
     bake_shape_key_actions,
     plan_bake_targets,
 )
@@ -39,6 +40,7 @@ from audio2face import runtime  # noqa: E402
 from audio2face.selected_audio_timeline import (  # noqa: E402
     SELECTED_AUDIO_STRIP_NAME,
     is_selected_audio_strip,
+    selected_audio_frame_span,
 )
 from audio2face.preferences import A2FAddonPreferences  # noqa: E402
 from audio2face.properties import (  # noqa: E402
@@ -97,6 +99,20 @@ def _route_stream_event(
     )
 
 
+def _assert_native_transport_handlers(*, registered: bool) -> None:
+    def owned(handlers: object) -> tuple[object, ...]:
+        return tuple(
+            handler
+            for handler in handlers
+            if getattr(handler, "__module__", None) == runtime.__name__
+        )
+
+    assert owned(bpy.app.handlers.animation_playback_pre) == ()
+    assert owned(bpy.app.handlers.animation_playback_post) == ()
+    expected = (runtime._frame_change_post_handler,) if registered else ()
+    assert owned(bpy.app.handlers.frame_change_post) == expected
+
+
 def _make_shape_key_target(
     scene: bpy.types.Scene,
     *,
@@ -149,6 +165,7 @@ def main() -> None:
         assert bpy.app.timers.is_registered(runtime._timer_callback)
         assert runtime._load_pre_handler in bpy.app.handlers.load_pre
         assert runtime._load_post_handler in bpy.app.handlers.load_post
+        _assert_native_transport_handlers(registered=True)
         scene = bpy.context.scene
         settings = scene.audio2face
 
@@ -333,6 +350,7 @@ def main() -> None:
             original_frame_end = scene.frame_end
             settings.audio_first_frame = 12
             settings.audio_path = str(wav_path)
+            _assert_native_transport_handlers(registered=True)
             sequence_editor = scene.sequence_editor
             assert sequence_editor is not None
             owned_strips = [
@@ -344,9 +362,13 @@ def main() -> None:
             selected_strip = owned_strips[0]
             assert selected_strip.name == SELECTED_AUDIO_STRIP_NAME
             assert selected_strip.content_start == 12
-            assert selected_strip.duration == math.ceil(
-                scene.render.fps / scene.render.fps_base
+            assert selected_audio_frame_span(scene) == (
+                12,
+                int(selected_strip.content_end) - 1,
             )
+            assert selected_strip.left_handle_offset == 0.0
+            assert selected_strip.right_handle_offset == 0.0
+            assert scene.sync_mode == "AUDIO_SYNC"
             assert scene.frame_start == 7
             assert scene.frame_end == original_frame_end
             settings.audio_path = ""
@@ -540,17 +562,15 @@ def main() -> None:
 
         live = runtime.get_live_stream_controller()
         routed_operation = "blender-smoke-stream"
-        playback_started: list[None] = []
+        presentation_stopped: list[None] = []
         try:
-            live.prepare_timeline(
+            live.prepare_external(
                 scene,
                 routed_operation,
                 16_000,
                 tuple(MODEL_CHANNELS),
                 ("Neutral", "Joy"),
-                int(scene.frame_current),
-                int(scene.frame_current) + 24,
-                lambda: playback_started.append(None),
+                lambda: presentation_stopped.append(None),
             )
             controller.active_stream = runtime.ActiveStream(
                 operation_id=routed_operation,
@@ -558,25 +578,6 @@ def main() -> None:
             )
             streamed_frame = [0.0] * len(MODEL_CHANNELS)
             streamed_frame[MODEL_CHANNELS.index("jawOpen")] = 0.375
-            # Selected timeline delivery buffers receptive-field frames until
-            # the native start frame has model coverage.
-            _route_stream_event(
-                controller,
-                routed_operation,
-                "stream_frame",
-                {
-                    "timestamp_sample": -160,
-                    "weights": streamed_frame,
-                    "effective_emotions": [0.25, 1.25],
-                },
-            )
-            assert playback_started == []
-            _assert_close(
-                target.data.shape_keys.key_blocks["jawOpen"].value,
-                0.0,
-                label="buffered live-stream jawOpen",
-            )
-            _assert_close(settings.stream_time, 0.0, label="negative stream time clamp")
             _route_stream_event(
                 controller,
                 routed_operation,
@@ -587,7 +588,7 @@ def main() -> None:
                     "effective_emotions": [0.75, 0.25],
                 },
             )
-            assert playback_started == [None]
+            assert presentation_stopped == []
             for keyed_target in (
                 target,
                 extra_target,
@@ -661,12 +662,14 @@ def main() -> None:
         )
         assert len(baked_actions) == 2
         assert bake_target.data.shape_keys.animation_data.action == baked_actions[0]
-        assert baked_actions[1] == existing_action
+        assert baked_actions[1] != existing_action
+        assert existing_shape_keys.animation_data.action == baked_actions[1]
+        assert baked_actions[1][ACTION_OWNER_KEY] is True
         existing_points = [tuple(point.co) for point in existing_curve.keyframe_points]
-        assert [co[0] for co in existing_points] == [5.0, 7.0, 9.0, 11.0]
+        assert [co[0] for co in existing_points] == [5.0, 8.0, 11.0]
         for co, expected in zip(
             existing_points,
-            (0.1, 0.2, 0.8, 0.9),
+            (0.1, 0.4, 0.9),
             strict=True,
         ):
             _assert_close(co[1], expected, label="existing Action curve value")
@@ -705,15 +708,7 @@ def main() -> None:
         )
         assert runtime._load_pre_handler not in bpy.app.handlers.load_pre
         assert runtime._load_post_handler not in bpy.app.handlers.load_post
-        assert (
-            runtime._animation_playback_pre_handler
-            not in bpy.app.handlers.animation_playback_pre
-        )
-        assert (
-            runtime._animation_playback_post_handler
-            not in bpy.app.handlers.animation_playback_post
-        )
-        assert runtime._frame_change_post_handler not in bpy.app.handlers.frame_change_post
+        _assert_native_transport_handlers(registered=False)
 
     print("Audio2Face 5.2 smoke test passed")
 
