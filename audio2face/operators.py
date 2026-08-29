@@ -10,7 +10,7 @@ from .properties import (
     reset_emotion_settings,
     reset_model_tuning,
 )
-from .runtime import RuntimeController, get_controller, playing_window
+from .runtime import RuntimeController, get_controller
 from .shape_keys import supports_shape_keys
 from .sidecar import Lifecycle, SidecarError
 
@@ -188,49 +188,6 @@ class A2F_OT_remove_target(bpy.types.Operator):
         return {"FINISHED"}
 
 
-class A2F_OT_play_pause(bpy.types.Operator):
-    bl_idname = "a2f.play_pause"
-    bl_label = "Play/Pause Selected Audio"
-    bl_description = (
-        "Play or pause Blender's native timeline while the selected WAV drives "
-        "live Shape Keys"
-    )
-
-    @classmethod
-    def poll(cls, context: bpy.types.Context) -> bool:
-        settings = context.scene.audio2face
-        if settings.input_mode != "SELECTED":
-            return False
-        if not settings.audio_path:
-            cls.poll_message_set("select a WAV file first")
-            return False
-        if context.window is None:
-            cls.poll_message_set("native playback requires a Blender screen")
-            return False
-        return True
-
-    def execute(self, context: bpy.types.Context) -> set[str]:
-        window = context.window
-        playback_window = playing_window(context.scene)
-        if playback_window is not None:
-            with bpy.context.temp_override(
-                window=playback_window,
-                screen=playback_window.screen,
-            ):
-                result = bpy.ops.screen.animation_pause()
-            if result == {"FINISHED"}:
-                return {"FINISHED"}
-            self.report({"ERROR"}, "Blender could not pause native timeline playback")
-            return {"CANCELLED"}
-
-        with bpy.context.temp_override(window=window, screen=window.screen):
-            result = bpy.ops.screen.animation_play()
-        if result != {"FINISHED"}:
-            self.report({"ERROR"}, "Blender could not start native timeline playback")
-            return {"CANCELLED"}
-        return {"FINISHED"}
-
-
 class A2F_OT_bake_animation(bpy.types.Operator):
     bl_idname = "a2f.bake_animation"
     bl_label = "Bake Shape Key Animation"
@@ -297,7 +254,6 @@ CLASSES = (
     A2F_OT_reset_emotion_settings,
     A2F_OT_add_selected_targets,
     A2F_OT_remove_target,
-    A2F_OT_play_pause,
     A2F_OT_bake_animation,
     A2F_OT_cancel_bake,
 )

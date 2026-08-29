@@ -895,7 +895,11 @@ class RuntimeController:
 
         bpy.app.timers.register(pause_after_native_start, first_interval=0.0)
 
-    def native_timeline_started(self, scene: bpy.types.Scene) -> None:
+    def native_timeline_started(
+        self,
+        scene: bpy.types.Scene,
+        window: bpy.types.Window,
+    ) -> None:
         """Synchronize Selected Audio when any Blender transport starts playback."""
 
         if (
@@ -923,17 +927,18 @@ class RuntimeController:
             frame_end,
         ) and live.timeline_frame_ready(scene):
             live.native_timeline_playback_started(scene)
+            live.present_timeline_frame(scene)
             return
 
-        window = playing_window(scene)
-        if window is None:
-            return
         self.start_selected_audio(
             scene,
             timeline_frame_end=frame_end,
             playback_requested=lambda: self._resume_native_timeline(scene, window),
         )
-        if live.timeline_playback_pending(scene):
+        if live.timeline_frame_ready(scene):
+            live.native_timeline_playback_started(scene)
+            live.present_timeline_frame(scene)
+        elif live.timeline_playback_pending(scene):
             self._defer_timeline_pause(scene, window)
 
     def native_timeline_stopped(self, scene: bpy.types.Scene) -> None:
@@ -2620,9 +2625,12 @@ def _animation_playback_pre_handler(
 ) -> None:
     """Start or reuse Selected Audio inference from Blender's native transport."""
 
+    window = bpy.context.window
+    if window is None:
+        return
     controller = get_controller()
     try:
-        controller.native_timeline_started(scene)
+        controller.native_timeline_started(scene, window)
     except (OSError, RuntimeError, SidecarError, ValueError) as exc:
         if scene.is_editable and hasattr(scene, "audio2face"):
             controller._set_status(scene, "ERROR", str(exc))

@@ -125,13 +125,12 @@ Its duration is `ceil(seconds * fps / fps_base)` frames and its inclusive end is
 `First Frame + duration_frames - 1`. The add-on never changes the scene or
 preview playback range.
 
-The sidebar **Play/Pause** operator is a Blender-native transport toggle; the
-Timeline, Spacebar, and other editors enter the same playback lifecycle. On a
-cache miss the add-on decodes, downmixes, and resamples the WAV to model-rate
-mono f32le, then feeds the finite input through the stream protocol. If the
-requested frame is unavailable, native playback pauses and resumes after that
-pose is presented, keeping sound and Shape Keys together. Stopping playback
-freezes presentation without discarding inferred frames.
+The Timeline, Spacebar, and other native Blender transports enter the same
+playback lifecycle. On a cache miss the add-on decodes, downmixes, and resamples
+the WAV to model-rate mono f32le, then feeds the finite input through the stream
+protocol. If the requested frame is unavailable, native playback pauses and
+resumes after that pose is presented, keeping sound and Shape Keys together.
+Stopping playback freezes presentation without discarding inferred frames.
 
 `frame_change_post` maps `(scene.frame_current - First Frame)` through effective
 FPS and Prediction Delay, then applies one cached result after Blender has

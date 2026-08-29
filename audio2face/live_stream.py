@@ -177,7 +177,6 @@ class LiveStreamController:
             frame_end,
             playback_requested,
         )
-        self._start_timeline_playback_if_ready(scene)
 
     def remap_timeline(
         self,

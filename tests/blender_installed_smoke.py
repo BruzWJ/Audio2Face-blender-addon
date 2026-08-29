@@ -58,10 +58,10 @@ def main() -> None:
     )
     assert runtime._frame_change_post_handler in bpy.app.handlers.frame_change_post
     operator_names = set(dir(bpy.ops.a2f))
+    assert "play_pause" not in operator_names
     assert {
         "bake_animation",
         "cancel_bake",
-        "play_pause",
         "reset_emotion_settings",
         "reset_model_tuning",
     } <= operator_names

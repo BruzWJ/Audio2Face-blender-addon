@@ -234,7 +234,7 @@ def runtime_module(monkeypatch: pytest.MonkeyPatch) -> tuple[ModuleType, ModuleT
         actions=object(),
         window_managers=[],
     )
-    bpy.context = SimpleNamespace(scene=None)  # type: ignore[attr-defined]
+    bpy.context = SimpleNamespace(scene=None, window=None)  # type: ignore[attr-defined]
     bpy.path = SimpleNamespace(abspath=lambda value: value)  # type: ignore[attr-defined]
     bpy.utils = SimpleNamespace(  # type: ignore[attr-defined]
         extension_path_user=lambda *_args, **_kwargs: "/tmp/a2f-runtime-test"
@@ -1599,7 +1599,6 @@ def test_native_playback_start_primes_selected_audio_without_moving_playhead(
         )
         or 159,
     )
-    monkeypatch.setattr(runtime, "playing_window", lambda _scene: window)
     monkeypatch.setattr(
         controller,
         "start_selected_audio",
@@ -1612,7 +1611,7 @@ def test_native_playback_start_primes_selected_audio_without_moving_playhead(
     )
     runtime._test_live_controller.timeline_pending = True
 
-    controller.native_timeline_started(scene)
+    controller.native_timeline_started(scene, window)
 
     assert configured == [(scene, str(audio_path), 40)]
     assert runtime._test_live_controller.remap_calls == [(scene, 40, 159)]
@@ -1621,6 +1620,27 @@ def test_native_playback_start_primes_selected_audio_without_moving_playhead(
     assert deferred == [(scene, window)]
     assert scene.frame_current == 73
     assert scene.frame_set_calls == []
+
+
+def test_native_playback_handler_uses_the_initiating_window(
+    runtime_module: tuple[ModuleType, ModuleType],
+) -> None:
+    runtime, bpy = runtime_module
+    scene, _settings = _local_scene(bpy)
+    window = object()
+    calls: list[tuple[object, object]] = []
+    controller = runtime.RuntimeController()
+    controller.native_timeline_started = (  # type: ignore[method-assign]
+        lambda target_scene, target_window: calls.append(
+            (target_scene, target_window)
+        )
+    )
+    runtime._CONTROLLER = controller
+    bpy.context.window = window
+
+    runtime._animation_playback_pre_handler(scene)
+
+    assert calls == [(scene, window)]
 
 
 def test_native_pause_preserves_selected_cache_and_cancels_only_pending_resume(

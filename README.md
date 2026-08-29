@@ -133,11 +133,10 @@ driver caches.
    value enables that source; set every value to zero to clear it. **Mixed
    Emotion** is read-only output from live Selected WAV playback or Stream
    input.
-7. In Selected WAV mode, set **First Frame**, then use either the add-on's
-   **Play** button or Blender's Timeline/Spacebar transport. The same native
-   playback handlers prime inference and transiently update matching Shape
-   Keys. Click **Bake Shape Key Animation** separately when those results
-   should become native Shape Key Actions.
+7. In Selected WAV mode, set **First Frame**, then use Blender's Timeline or
+   Spacebar transport. Native playback handlers prime inference and transiently
+   update matching Shape Keys. Click **Bake Shape Key Animation** separately
+   when those results should become native Shape Key Actions.
 8. In Stream mode, the first `push_audio_f32le` call automatically starts the
    inference stream. `end_pcm_stream` marks normal end-of-input after all
    queued chunks. **Stop Worker** exits the child process and releases its
@@ -172,9 +171,9 @@ Choosing a **Selected WAV** creates or updates one add-on-owned sound strip in
 Blender's Video Sequencer at the saved **First Frame**. The add-on preserves
 unrelated strips and never changes Blender's scene or preview playback range.
 
-**Play/Pause**, Blender's Timeline, and Spacebar all use the same native
-transport. Blender's current frame is the only presentation clock; inference
-briefly pauses that transport only when the requested frame is not ready.
+Blender's Timeline and Spacebar transport control Selected WAV playback.
+Blender's current frame is the only presentation clock; inference briefly
+pauses that transport only when the requested frame is not ready.
 Pause freezes Shape Keys, scrubbing seeks them, and Blender's native range loop
 wraps sound and facial values together. Completed inference remains cached for
 replay, and frames outside the sound interval are neutral. Preview values are

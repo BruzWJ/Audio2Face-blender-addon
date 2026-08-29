@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import bpy
 
 from .properties import AUDIO2FACE_SETTING_GROUPS
-from .runtime import RuntimeController, get_controller, playing_window
+from .runtime import RuntimeController, get_controller
 from .sidecar import Lifecycle
 from .ui_text import context_wrap_width, draw_wrapped_label
 
@@ -25,16 +25,8 @@ def _draw_audio_playback(
 
     if settings.input_mode == "SELECTED":
         playback_box = layout.box()
-        playback_box.label(text="Playback", icon="SPEAKER")
-        playback_row = playback_box.row(align=True)
-        if playing_window(scene) is not None:
-            playback_row.operator(
-                "a2f.play_pause", text="Pause", icon="PAUSE"
-            )
-        else:
-            playback_row.operator(
-                "a2f.play_pause", text="Play", icon="PLAY"
-            )
+        playback_box.label(text="Timeline", icon="TIME")
+        playback_box.label(text="Use Blender's playback controls")
         bake = controller.active_bake
         if bake is not None and bake.scene_name == scene.name:
             bake_row = playback_box.row(align=True)
