@@ -29,7 +29,6 @@ from .live_stream import (
     get_live_stream_controller,
     unregister_live_stream,
     validate_output_weights,
-    validate_stream_frame,
 )
 from .model_inputs import (
     ModelInputError,
@@ -70,6 +69,16 @@ def _model_emotion_channels(model_schema: dict[str, Any]) -> tuple[str, ...]:
     return tuple(
         descriptor["name"] for descriptor in model_schema["emotion_channels"]
     )
+
+
+def playing_window(scene: bpy.types.Scene) -> bpy.types.Window | None:
+    """Return the window currently playing ``scene``."""
+
+    for window_manager in bpy.data.window_managers:
+        window = window_manager.windows.find_playing(scrub=False)
+        if window is not None and window.find_playing_scene(scrub=False) is scene:
+            return window
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,16 +164,21 @@ class PCMIngress:
 
 
 @dataclass(slots=True)
+class SelectedWavInput:
+    """Finite WAV input attached to a worker stream."""
+
+    path: Path
+    source: WavStreamSource
+    chunks: Iterator[bytes]
+
+
+@dataclass(slots=True)
 class ActiveStream:
     """The worker's single canonical stream and its local presentation state."""
 
     operation_id: str
     scene_name: str
-    audio_path: Path | None = None
-    wav_source: WavStreamSource | None = None
-    wav_chunks: Iterator[bytes] | None = None
-    timeline_frame_start: int | None = None
-    samples_sent: int = 0
+    selected: SelectedWavInput | None = None
     chunk_credit: threading.Event = field(default_factory=threading.Event)
     prebuffer_samples: int | None = None
     end_sent: bool = False
@@ -179,51 +193,24 @@ class ActiveBake:
 
     operation_id: str
     scene_name: str
-    audio_path: Path
     wav_source: WavStreamSource
     chunks: Iterator[bytes]
-    audio_samples: int
     frame_start: int
     frame_end: int
     original_frame: int
-    targets: tuple[BakeTarget, ...] = ()
+    targets: tuple[BakeTarget, ...]
     uploaded_samples: int = 0
-    next_frame: int = 0
-    frames: list[int] = field(default_factory=list)
     weights: list[tuple[float, ...]] = field(default_factory=list)
     cancel_requested: bool = False
     cancel_accepted: bool = False
 
 
-@dataclass(slots=True)
-class _StatusNotice:
-    """Presentation timing for one operational status, separate from RNA state."""
-
-    status: str
-    started_at: float
-    visible: bool = False
-
-
 POLL_INTERVAL_SECONDS = 0.10
 PRESENTATION_INTERVAL_SECONDS = 1.0 / 60.0
-_STATUS_NOTICE_DELAY_SECONDS = 0.25
 SHUTDOWN_TIMEOUT_SECONDS = 2.0
 HANDSHAKE_TIMEOUT_SECONDS = 15.0
 MAX_STREAM_CHUNK_BYTES = 256 * 1024
 MAX_PENDING_STREAM_CHUNKS = 64
-_STATUS_NOTICE_VALUES = frozenset(
-    {
-        "STARTING",
-        "LOADING_MODEL",
-        "STREAM_STARTING",
-        "STREAM_ENDING",
-        "BAKE_UPLOADING",
-        "BAKE_PREPARING",
-        "BAKING",
-        "BAKE_ENDING",
-        "STOPPING",
-    }
-)
 
 
 class RuntimeController:
@@ -257,7 +244,7 @@ class RuntimeController:
         self.active_stream: ActiveStream | None = None
         self.active_bake: ActiveBake | None = None
         self.pcm_ingress: PCMIngress | None = None
-        self._status_notices: dict[int, _StatusNotice] = {}
+        self._internal_timeline_pause_scene: bpy.types.Scene | None = None
 
     def _scene(self, name: str | None) -> bpy.types.Scene | None:
         return bpy.data.scenes.get(name) if name else None
@@ -313,62 +300,10 @@ class RuntimeController:
         if not scene.is_editable:
             return
         settings = scene.audio2face
-        previous_status = settings.status
         changed = settings.status != status or settings.status_message != message
         settings.status = status
         settings.status_message = message
         if changed:
-            scene_key = int(scene.as_pointer())
-            current = self._status_notices.get(scene_key)
-            if status in _STATUS_NOTICE_VALUES:
-                if previous_status != status or current is None:
-                    self._status_notices[scene_key] = _StatusNotice(
-                        status=status,
-                        started_at=time.monotonic(),
-                    )
-            else:
-                self._status_notices.pop(scene_key, None)
-            self._tag_runtime_setup_redraw()
-
-    def status_notice(
-        self,
-        scene: bpy.types.Scene,
-    ) -> tuple[str, str] | None:
-        """Return only an error or an informational status that has persisted."""
-
-        settings = scene.audio2face
-        if settings.status == "ERROR":
-            return settings.status, settings.status_message
-        notice = self._status_notices.get(int(scene.as_pointer()))
-        if (
-            notice is None
-            or not notice.visible
-            or notice.status != settings.status
-        ):
-            return None
-        return settings.status, settings.status_message
-
-    def _poll_status_notices(self) -> None:
-        """Reveal a still-current informational status after one stable delay."""
-
-        scenes = {
-            int(scene.as_pointer()): scene
-            for scene in self._editable_scenes()
-        }
-        now = time.monotonic()
-        redraw = False
-        for scene_key, notice in tuple(self._status_notices.items()):
-            scene = scenes.get(scene_key)
-            if scene is None or scene.audio2face.status != notice.status:
-                redraw = redraw or notice.visible
-                del self._status_notices[scene_key]
-            elif (
-                not notice.visible
-                and now - notice.started_at >= _STATUS_NOTICE_DELAY_SECONDS
-            ):
-                notice.visible = True
-                redraw = True
-        if redraw:
             self._tag_runtime_setup_redraw()
 
     @staticmethod
@@ -725,6 +660,7 @@ class RuntimeController:
         spec: RuntimeModelSpec,
     ) -> None:
         signature = self._model_signature(spec)
+        get_live_stream_controller().stop(reset=False, notify=False)
         self._clear_model_state()
         self._request(
             scene,
@@ -745,62 +681,90 @@ class RuntimeController:
     def _submit_stream_start(
         self,
         scene: bpy.types.Scene,
-        *,
-        audio_path: Path | None = None,
-        wav_source: WavStreamSource | None = None,
-        timeline_playback_requested: Callable[[], None] | None = None,
-        timeline_frame_start: int | None = None,
-        timeline_frame_end: int | None = None,
     ) -> None:
+        """Start one external PCM stream."""
+
+        operation_id, sample_rate, model_schema = self._stream_start_metadata(scene)
+        get_live_stream_controller().prepare_external(
+            scene,
+            operation_id,
+            sample_rate,
+            tuple(model_schema["channels"]),
+            _model_emotion_channels(model_schema),
+            lambda: self._finish_stream_presentation(scene.name, operation_id),
+        )
+        scene.audio2face.stream_time = 0.0
+        self._activate_stream(
+            scene,
+            ActiveStream(operation_id=operation_id, scene_name=scene.name),
+            sample_rate,
+        )
+
+    def _submit_selected_stream_start(
+        self,
+        scene: bpy.types.Scene,
+        selected: SelectedWavInput,
+        frame_start: int,
+        frame_end: int,
+        playback_requested: Callable[[], None],
+    ) -> None:
+        """Start one finite Selected WAV stream."""
+
+        operation_id, sample_rate, model_schema = self._stream_start_metadata(scene)
+        get_live_stream_controller().prepare_timeline(
+            scene,
+            operation_id,
+            sample_rate,
+            tuple(model_schema["channels"]),
+            _model_emotion_channels(model_schema),
+            frame_start,
+            frame_end,
+            playback_requested,
+        )
+        self._activate_stream(
+            scene,
+            ActiveStream(
+                operation_id=operation_id,
+                scene_name=scene.name,
+                selected=selected,
+            ),
+            sample_rate,
+        )
+
+    def _stream_start_metadata(
+        self,
+        scene: bpy.types.Scene,
+    ) -> tuple[str, int, dict[str, Any]]:
         sample_rate = self.model_sample_rate
         if sample_rate is None:
             raise SidecarError("worker model did not report its sampling rate")
         model_schema = self.model_schema
         if model_schema is None:
             raise SidecarError("worker model did not report its output channels")
-        if self.active_stream is not None:
-            raise SidecarError("another Audio2Face stream is already active")
         self._ensure_scene_model_schema(scene)
-        operation_id = uuid.uuid4().hex
-        get_live_stream_controller().prepare(
-            scene,
-            operation_id,
-            sample_rate,
-            tuple(model_schema["channels"]),
-            _model_emotion_channels(model_schema),
-            presentation_stopped=lambda: self._finish_stream_presentation(
-                scene.name,
-                operation_id,
-            ),
-            timeline_playback_requested=timeline_playback_requested,
-            timeline_frame_start=timeline_frame_start,
-            timeline_frame_end=timeline_frame_end,
-        )
+        return uuid.uuid4().hex, sample_rate, model_schema
+
+    def _activate_stream(
+        self,
+        scene: bpy.types.Scene,
+        stream: ActiveStream,
+        sample_rate: int,
+    ) -> None:
         try:
             self._request(
                 scene,
                 "stream_start",
                 {
-                    "operation_id": operation_id,
+                    "operation_id": stream.operation_id,
                     "sample_rate": sample_rate,
                     "settings": inference_settings(scene.audio2face),
                 },
                 model_signature=None,
-                operation_id=operation_id,
+                operation_id=stream.operation_id,
             )
         except Exception:
             get_live_stream_controller().stop(reset=False, notify=False)
             raise
-
-        scene.audio2face.stream_time = 0.0
-        stream = ActiveStream(
-            operation_id=operation_id,
-            scene_name=scene.name,
-            audio_path=audio_path,
-            wav_source=wav_source,
-            wav_chunks=iter(wav_source) if wav_source is not None else None,
-            timeline_frame_start=timeline_frame_start,
-        )
         stream.chunk_credit.set()
         self.active_stream = stream
         self._set_status(scene, "STREAM_STARTING", "Preparing audio inference")
@@ -823,7 +787,8 @@ class RuntimeController:
         if (
             stream is not None
             and stream.scene_name == scene.name
-            and stream.audio_path == audio_path
+            and stream.selected is not None
+            and stream.selected.path == audio_path
             and not stream.stop_requested
         ):
             get_live_stream_controller().request_timeline_playback(
@@ -843,43 +808,159 @@ class RuntimeController:
             chunk_frames=sample_rate // 10,
         )
         try:
-            scene.frame_set(scene.frame_start)
-            self._submit_stream_start(
+            self._submit_selected_stream_start(
                 scene,
-                audio_path=audio_path,
-                wav_source=wav_source,
-                timeline_playback_requested=playback_requested,
-                timeline_frame_start=scene.frame_start,
-                timeline_frame_end=timeline_frame_end,
+                SelectedWavInput(audio_path, wav_source, iter(wav_source)),
+                int(scene.audio2face.audio_first_frame),
+                timeline_frame_end,
+                playback_requested,
             )
         except Exception:
             wav_source.close()
             raise
 
-    def cancel_selected_audio(self, scene: bpy.types.Scene) -> None:
-        """Cancel Selected WAV inference when native playback could not start."""
+    def discard_selected_audio(self, scene: bpy.types.Scene) -> None:
+        """Discard cached output and cancel this scene's Selected WAV stream."""
 
-        self._require_editable_scene(scene)
+        get_live_stream_controller().discard_timeline(scene)
         stream = self.active_stream
         if (
-            stream is None
-            or stream.scene_name != scene.name
-            or stream.wav_source is None
+            stream is not None
+            and stream.scene_name == scene.name
+            and stream.selected is not None
+            and not stream.stop_requested
         ):
-            raise SidecarError("there is no active Selected WAV stream")
+            self._request_stream_cancel(stream)
+
+    def input_mode_changed(self, scene: bpy.types.Scene) -> None:
+        """Discard audio state owned by the scene's previous input mode."""
+
         get_live_stream_controller().stop(reset=False, notify=False)
-        if stream.worker_ended:
-            self._release_active_stream(stream.operation_id)
-        elif not stream.stop_requested:
-            try:
-                self._request_stream_cancel(scene, stream)
-            except (OSError, SidecarError, ValueError) as exc:
-                message = (
-                    "native playback failed and Selected WAV inference could not "
-                    f"be canceled: {exc}"
+        stream = self.active_stream
+        if (
+            stream is not None
+            and stream.scene_name == scene.name
+            and not stream.stop_requested
+        ):
+            self._request_stream_cancel(stream)
+        with self.pending_lock:
+            if (
+                self.pcm_ingress is not None
+                and self.pcm_ingress.scene_name == scene.name
+            ):
+                self.pcm_ingress = None
+
+    def _resume_native_timeline(
+        self,
+        scene: bpy.types.Scene,
+        window: bpy.types.Window,
+    ) -> None:
+        if window.scene is not scene:
+            return
+        if window.find_playing_scene(scrub=False) is scene:
+            return
+        with bpy.context.temp_override(window=window, screen=window.screen):
+            result = bpy.ops.screen.animation_play()
+        if result != {"FINISHED"}:
+            self._set_status(
+                scene,
+                "ERROR",
+                "Blender could not resume native timeline playback",
+            )
+
+    def _defer_timeline_pause(
+        self,
+        scene: bpy.types.Scene,
+        window: bpy.types.Window,
+    ) -> None:
+        def pause_after_native_start() -> None:
+            live = get_live_stream_controller()
+            if (
+                not live.timeline_playback_pending(scene)
+                or window.find_playing_scene(scrub=False) is not scene
+            ):
+                return None
+            self._internal_timeline_pause_scene = scene
+            with bpy.context.temp_override(window=window, screen=window.screen):
+                result = bpy.ops.screen.animation_pause()
+            if result != {"FINISHED"}:
+                self._internal_timeline_pause_scene = None
+                live.cancel_timeline_playback_request(scene)
+                self._set_status(
+                    scene,
+                    "ERROR",
+                    "Blender could not pause native playback while inference primes",
                 )
-                self._reject_worker_contract(message)
-                raise SidecarError(message) from exc
+            return None
+
+        bpy.app.timers.register(pause_after_native_start, first_interval=0.0)
+
+    def native_timeline_started(self, scene: bpy.types.Scene) -> None:
+        """Synchronize Selected Audio when any Blender transport starts playback."""
+
+        if (
+            not scene.is_editable
+            or not hasattr(scene, "audio2face")
+            or scene.audio2face.input_mode != "SELECTED"
+            or not scene.audio2face.audio_path
+        ):
+            return
+        settings = scene.audio2face
+        audio_path = self._selected_path(
+            bpy.path.abspath(settings.audio_path),
+            "selected WAV file",
+        )
+        frame_start = int(settings.audio_first_frame)
+        frame_end = configure_selected_audio(
+            scene,
+            str(audio_path),
+            first_frame=frame_start,
+        )
+        live = get_live_stream_controller()
+        if live.remap_timeline(
+            scene,
+            frame_start,
+            frame_end,
+        ) and live.timeline_frame_ready(scene):
+            live.native_timeline_playback_started(scene)
+            return
+
+        window = playing_window(scene)
+        if window is None:
+            return
+        self.start_selected_audio(
+            scene,
+            timeline_frame_end=frame_end,
+            playback_requested=lambda: self._resume_native_timeline(scene, window),
+        )
+        if live.timeline_playback_pending(scene):
+            self._defer_timeline_pause(scene, window)
+
+    def native_timeline_stopped(self, scene: bpy.types.Scene) -> None:
+        """Freeze Selected Audio on Blender's paused frame without losing its cache."""
+
+        live = get_live_stream_controller()
+        if self._internal_timeline_pause_scene is scene:
+            self._internal_timeline_pause_scene = None
+        else:
+            live.cancel_timeline_playback_request(scene)
+
+    def native_timeline_frame_changed(self, scene: bpy.types.Scene) -> None:
+        """Present a Selected Audio frame and pause native playback on underrun."""
+
+        live = get_live_stream_controller()
+        if not live.present_timeline_frame(scene):
+            return
+        if live.timeline_frame_ready(scene) or live.timeline_playback_pending(scene):
+            return
+        window = playing_window(scene)
+        if window is None:
+            return
+        live.request_timeline_playback(
+            lambda: self._resume_native_timeline(scene, window)
+        )
+        if live.timeline_playback_pending(scene):
+            self._defer_timeline_pause(scene, window)
 
     def bake_selected_audio(self, scene: bpy.types.Scene) -> None:
         """Begin an asynchronous, frame-based bake of the selected WAV."""
@@ -896,6 +977,14 @@ class RuntimeController:
         )
         if not audio_path.is_file():
             raise SidecarError(f"audio file does not exist: {audio_path}")
+        playback_window = playing_window(scene)
+        if playback_window is not None:
+            with bpy.context.temp_override(
+                window=playback_window,
+                screen=playback_window.screen,
+            ):
+                bpy.ops.screen.animation_pause()
+        get_live_stream_controller().stop(reset=False, notify=False)
         self._submit_bake_start(scene, audio_path)
 
     def _submit_bake_start(
@@ -924,21 +1013,22 @@ class RuntimeController:
             output_sample_rate=sample_rate,
             chunk_frames=MAX_STREAM_CHUNK_BYTES // 4,
         )
-        frame_start = int(scene.frame_start)
-        _strip, frame_end = configure_selected_audio(scene, str(audio_path))
+        frame_start = int(scene.audio2face.audio_first_frame)
+        frame_end = configure_selected_audio(
+            scene,
+            str(audio_path),
+            first_frame=frame_start,
+        )
         operation_id = uuid.uuid4().hex
         bake = ActiveBake(
             operation_id=operation_id,
             scene_name=scene.name,
-            audio_path=audio_path,
             wav_source=wav_source,
             chunks=iter(wav_source),
-            audio_samples=wav_source.metadata.output_frames,
             frame_start=frame_start,
             frame_end=frame_end,
             original_frame=int(scene.frame_current),
             targets=target_plans,
-            next_frame=frame_start,
         )
         self.active_bake = bake
         try:
@@ -999,7 +1089,9 @@ class RuntimeController:
     ) -> None:
         if bake.cancel_requested:
             return
-        if bake.next_frame > bake.frame_end:
+        completed = len(bake.weights)
+        frame = bake.frame_start + completed
+        if frame > bake.frame_end:
             self._request(
                 scene,
                 "bake_end",
@@ -1014,7 +1106,6 @@ class RuntimeController:
             )
             return
 
-        frame = bake.next_frame
         scene.frame_set(frame)
         settings = scene.audio2face
         sample_rate = self.model_sample_rate
@@ -1027,7 +1118,7 @@ class RuntimeController:
             fps=scene.render.fps,
             fps_base=scene.render.fps_base,
             prediction_delay=settings.prediction_delay,
-            audio_samples=bake.audio_samples,
+            audio_samples=bake.wav_source.metadata.output_frames,
         )
         self._request(
             scene,
@@ -1040,7 +1131,6 @@ class RuntimeController:
             model_signature=None,
             operation_id=bake.operation_id,
         )
-        completed = len(bake.frames)
         total = bake.frame_end - bake.frame_start + 1
         self._set_status(
             scene,
@@ -1057,50 +1147,36 @@ class RuntimeController:
             raise SidecarError("there is no active bake for this scene")
         if bake.cancel_requested:
             return
-        self._request_bake_cancel(bake, scene)
+        self._request_bake_cancel(bake)
         self._set_status(scene, "BAKE_ENDING", "Canceling animation bake")
 
     def _request_bake_cancel(
         self,
         bake: ActiveBake,
-        scene: bpy.types.Scene | None,
     ) -> None:
-        """Submit one bake cancel, retaining enough state to retry on failure."""
+        """Submit one bake cancel."""
 
         bake.cancel_requested = True
-        try:
-            if scene is not None:
-                self._request(
-                    scene,
-                    "cancel",
-                    {"operation_id": bake.operation_id},
-                    model_signature=None,
-                    operation_id=bake.operation_id,
-                )
-            else:
-                with self.pending_lock:
-                    self._request_locked(
-                        bake.scene_name,
-                        "cancel",
-                        {"operation_id": bake.operation_id},
-                        model_signature=None,
-                        operation_id=bake.operation_id,
-                    )
-        except Exception:
-            bake.cancel_requested = False
-            raise
+        with self.pending_lock:
+            self._request_locked(
+                bake.scene_name,
+                "cancel",
+                {"operation_id": bake.operation_id},
+                model_signature=None,
+                operation_id=bake.operation_id,
+            )
 
     def _release_active_bake(
         self,
         operation_id: str | None = None,
         *,
         restore_frame: bool = True,
-    ) -> ActiveBake | None:
+    ) -> None:
         bake = self.active_bake
         if bake is None or (
             operation_id is not None and bake.operation_id != operation_id
         ):
-            return None
+            return
         self.active_bake = None
         bake.wav_source.close()
         with self.pending_lock:
@@ -1116,7 +1192,6 @@ class RuntimeController:
             scene = self._scene(bake.scene_name)
             if scene is not None and scene.is_editable:
                 scene.frame_set(bake.original_frame)
-        return bake
 
     def _finish_bake(
         self,
@@ -1126,13 +1201,13 @@ class RuntimeController:
         bake = self.active_bake
         if bake is None or bake.operation_id != operation_id:
             raise SidecarError("completed bake state is unavailable")
+        completed = len(bake.weights)
         actions = bake_shape_key_actions(
-            bake.frames,
+            range(bake.frame_start, bake.frame_start + completed),
             bake.weights,
             bake.targets,
             bpy.data.actions,
         )
-        completed = len(bake.frames)
         self._release_active_bake(operation_id)
         self._set_status(
             scene,
@@ -1154,7 +1229,7 @@ class RuntimeController:
             return
         if cancel_worker and not bake.cancel_requested:
             try:
-                self._request_bake_cancel(bake, scene)
+                self._request_bake_cancel(bake)
             except (OSError, SidecarError, ValueError) as exc:
                 self._release_active_bake(operation_id)
                 self._reject_worker_contract(
@@ -1317,34 +1392,20 @@ class RuntimeController:
 
     def _request_stream_cancel(
         self,
-        scene: bpy.types.Scene | None,
         stream: ActiveStream,
     ) -> None:
         """Cancel one media stream without unloading its model."""
 
         stream.stop_requested = True
         stream.settings_dirty = False
-        try:
-            if scene is not None:
-                self._request(
-                    scene,
-                    "cancel",
-                    {"operation_id": stream.operation_id},
-                    model_signature=None,
-                    operation_id=stream.operation_id,
-                )
-            else:
-                with self.pending_lock:
-                    self._request_locked(
-                        stream.scene_name,
-                        "cancel",
-                        {"operation_id": stream.operation_id},
-                        model_signature=None,
-                        operation_id=stream.operation_id,
-                    )
-        except Exception:
-            stream.stop_requested = False
-            raise
+        with self.pending_lock:
+            self._request_locked(
+                stream.scene_name,
+                "cancel",
+                {"operation_id": stream.operation_id},
+                model_signature=None,
+                operation_id=stream.operation_id,
+            )
 
     def _cancel_orphaned_operation(self) -> None:
         """Cancel inference whose owning Blender scene is unavailable."""
@@ -1356,7 +1417,7 @@ class RuntimeController:
                 return
             if not bake.cancel_requested:
                 try:
-                    self._request_bake_cancel(bake, None)
+                    self._request_bake_cancel(bake)
                 except (OSError, SidecarError, ValueError) as exc:
                     self._release_active_bake(
                         bake.operation_id,
@@ -1386,7 +1447,7 @@ class RuntimeController:
             live.stop(reset=False, notify=False)
         self._clear_pcm_ingress()
         try:
-            self._request_stream_cancel(None, stream)
+            self._request_stream_cancel(stream)
         except (OSError, SidecarError, ValueError) as exc:
             self._release_active_stream(stream.operation_id)
             self._reject_worker_contract(
@@ -1435,7 +1496,7 @@ class RuntimeController:
                 "live PCM cannot run while another audio operation is active",
             )
             return
-        if stream.wav_source is not None:
+        if stream.selected is not None:
             return
         if stream.stop_requested or stream.settings_dirty:
             return
@@ -1491,9 +1552,10 @@ class RuntimeController:
         """Feed one selected-WAV chunk whenever the worker grants credit."""
 
         stream = self.active_stream
+        selected = stream.selected if stream is not None else None
         if (
             stream is None
-            or stream.wav_chunks is None
+            or selected is None
             or stream.prebuffer_samples is None
             or stream.stop_requested
             or stream.end_sent
@@ -1504,37 +1566,10 @@ class RuntimeController:
         scene = self._stream_scene(stream.operation_id)
         if scene is None:
             return
-        frame_start = stream.timeline_frame_start
-        if frame_start is None:
-            return
-        sample_rate = cast(int, self.model_sample_rate)
-        samples_due = max(
-            0,
-            round(
-                (scene.frame_current - frame_start)
-                * sample_rate
-                * scene.render.fps_base
-                / scene.render.fps
-            ),
-        ) + stream.prebuffer_samples + max(
-            0,
-            math.ceil(float(scene.audio2face.prediction_delay) * sample_rate),
-        )
-        audio_complete = (
-            stream.wav_source is not None
-            and stream.samples_sent >= stream.wav_source.metadata.output_frames
-        )
-        if (
-            not audio_complete
-            and stream.samples_sent
-            and stream.samples_sent >= samples_due
-        ):
-            return
 
         try:
-            chunk = next(stream.wav_chunks)
+            chunk = next(selected.chunks)
         except StopIteration:
-            stream.wav_chunks = None
             try:
                 self._queue_stream_end(stream.operation_id)
             except SidecarError as exc:
@@ -1569,8 +1604,6 @@ class RuntimeController:
                 str(exc),
                 cancel_worker=True,
             )
-        else:
-            stream.samples_sent += len(chunk) // 4
 
     def _release_active_stream(self, operation_id: str | None = None) -> None:
         stream = self.active_stream
@@ -1578,10 +1611,11 @@ class RuntimeController:
             operation_id is not None and stream.operation_id != operation_id
         ):
             return
-        if stream.wav_source is None:
+        selected = stream.selected
+        if selected is None:
             self._clear_pcm_ingress()
-        if stream.wav_source is not None:
-            stream.wav_source.close()
+        else:
+            selected.source.close()
         self.active_stream = None
         with self.pending_lock:
             stale = tuple(
@@ -1606,7 +1640,7 @@ class RuntimeController:
         if (
             stream is None
             or stream.scene_name != scene.name
-            or stream.wav_source is not None
+            or stream.selected is not None
             or stream.prebuffer_samples is None
         ):
             return sample_rate, None
@@ -1638,9 +1672,11 @@ class RuntimeController:
         if not scene.is_editable:
             return
         stream = self.active_stream
+        if stream is None:
+            get_live_stream_controller().discard_timeline(scene)
+            return
         if (
-            stream is None
-            or stream.scene_name != scene.name
+            stream.scene_name != scene.name
             or stream.end_sent
             or stream.stop_requested
             or stream.worker_ended
@@ -1682,15 +1718,8 @@ class RuntimeController:
     ) -> None:
         stream = self.active_stream
         if cancel_worker and stream is not None and stream.operation_id == operation_id:
-            stream.stop_requested = True
             try:
-                self._request(
-                    scene,
-                    "cancel",
-                    {"operation_id": operation_id},
-                    model_signature=None,
-                    operation_id=operation_id,
-                )
+                self._request_stream_cancel(stream)
             except (OSError, SidecarError, ValueError) as exc:
                 self._reject_worker_contract(
                     f"{message}; failed to cancel the active stream: {exc}"
@@ -1901,6 +1930,7 @@ class RuntimeController:
             bake = self.active_bake
             if bake is None or bake.operation_id != pending.operation_id:
                 return
+            audio_samples = bake.wav_source.metadata.output_frames
             accepted = result.get("accepted_samples")
             total = result.get("total_samples")
             if (
@@ -1909,7 +1939,7 @@ class RuntimeController:
                 or accepted <= 0
                 or type(total) is not int
                 or total != bake.uploaded_samples + accepted
-                or total > bake.audio_samples
+                or total > audio_samples
             ):
                 self._reject_worker_contract(
                     "worker returned a noncanonical bake-chunk response"
@@ -1929,6 +1959,7 @@ class RuntimeController:
             bake = self.active_bake
             if bake is None or bake.operation_id != pending.operation_id:
                 return
+            audio_samples = bake.wav_source.metadata.output_frames
             expected = {
                 "audio_samples",
                 "source_frame_count",
@@ -1942,8 +1973,8 @@ class RuntimeController:
             if (
                 set(result) != expected
                 or any(type(result[name]) is not int for name in integral_fields)
-                or result["audio_samples"] != bake.audio_samples
-                or bake.uploaded_samples != bake.audio_samples
+                or result["audio_samples"] != audio_samples
+                or bake.uploaded_samples != audio_samples
                 or result["source_frame_count"] <= 0
                 or result["source_frame_rate_numerator"] <= 0
                 or result["source_frame_rate_denominator"] <= 0
@@ -1986,9 +2017,7 @@ class RuntimeController:
             except (LiveStreamError, TypeError, ValueError) as exc:
                 self._reject_worker_contract(str(exc))
                 return
-            bake.frames.append(bake.next_frame)
             bake.weights.append(validated_weights)
-            bake.next_frame += 1
             try:
                 self._send_next_bake_frame(scene, bake)
             except (OSError, SidecarError, ValueError) as exc:
@@ -2254,96 +2283,24 @@ class RuntimeController:
         self,
         stream: ActiveStream,
         event: str,
-        data: dict[str, Any],
     ) -> None:
         """Drain one stream after its owning scene can no longer be edited."""
 
-        if event == "stream_credit":
-            if data:
-                self._reject_worker_contract(
-                    "stream-credit event data must be empty",
-                )
-                return
-        elif event == "stream_frame":
-            if set(data) != {
-                "timestamp_sample",
-                "weights",
-                "effective_emotions",
-            }:
-                self._reject_worker_contract(
-                    "worker returned invalid stream-frame data",
-                )
-                return
-            model_schema = self.model_schema
-            if model_schema is None:
-                self._reject_worker_contract(
-                    "worker returned a stream frame without a loaded model"
-                )
-                return
-            try:
-                validate_stream_frame(
-                    tuple(model_schema["channels"]),
-                    _model_emotion_channels(model_schema),
-                    data["timestamp_sample"],
-                    data["weights"],
-                    data["effective_emotions"],
-                )
-            except (LiveStreamError, TypeError, ValueError) as exc:
-                self._reject_worker_contract(str(exc))
-                return
-        elif event == "stream_ended":
-            if data:
-                self._reject_worker_contract(
-                    "stream-ended event data must be empty",
-                )
-                return
+        if event == "stream_ended":
             live = get_live_stream_controller()
             if live.active:
                 live.stop(reset=False, notify=False)
             self._release_active_stream(stream.operation_id)
             return
-        elif event == "error":
-            if set(data) != {"code", "message"}:
-                self._reject_worker_contract(
-                    "worker returned invalid operation error data"
-                )
-                return
-            code = data["code"]
-            worker_message = data["message"]
-            if (
-                not isinstance(code, str)
-                or not code
-                or not isinstance(worker_message, str)
-                or not worker_message
-            ):
-                self._reject_worker_contract(
-                    "worker returned invalid operation error data"
-                )
-                return
+        if event == "error":
             live = get_live_stream_controller()
             if live.active:
                 live.stop(reset=False, notify=False)
             self._release_active_stream(stream.operation_id)
             return
-        else:
-            self._reject_worker_contract(
-                f"worker returned unsupported stream event {event!r}"
-            )
+        if event in {"stream_credit", "stream_frame"}:
             return
-
-        if stream.stop_requested:
-            return
-        live = get_live_stream_controller()
-        if live.active:
-            live.stop(reset=False, notify=False)
-        self._clear_pcm_ingress()
-        try:
-            self._request_stream_cancel(None, stream)
-        except (OSError, SidecarError, ValueError) as exc:
-            self._release_active_stream(stream.operation_id)
-            self._reject_worker_contract(
-                f"could not cancel a stream whose scene is unavailable: {exc}"
-            )
+        self._reject_worker_contract(f"worker returned unsupported stream event {event!r}")
 
     def _handle_event(self, envelope: dict[str, Any]) -> None:
         event = envelope["event"]
@@ -2364,7 +2321,7 @@ class RuntimeController:
             return
         scene = self._scene(stream.scene_name)
         if scene is None or not scene.is_editable:
-            self._handle_unavailable_stream_event(stream, event, data)
+            self._handle_unavailable_stream_event(stream, event)
             return
         settings = scene.audio2face
 
@@ -2387,22 +2344,6 @@ class RuntimeController:
                 )
                 return
             if stream.stop_requested:
-                model_schema = self.model_schema
-                if model_schema is None:
-                    self._reject_worker_contract(
-                        "worker returned a stream frame without a loaded model"
-                    )
-                    return
-                try:
-                    validate_stream_frame(
-                        tuple(model_schema["channels"]),
-                        _model_emotion_channels(model_schema),
-                        data["timestamp_sample"],
-                        data["weights"],
-                        data["effective_emotions"],
-                    )
-                except (LiveStreamError, TypeError, ValueError) as exc:
-                    self._reject_worker_contract(str(exc))
                 return
             try:
                 get_live_stream_controller().receive(
@@ -2441,8 +2382,21 @@ class RuntimeController:
             else:
                 stream.worker_ended = True
                 stream.settings_dirty = False
-                get_live_stream_controller().mark_terminal(operation_id)
-                if get_live_stream_controller().active:
+                live = get_live_stream_controller()
+                try:
+                    live.mark_terminal(operation_id)
+                except LiveStreamError as exc:
+                    self._release_active_stream(operation_id)
+                    self._set_status(scene, "ERROR", str(exc))
+                    return
+                if stream.selected is not None:
+                    self._release_active_stream(operation_id)
+                    self._set_status(
+                        scene,
+                        "MODEL_READY",
+                        "Selected WAV is cached on Blender's timeline",
+                    )
+                elif live.active:
                     self._set_status(
                         scene,
                         "STREAMING",
@@ -2585,8 +2539,6 @@ class RuntimeController:
             message = f"Audio2Face worker handshake timed out{detail}"
             self._reject_worker_contract(message)
 
-        self._poll_status_notices()
-
     def close(self) -> None:
         if self.optimization_cancel is not None:
             with self.optimization_commit_lock:
@@ -2607,7 +2559,6 @@ class RuntimeController:
         self.optimization_cancel = None
         self.optimization_progress = 0.0
         self._release_active_stream()
-        self._status_notices.clear()
         with self.optimization_progress_lock:
             self.optimization_latest_progress = None
 
@@ -2626,9 +2577,16 @@ def _timer_callback() -> float | None:
     controller = _CONTROLLER
     if controller is None:
         return None
+    bake_active = controller.active_bake is not None
+    stream_active = False
     try:
         controller.poll()
-        stream_active = get_live_stream_controller().tick()
+        bake_active = controller.active_bake is not None
+        stream_active = (
+            False
+            if bake_active
+            else get_live_stream_controller().tick()
+        )
         if stream_active:
             controller._tag_runtime_setup_redraw()
     except Exception as exc:  # Keep timer alive, but surface the main-thread failure.
@@ -2636,10 +2594,9 @@ def _timer_callback() -> float | None:
         scene = bpy.context.scene
         if scene is not None and hasattr(scene, "audio2face"):
             controller._set_status(scene, "ERROR", str(exc))
-    bake_active = getattr(controller, "active_bake", None) is not None
     return (
         PRESENTATION_INTERVAL_SECONDS
-        if stream_active or bake_active
+        if stream_active or controller.active_stream is not None or bake_active
         else POLL_INTERVAL_SECONDS
     )
 
@@ -2654,6 +2611,55 @@ def _dispose_runtime_state() -> None:
         controller.close()
     else:
         unregister_live_stream()
+
+
+@bpy.app.handlers.persistent
+def _animation_playback_pre_handler(
+    scene: bpy.types.Scene,
+    _depsgraph: bpy.types.Depsgraph | None = None,
+) -> None:
+    """Start or reuse Selected Audio inference from Blender's native transport."""
+
+    controller = get_controller()
+    try:
+        controller.native_timeline_started(scene)
+    except (OSError, RuntimeError, SidecarError, ValueError) as exc:
+        if scene.is_editable and hasattr(scene, "audio2face"):
+            controller._set_status(scene, "ERROR", str(exc))
+
+
+@bpy.app.handlers.persistent
+def _animation_playback_post_handler(
+    scene: bpy.types.Scene,
+    _depsgraph: bpy.types.Depsgraph | None = None,
+) -> None:
+    """Keep the cached pose frozen when Blender's native transport stops."""
+
+    controller = _CONTROLLER
+    if controller is None:
+        return
+    try:
+        controller.native_timeline_stopped(scene)
+    except (RuntimeError, ValueError) as exc:
+        if scene.is_editable and hasattr(scene, "audio2face"):
+            controller._set_status(scene, "ERROR", str(exc))
+
+
+@bpy.app.handlers.persistent
+def _frame_change_post_handler(
+    scene: bpy.types.Scene,
+    _depsgraph: bpy.types.Depsgraph | None = None,
+) -> None:
+    """Apply Selected Audio values after Blender evaluates the current frame."""
+
+    controller = _CONTROLLER
+    if controller is None or controller.active_bake is not None:
+        return
+    try:
+        controller.native_timeline_frame_changed(scene)
+    except (LiveStreamError, RuntimeError, ValueError) as exc:
+        if scene.is_editable and hasattr(scene, "audio2face"):
+            controller._set_status(scene, "ERROR", str(exc))
 
 
 @bpy.app.handlers.persistent
@@ -2678,6 +2684,16 @@ def _load_post_handler(_unused: object) -> None:
 
 def register_runtime() -> None:
     get_controller()
+    if _animation_playback_pre_handler not in bpy.app.handlers.animation_playback_pre:
+        bpy.app.handlers.animation_playback_pre.append(
+            _animation_playback_pre_handler
+        )
+    if _animation_playback_post_handler not in bpy.app.handlers.animation_playback_post:
+        bpy.app.handlers.animation_playback_post.append(
+            _animation_playback_post_handler
+        )
+    if _frame_change_post_handler not in bpy.app.handlers.frame_change_post:
+        bpy.app.handlers.frame_change_post.append(_frame_change_post_handler)
     if _load_pre_handler not in bpy.app.handlers.load_pre:
         bpy.app.handlers.load_pre.append(_load_pre_handler)
     if _load_post_handler not in bpy.app.handlers.load_post:
@@ -2697,4 +2713,14 @@ def unregister_runtime() -> None:
         bpy.app.handlers.load_pre.remove(_load_pre_handler)
     if _load_post_handler in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(_load_post_handler)
+    if _frame_change_post_handler in bpy.app.handlers.frame_change_post:
+        bpy.app.handlers.frame_change_post.remove(_frame_change_post_handler)
+    if _animation_playback_post_handler in bpy.app.handlers.animation_playback_post:
+        bpy.app.handlers.animation_playback_post.remove(
+            _animation_playback_post_handler
+        )
+    if _animation_playback_pre_handler in bpy.app.handlers.animation_playback_pre:
+        bpy.app.handlers.animation_playback_pre.remove(
+            _animation_playback_pre_handler
+        )
     _dispose_runtime_state()

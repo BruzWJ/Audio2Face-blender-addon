@@ -133,11 +133,11 @@ driver caches.
    value enables that source; set every value to zero to clear it. **Mixed
    Emotion** is read-only output from live Selected WAV playback or Stream
    input.
-7. In Selected WAV mode, click **Play**. The add-on primes inference, then starts
-   Blender's native timeline and sound playback when the starting frame is
-   available. Incoming frames update matching Shape Keys transiently. Click
-   **Bake Shape Key Animation** separately when those results should become
-   native Shape Key Actions.
+7. In Selected WAV mode, set **First Frame**, then use either the add-on's
+   **Play** button or Blender's Timeline/Spacebar transport. The same native
+   playback handlers prime inference and transiently update matching Shape
+   Keys. Click **Bake Shape Key Animation** separately when those results
+   should become native Shape Key Actions.
 8. In Stream mode, the first `push_audio_f32le` call automatically starts the
    inference stream. `end_pcm_stream` marks normal end-of-input after all
    queued chunks. **Stop Worker** exits the child process and releases its
@@ -169,24 +169,24 @@ single-user when independent animation is required.
 ## Audio modes and playback
 
 Choosing a **Selected WAV** creates or updates one add-on-owned sound strip in
-Blender's Video Sequencer at `scene.frame_start`. The add-on preserves unrelated
-strips and never shortens the scene range.
+Blender's Video Sequencer at the saved **First Frame**. The add-on preserves
+unrelated strips and never changes Blender's scene or preview playback range.
 
-**Play** lazily decodes, downmixes, and resamples the selected WAV into
-model-rate PCM. The add-on sends
-that PCM through the existing `stream_start` / `stream_chunk` / `stream_end`
-protocol, then calls Blender's native timeline playback after inference covers
-the current frame. Blender's native timeline and audio playback are the
-presentation clock; received frames are buffered and sampled only when the
-Blender frame changes. Shape Key values therefore remain frozen while paused.
-Preview values are transient and do not create an Action. **Pause** only calls
-Blender's native playback pause control. A new preview begins at
-`scene.frame_start`; Play after Pause resumes that active preview.
+**Play/Pause**, Blender's Timeline, and Spacebar all use the same native
+transport. Blender's current frame is the only presentation clock; inference
+briefly pauses that transport only when the requested frame is not ready.
+Pause freezes Shape Keys, scrubbing seeks them, and Blender's native range loop
+wraps sound and facial values together. Completed inference remains cached for
+replay, and frames outside the sound interval are neutral. Preview values are
+transient and do not create an Action.
 
-**Bake Shape Key Animation** is asynchronous and separate from playback. It
-evaluates the selected WAV and animated Audio2Face controls at each integer
-scene frame, then writes LINEAR Shape Key curves into native Actions. Matching
-curve keys inside the baked frame span are replaced; other animation remains.
+**Bake Shape Key Animation** is asynchronous and separate from playback. From
+**First Frame** through the inclusive audio end, it evaluates the selected WAV
+and animated Audio2Face controls at each integer Blender frame, then writes
+LINEAR Shape Key curves into native Actions. Starting a bake pauses native
+playback and retires the transient preview cache so the baked Action remains the
+animation authority. Matching curve keys inside the baked frame span are
+replaced; other animation remains.
 **Prediction Delay** shifts the sampled audio position; positive values advance
 the face and negative values make it lag. Canceling before completion writes no
 Action curves.
@@ -210,9 +210,11 @@ zero clears it. **Mixed Emotion** is transient, read-only output from Selected
 WAV playback and external Stream input, and never overwrites Preferred values.
 
 During a bake, keyframes and drivers on tuning and emotion controls affect the
-generated Shape Key curves. During Selected WAV playback or an external Stream,
-edits apply to subsequent audio without restarting the worker or replacing
-already presented frames. Exact settings fields and ranges are in the
+generated Shape Key curves. During active Selected WAV inference or an external
+Stream, edits apply to subsequent audio without restarting the worker or
+replacing already presented frames. Editing inference settings after a finite
+Selected WAV cache completes discards that cache so the next Play regenerates
+it. Exact settings fields and ranges are in the
 [protocol](docs/protocol.md#settings-document).
 
 ## Output contract

@@ -7,7 +7,7 @@ Audio2Face has one offline Blender-frame bake path and one live stream path:
 ```text
 Selected WAV -- add-on-owned VSE strip --> native timeline/audio clock
        |                                      |
-       +-- Play: lazy PCM -- live stream -----+-----------------------+
+       +-- native Play: finite PCM stream ----+-----------------------+
        |                                                              |
        +-- Bake: PCM upload -- per-integer-frame requests ------------+
                                                                       |
@@ -49,19 +49,22 @@ The extension owns:
   external model-root selections, model optimization, cancellation, and logs;
 - worker launch, handshake, model loading, streaming, asynchronous baking,
   cancellation, and shutdown;
-- one add-on-owned Selected WAV Sequencer strip, native timeline Play/Pause,
-  lazy Selected WAV PCM streaming, native Shape Key Action output, and
-  external PCM ingress;
+- one add-on-owned Selected WAV Sequencer strip positioned by **First Frame**,
+  Blender-native playback handlers, finite Selected WAV PCM streaming, native
+  Shape Key Action output, and external PCM ingress;
 - Audio2Face and emotion controls and the registered target-object list;
 - strict protocol, model-schema, stream-frame, and bake-frame response
   validation; and
 - Action construction and clocked live delivery on Blender's main thread.
 
 Selected WAV playback and external live PCM advance through the stream
-protocol's per-chunk dequeue credits. Selected bake upload and serial frame
-requests advance asynchronously through worker responses. A registered Blender
-timer advances these operations; frame evaluation, RNA reads, Action creation,
-and live Shape Key updates stay on the main thread.
+protocol's per-chunk dequeue credits. Finite Selected WAV input is sent as fast
+as credits permit and its complete output is retained for frame lookup;
+external PCM keeps a bounded rolling presentation buffer. Selected bake upload
+and serial frame requests advance asynchronously through worker responses. A
+registered Blender timer advances these operations; native playback and
+frame-change handlers make Blender's current frame authoritative. RNA reads,
+Action creation, and Shape Key updates stay on the main thread.
 
 ### Shape Key targets
 
@@ -117,26 +120,38 @@ not an input to the Audio2Face-to-ARKit solve.
 ### Selected WAV
 
 Selecting a valid WAV creates or updates one explicitly add-on-owned VSE sound
-strip at `scene.frame_start`; unrelated Sequencer strips are preserved. Its
-duration is `ceil(seconds * fps / fps_base)` frames. The inclusive audio end is
-`frame_start + duration_frames - 1`, and `scene.frame_end` is extended to that
-frame when necessary but never shortened.
+strip at the saved **First Frame**; unrelated Sequencer strips are preserved.
+Its duration is `ceil(seconds * fps / fps_base)` frames and its inclusive end is
+`First Frame + duration_frames - 1`. The add-on never changes the scene or
+preview playback range.
 
-**Play** lazily decodes, downmixes, and resamples the WAV into model-rate mono
-f32le and begins feeding it through the existing stream protocol. Blender's
-native timeline operator is invoked only after a worker frame covers the
-current start-frame sample. The native timeline and sound playback then become
-the sole presentation clock. Incoming frames only extend the buffer; matching
-Shape Key values are sampled once per changed Blender frame, so a paused frame
-cannot continue changing as results arrive.
-**Pause** invokes only Blender's native playback pause operator. A new preview
-starts at `scene.frame_start`; Play after Pause resumes the active stream.
+The sidebar **Play/Pause** operator is a Blender-native transport toggle; the
+Timeline, Spacebar, and other editors enter the same playback lifecycle. On a
+cache miss the add-on decodes, downmixes, and resamples the WAV to model-rate
+mono f32le, then feeds the finite input through the stream protocol. If the
+requested frame is unavailable, native playback pauses and resumes after that
+pose is presented, keeping sound and Shape Keys together. Stopping playback
+freezes presentation without discarding inferred frames.
+
+`frame_change_post` maps `(scene.frame_current - First Frame)` through effective
+FPS and Prediction Delay, then applies one cached result after Blender has
+evaluated that frame's RNA. Frames outside the sound interval are neutral.
+Selected Audio never evicts its earlier frames, and worker EOF releases the GPU
+operation without releasing the Blender presentation cache. Rewind, scrubbing,
+repeated Play, and Blender scene/preview-range wrapping therefore reuse exact
+frame lookups with no second audio clock. Blender owns native sound seeking and
+loop mode; the add-on has no loop or seconds-position state.
+If the native scene or preview range ends before the sound, Blender intentionally
+wraps both sources there; the user extends that native range to play the full
+clip.
 
 **Bake Shape Key Animation** is a separate persistence operation. Blender
 asynchronously decodes/downmixes/resamples the entire selected WAV to model-rate
 mono f32le, uploads it in bounded chunks, and prepares an offline track. It then
-visits every integer Blender frame in the inclusive audio range. For each frame
-it:
+visits every integer Blender frame from **First Frame** through the inclusive
+audio end. Starting a bake pauses native playback and discards the transient
+preview cache so the baked Action is the sole animation authority. For each
+frame it:
 
 1. calls `scene.frame_set(frame)` so keyframes and drivers evaluate;
 2. maps the frame through effective FPS (`fps / fps_base`) and the evaluated
@@ -202,7 +217,9 @@ and suppresses timestamps that were already published. It does not restart the
 worker, emit a presentation reset, or replace Blender's buffered frames. A bake
 sends the RNA-evaluated snapshot for each requested Blender frame, so keyframes
 and drivers can shape the generated curves without the add-on keyframing those
-controls.
+controls. Once finite Selected Audio reaches worker EOF, a later
+inference-setting edit discards its cache so the next native Play creates a
+fresh one.
 
 Preferred and Mixed Emotion have disjoint ownership. Blender owns the saved,
 animatable Preferred values and represents all-zero values as an absent source.
@@ -252,8 +269,9 @@ MODEL_READY --Selected WAV Bake--> BAKE_UPLOADING --> BAKE_PREPARING
                                                       |
                                              MODEL_READY or ERROR
 
-MODEL_READY --Selected WAV Play--> STREAMING --end/cancel--> MODEL_READY
-                                          \--error----------> ERROR
+MODEL_READY --native Play/cache miss--> STREAMING --worker EOF--> MODEL_READY
+                                                \--error----------> ERROR
+MODEL_READY + Selected cache --native Play/Pause/seek/wrap--> MODEL_READY + cache
 
 MODEL_READY --first external PCM--> STREAMING --end/cancel--> MODEL_READY
                                            \--error----------> ERROR

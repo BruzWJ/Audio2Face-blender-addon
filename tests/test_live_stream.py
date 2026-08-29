@@ -107,13 +107,13 @@ def live_module(
 
 
 def _prepare_external(controller: object, scene: _Scene, channels: list[str]) -> None:
-    controller.prepare(  # type: ignore[attr-defined]
+    controller.prepare_external(  # type: ignore[attr-defined]
         scene,
         "stream-1",
         16_000,
         tuple(channels),
         tuple(MODEL_EMOTION_CHANNELS),
-        presentation_stopped=None,
+        presentation_stopped=lambda: None,
     )
 
 
@@ -121,28 +121,19 @@ def _prepare_timeline(
     live: ModuleType,
     scene: _Scene,
     *,
-    playback_started: list[str] | None = None,
-    stopped: list[str] | None = None,
-    frame_end: int | None = None,
+    frame_end: int,
 ) -> tuple[object, int]:
     scene.frame_current = 10
     controller = live.LiveStreamController()
-    controller.prepare(
+    controller.prepare_timeline(
         scene,
         "stream-1",
         16_000,
         tuple(MODEL_CHANNELS),
         tuple(MODEL_EMOTION_CHANNELS),
-        presentation_stopped=(
-            (lambda: stopped.append("stream-1")) if stopped is not None else None
-        ),
-        timeline_playback_requested=(
-            (lambda: playback_started.append("stream-1"))
-            if playback_started is not None
-            else (lambda: None)
-        ),
-        timeline_frame_start=10,
-        timeline_frame_end=frame_end,
+        frame_start=10,
+        frame_end=frame_end,
+        playback_requested=lambda: None,
     )
     closed = [0.0] * len(MODEL_CHANNELS)
     opened = closed.copy()
@@ -153,34 +144,46 @@ def _prepare_timeline(
     return controller, jaw
 
 
-def test_timeline_playback_waits_for_frame_start_coverage(
+def test_timeline_underflow_resumes_only_after_the_current_frame_is_presented(
     live_module: tuple[ModuleType, _Scene, list[AppliedFrame]],
 ) -> None:
     live, scene, applied = live_module
-    started: list[str] = []
-    scene.frame_current = 10
     controller = live.LiveStreamController()
-    controller.prepare(
+    scene.frame_current = 10
+    controller.prepare_timeline(
         scene,
         "stream-1",
         16_000,
         tuple(MODEL_CHANNELS),
         tuple(MODEL_EMOTION_CHANNELS),
-        presentation_stopped=None,
-        timeline_playback_requested=lambda: started.append("stream-1"),
-        timeline_frame_start=10,
+        frame_start=10,
+        frame_end=34,
+        playback_requested=lambda: None,
     )
-    weights = [0.25] * len(MODEL_CHANNELS)
+    controller.receive(
+        "stream-1",
+        0,
+        [0.0] * len(MODEL_CHANNELS),
+        MODEL_EMOTIONS.copy(),
+    )
+    scene.frame_current = 22
+    assert controller.present_timeline_frame(scene) is True
+    assert controller.timeline_frame_ready(scene) is False
+    applied_before_resume = len(applied)
+    resumed_after_apply: list[int] = []
+    controller.request_timeline_playback(
+        lambda: resumed_after_apply.append(len(applied))
+    )
 
-    controller.receive("stream-1", -160, weights, MODEL_EMOTIONS.copy())
-    assert (started, applied) == ([], [])
+    controller.receive(
+        "stream-1",
+        16_000,
+        [1.0] * len(MODEL_CHANNELS),
+        MODEL_EMOTIONS.copy(),
+    )
 
-    controller.receive("stream-1", 0, weights, MODEL_EMOTIONS.copy())
-    assert started == ["stream-1"]
-    assert applied == []
-
-    assert controller.tick() is True
-    assert applied == [(tuple(MODEL_CHANNELS), tuple(weights))]
+    assert resumed_after_apply == [applied_before_resume + 1]
+    assert controller.timeline_frame_ready(scene) is True
 
 
 def test_source_free_stream_applies_negative_timestamp_frame_immediately(
@@ -207,14 +210,7 @@ def test_prepare_allows_targets_to_be_added_after_stream_start(
     monkeypatch.setattr(live, "resolve_target_objects", lambda _settings: ())
     controller = live.LiveStreamController()
 
-    controller.prepare(
-        scene,
-        "stream-1",
-        16_000,
-        tuple(MODEL_CHANNELS),
-        tuple(MODEL_EMOTION_CHANNELS),
-        presentation_stopped=None,
-    )
+    _prepare_external(controller, scene, MODEL_CHANNELS)
 
     assert controller.active is True
 
@@ -249,112 +245,147 @@ def test_source_free_stream_interpolates_bursted_frames_on_a_monotonic_clock(
 
 def test_timeline_stream_samples_scene_frame_at_effective_fps(
     live_module: tuple[ModuleType, _Scene, list[AppliedFrame]],
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     live, scene, applied = live_module
-    now = [10.0]
-    monkeypatch.setattr(live.time, "monotonic", lambda: now[0])
     scene.render.fps = 30
     scene.render.fps_base = 1.25
-    controller, jaw = _prepare_timeline(live, scene)
+    controller, jaw = _prepare_timeline(live, scene, frame_end=34)
 
     scene.frame_current = 22
-    assert controller.tick() is True
+    assert controller.present_timeline_frame(scene) is True
 
     assert applied[-1][1][jaw] == pytest.approx(0.5)
     assert [item.value for item in scene.audio2face.mixed_emotions] == pytest.approx(
         [0.5, 0.5]
     )
-    assert scene.audio2face.stream_time == pytest.approx(0.5)
     paused_weight = applied[-1][1][jaw]
     applied_count = len(applied)
-    now[0] += 60.0
-    controller.tick()
-
-    assert applied[-1][1][jaw] == pytest.approx(paused_weight)
-    assert len(applied) == applied_count
-    assert scene.audio2face.stream_time == pytest.approx(0.5)
-
-
-def test_late_timeline_frames_never_update_a_frozen_blender_frame(
-    live_module: tuple[ModuleType, _Scene, list[AppliedFrame]],
-) -> None:
-    live, scene, applied = live_module
-    controller, jaw = _prepare_timeline(live, scene)
-    controller.tick()
-    applied_count = len(applied)
-
-    scene.frame_current = 46
-    assert controller.tick() is True
-    assert len(applied) == applied_count
-
     late = [0.0] * len(MODEL_CHANNELS)
     late[jaw] = 0.75
     controller.receive("stream-1", 19_000, late, [0.5, 0.5])
-    controller.tick()
+    controller.present_timeline_frame(scene)
 
+    assert applied[-1][1][jaw] == pytest.approx(paused_weight)
     assert len(applied) == applied_count
-    assert controller._timestamps == [19_000]
 
 
-def test_terminal_timeline_stream_stops_on_selected_audio_end_frame(
+def test_completed_timeline_cache_replays_after_wrap_and_rewind(
     live_module: tuple[ModuleType, _Scene, list[AppliedFrame]],
 ) -> None:
-    live, scene, _applied = live_module
-    stopped: list[str] = []
-    controller, _jaw = _prepare_timeline(
-        live,
-        scene,
-        stopped=stopped,
-        frame_end=33,
-    )
-
+    live, scene, applied = live_module
+    controller, jaw = _prepare_timeline(live, scene, frame_end=34)
     controller.mark_terminal("stream-1")
+
+    scene.frame_current = 34
+    assert controller.present_timeline_frame(scene) is True
+    assert applied[-1][1][jaw] == pytest.approx(1.0)
+
+    scene.frame_current = 10
+    assert controller.present_timeline_frame(scene) is True
+    assert applied[-1][1][jaw] == pytest.approx(0.0)
+
+    scene.frame_current = 34
+    assert controller.present_timeline_frame(scene) is True
+    assert applied[-1][1][jaw] == pytest.approx(1.0)
     assert controller.active is True
-    assert stopped == []
-
-    scene.frame_current = 32
-    assert controller.tick() is True
-    assert controller.active is True
-    assert stopped == []
-
-    scene.frame_current = 33
-    assert controller.tick() is False
-    assert controller.active is False
-    assert stopped == ["stream-1"]
 
 
-def test_terminal_timeline_stream_stops_when_start_frame_was_never_ready(
+def test_timeline_remap_reuses_results_and_neutralizes_outside_audio_interval(
+    live_module: tuple[ModuleType, _Scene, list[AppliedFrame]],
+) -> None:
+    live, scene, applied = live_module
+    controller, jaw = _prepare_timeline(live, scene, frame_end=34)
+    controller.mark_terminal("stream-1")
+
+    assert controller.remap_timeline(scene, 100, 124) is True
+
+    scene.frame_current = 124
+    assert controller.present_timeline_frame(scene) is True
+    assert applied[-1][1][jaw] == pytest.approx(1.0)
+
+    scene.frame_current = 125
+    assert controller.present_timeline_frame(scene) is True
+    assert applied[-1][1][jaw] == pytest.approx(0.0)
+    assert [item.value for item in scene.audio2face.mixed_emotions] == [0.0, 0.0]
+
+    scene.frame_current = 99
+    assert controller.present_timeline_frame(scene) is True
+    assert applied[-1][1][jaw] == pytest.approx(0.0)
+    assert [item.value for item in scene.audio2face.mixed_emotions] == [0.0, 0.0]
+
+
+def test_empty_selected_timeline_output_is_not_kept_as_a_valid_cache(
     live_module: tuple[ModuleType, _Scene, list[AppliedFrame]],
 ) -> None:
     live, scene, _applied = live_module
-    stopped: list[str] = []
-    started: list[str] = []
-    scene.frame_current = 10
     controller = live.LiveStreamController()
-    controller.prepare(
+    controller.prepare_timeline(
         scene,
         "stream-1",
         16_000,
         tuple(MODEL_CHANNELS),
         tuple(MODEL_EMOTION_CHANNELS),
-        presentation_stopped=lambda: stopped.append("stream-1"),
-        timeline_playback_requested=lambda: started.append("stream-1"),
-        timeline_frame_start=10,
-        timeline_frame_end=20,
-    )
-    controller.receive(
-        "stream-1",
-        -160,
-        [0.0] * len(MODEL_CHANNELS),
-        MODEL_EMOTIONS.copy(),
+        frame_start=10,
+        frame_end=34,
+        playback_requested=lambda: None,
     )
 
-    controller.mark_terminal("stream-1")
+    with pytest.raises(live.LiveStreamError, match="no source frames"):
+        controller.mark_terminal("stream-1")
 
     assert controller.active is False
-    assert started == []
-    assert stopped == ["stream-1"]
+
+
+def test_timeline_cache_retains_full_source_while_external_pcm_remains_bounded(
+    live_module: tuple[ModuleType, _Scene, list[AppliedFrame]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    live, scene, applied = live_module
+    timeline = live.LiveStreamController()
+    scene.frame_current = 10
+    timeline.prepare_timeline(
+        scene,
+        "timeline",
+        16_000,
+        tuple(MODEL_CHANNELS),
+        tuple(MODEL_EMOTION_CHANNELS),
+        frame_start=10,
+        frame_end=300,
+        playback_requested=lambda: None,
+    )
+    jaw = MODEL_CHANNELS.index("sdkJawOpen")
+    for timestamp in range(0, 160_001, 16_000):
+        weights = [0.0] * len(MODEL_CHANNELS)
+        weights[jaw] = timestamp / 160_000
+        timeline.receive("timeline", timestamp, weights.copy(), MODEL_EMOTIONS.copy())
+    scene.frame_current = 250
+    timeline.present_timeline_frame(scene)
+    assert applied[-1][1][jaw] == pytest.approx(1.0)
+
+    scene.frame_current = 10
+    timeline.present_timeline_frame(scene)
+    assert applied[-1][1][jaw] == pytest.approx(0.0)
+
+    now = [10.0]
+    monkeypatch.setattr(live.time, "monotonic", lambda: now[0])
+    external = live.LiveStreamController()
+    external.prepare_external(
+        scene,
+        "external",
+        16_000,
+        tuple(MODEL_CHANNELS),
+        tuple(MODEL_EMOTION_CHANNELS),
+        presentation_stopped=lambda: None,
+    )
+    weights = [0.0] * len(MODEL_CHANNELS)
+    for timestamp in range(0, 160_001, 16_000):
+        external.receive("external", timestamp, weights.copy(), MODEL_EMOTIONS.copy())
+    now[0] += 10.0
+    external.tick()
+
+    assert external._timestamps[-1] == 160_000
+    assert external._timestamps[0] > 0
+    assert len(external._timestamps) < 11
 
 
 def test_live_frames_resolve_the_current_object_targets(
@@ -532,7 +563,7 @@ def test_terminal_event_cleans_external_stream_and_holds_final_values(
     live, scene, applied = live_module
     controller = live.LiveStreamController()
     stopped: list[str] = []
-    controller.prepare(
+    controller.prepare_external(
         scene,
         "stream-1",
         16_000,

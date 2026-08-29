@@ -4,15 +4,15 @@ from types import SimpleNamespace
 
 import pytest
 
+import audio2face.selected_audio_timeline as selected_audio_timeline
 from audio2face.selected_audio_timeline import (
     SELECTED_AUDIO_OWNER_KEY,
     SELECTED_AUDIO_OWNER_VALUE,
-    SELECTED_AUDIO_SOURCE_KEY,
     SELECTED_AUDIO_STRIP_NAME,
     SelectedAudioTimelineError,
+    configure_selected_audio,
     duration_frame_count,
     duration_frame_end,
-    ensure_selected_audio_strip,
     frame_to_bake_sample,
     frames_per_second,
     is_selected_audio_strip,
@@ -24,20 +24,13 @@ class _Strip(dict[str, object]):
     def __init__(self, name: str, filepath: str, channel: int) -> None:
         super().__init__()
         self.name = name
-        self.filepath = filepath
+        self.sound = SimpleNamespace(filepath=filepath)
         self.channel = channel
-        self.frame_start = 1
-        self.frame_final_duration = 1
+        self.content_start = 1
+        self.duration = 1
 
 
 class _Strips(list[_Strip]):
-    def remove(self, strip: _Strip) -> None:
-        for index, item in enumerate(self):
-            if item is strip:
-                del self[index]
-                return
-        raise ValueError("strip is not in collection")
-
     def new_sound(
         self,
         *,
@@ -47,7 +40,7 @@ class _Strips(list[_Strip]):
         frame_start: int,
     ) -> _Strip:
         strip = _Strip(name, filepath, channel)
-        strip.frame_start = frame_start
+        strip.content_start = frame_start
         self.append(strip)
         return strip
 
@@ -70,7 +63,6 @@ def _unrelated(name: str, channel: int) -> _Strip:
 def _owned(path: str, channel: int = 2) -> _Strip:
     strip = _Strip(SELECTED_AUDIO_STRIP_NAME, path, channel)
     strip[SELECTED_AUDIO_OWNER_KEY] = SELECTED_AUDIO_OWNER_VALUE
-    strip[SELECTED_AUDIO_SOURCE_KEY] = path
     return strip
 
 
@@ -124,46 +116,63 @@ def test_frame_math_rejects_invalid_scene_or_audio_rates() -> None:
         )
 
 
-def test_create_and_update_one_owned_strip_preserves_other_media() -> None:
+def test_configure_updates_one_owned_strip_without_changing_scene_range(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     unrelated = _unrelated("music", 3)
     scene = _Scene(unrelated)
+    scene.frame_start = -10
+    scene.frame_end = 80
+    monkeypatch.setattr(selected_audio_timeline, "wav_duration_seconds", lambda _: 1.0)
 
-    strip = ensure_selected_audio_strip(scene, "/audio/voice.wav", 1.0)
+    frame_end = configure_selected_audio(
+        scene,
+        "/audio/voice.wav",
+        first_frame=12,
+    )
 
+    strip = scene.sequence_editor.strips[-1]
     assert tuple(scene.sequence_editor.strips) == (unrelated, strip)
     assert is_selected_audio_strip(strip)
     assert strip.channel == 4
-    assert strip.frame_final_duration == 24
-    assert scene.frame_end == 24
+    assert strip.content_start == 12
+    assert strip.duration == 24
+    assert frame_end == 35
+    assert (scene.frame_start, scene.frame_end) == (-10, 80)
 
-    duplicate = _owned("/audio/voice.wav", 6)
-    scene.sequence_editor.strips.append(duplicate)
-    scene.frame_start = 10
-    scene.frame_end = 100
-    scene.render.fps = 30
-    scene.render.fps_base = 1.001
+    frame_end = configure_selected_audio(
+        scene,
+        "/audio/voice.wav",
+        first_frame=42,
+    )
 
-    same = ensure_selected_audio_strip(scene, "/audio/voice.wav", 2.01)
-
-    assert same is strip
-    assert all(item is not duplicate for item in scene.sequence_editor.strips)
-    assert strip.frame_start == 10
-    assert strip.frame_final_duration == 61
-    assert scene.frame_end == 100
+    assert scene.sequence_editor.strips[-1] is strip
+    assert strip.content_start == 42
+    assert strip.duration == 24
+    assert frame_end == 65
+    assert (scene.frame_start, scene.frame_end) == (-10, 80)
 
 
-def test_changed_source_replaces_only_owned_strips() -> None:
+def test_changed_source_replaces_only_the_owned_strip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     unrelated = _unrelated("music", 4)
     old = _owned("/audio/old.wav")
-    duplicate = _owned("/audio/old.wav", 3)
-    scene = _Scene(unrelated, old, duplicate)
+    scene = _Scene(unrelated, old)
+    monkeypatch.setattr(selected_audio_timeline, "wav_duration_seconds", lambda _: 0.5)
 
-    replacement = ensure_selected_audio_strip(scene, "/audio/new.WAV", 0.5)
+    frame_end = configure_selected_audio(
+        scene,
+        "/audio/new.WAV",
+        first_frame=-20,
+    )
 
+    replacement = scene.sequence_editor.strips[-1]
     assert unrelated in scene.sequence_editor.strips
-    assert old not in scene.sequence_editor.strips
-    assert duplicate not in scene.sequence_editor.strips
-    assert replacement[SELECTED_AUDIO_SOURCE_KEY] == "/audio/new.WAV"
+    assert all(item is not old for item in scene.sequence_editor.strips)
+    assert replacement.sound.filepath == "/audio/new.WAV"
+    assert replacement.content_start == -20
+    assert frame_end == -9
 
 
 def test_remove_owned_strips_does_not_touch_other_media_or_create_editor() -> None:
@@ -174,9 +183,3 @@ def test_remove_owned_strips_does_not_touch_other_media_or_create_editor() -> No
 
     scene.sequence_editor = None
     remove_selected_audio_strips(scene)
-
-
-@pytest.mark.parametrize("path", ["", "/audio/voice.mp3"])
-def test_strip_requires_wav_path(path: str) -> None:
-    with pytest.raises(SelectedAudioTimelineError):
-        ensure_selected_audio_strip(_Scene(), path, 1.0)

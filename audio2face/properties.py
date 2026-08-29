@@ -165,29 +165,89 @@ def _preferred_emotion_updated(
     _refresh_inference(scene)
 
 
-def _audio_path_updated(
+def _configure_selected_audio_timeline(
     settings: bpy.types.PropertyGroup,
-    context: bpy.types.Context,
-) -> None:
-    """Map the selected WAV onto Blender's native scene timeline."""
-
+    scene: bpy.types.Scene,
+) -> int | None:
     from .selected_audio_timeline import (
         configure_selected_audio,
         remove_selected_audio_strips,
     )
 
+    if not settings.audio_path:
+        return None
+    audio_path = bpy.path.abspath(settings.audio_path)
+    try:
+        frame_end = configure_selected_audio(
+            scene,
+            audio_path,
+            first_frame=settings.audio_first_frame,
+        )
+    except (OSError, ValueError) as exc:
+        remove_selected_audio_strips(scene)
+        settings.status = "ERROR"
+        settings.status_message = str(exc)
+        return None
+    return frame_end
+
+
+def _audio_path_updated(
+    settings: bpy.types.PropertyGroup,
+    context: bpy.types.Context,
+) -> None:
+    """Replace the Selected WAV source and its native sound strip."""
+
+    from .runtime import get_controller
+    from .selected_audio_timeline import remove_selected_audio_strips
+
     scene = _update_scene(context)
     if scene is None:
         return
+    get_controller().discard_selected_audio(scene)
     if not settings.audio_path:
         remove_selected_audio_strips(scene)
         return
-    try:
-        audio_path = bpy.path.abspath(settings.audio_path)
-        configure_selected_audio(scene, audio_path)
-    except (OSError, ValueError):
-        remove_selected_audio_strips(scene)
+    _configure_selected_audio_timeline(settings, scene)
+
+
+def _audio_first_frame_updated(
+    settings: bpy.types.PropertyGroup,
+    context: bpy.types.Context,
+) -> None:
+    """Move the Selected WAV and cached samples to a new First Frame."""
+
+    from .live_stream import get_live_stream_controller
+
+    scene = _update_scene(context)
+    if scene is None:
         return
+    frame_end = _configure_selected_audio_timeline(settings, scene)
+    if frame_end is None:
+        return
+    get_live_stream_controller().remap_timeline(
+        scene,
+        int(settings.audio_first_frame),
+        frame_end,
+    )
+
+
+def _input_mode_updated(
+    settings: bpy.types.PropertyGroup,
+    context: bpy.types.Context,
+) -> None:
+    """Enter or leave Selected WAV ownership explicitly."""
+
+    from .runtime import get_controller
+    from .selected_audio_timeline import remove_selected_audio_strips
+
+    scene = _update_scene(context)
+    if scene is None:
+        return
+    get_controller().input_mode_changed(scene)
+    if settings.input_mode == "SELECTED":
+        _audio_first_frame_updated(settings, context)
+        return
+    remove_selected_audio_strips(scene)
 
 
 def _target_object_poll(
@@ -253,12 +313,19 @@ class A2FSceneSettings(bpy.types.PropertyGroup):
             ("STREAM", "Stream", "Drive Shape Keys from incremental mono float PCM"),
         ),
         default="SELECTED",
+        update=_input_mode_updated,
     )
     audio_path: StringProperty(
         name="Speech WAV",
         description="WAV played or baked in Selected mode",
         subtype="FILE_PATH",
         update=_audio_path_updated,
+    )
+    audio_first_frame: IntProperty(
+        name="First Frame",
+        description="Blender timeline frame where the selected WAV begins",
+        default=1,
+        update=_audio_first_frame_updated,
     )
     input_strength: FloatProperty(
         name="Input Strength",

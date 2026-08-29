@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import copy
 import importlib.util
-import re
 import struct
 import sys
 from collections.abc import Callable
@@ -14,12 +13,6 @@ import pytest
 
 CHANNELS = tuple(f"modelChannel{index}" for index in range(52))
 MODEL_SIGNATURE = ("/models/audio2face/model.json", "/models/audio2emotion/model.json")
-UI_SOURCE = (
-    Path(__file__).resolve().parents[1] / "audio2face" / "ui.py"
-).read_text(encoding="utf-8")
-OPERATORS_SOURCE = (
-    Path(__file__).resolve().parents[1] / "audio2face" / "operators.py"
-).read_text(encoding="utf-8")
 
 AUDIO2FACE_DEFAULTS: dict[str, float | int] = {
     "input_strength": 1.0,
@@ -135,55 +128,6 @@ def _schema() -> dict[str, object]:
     }
 
 
-def test_emotion_configuration_uses_parallel_collapsible_sections() -> None:
-    for name in (
-        "a2e_emotion_strength",
-        "a2e_emotion_contrast",
-        "a2e_max_emotions",
-        "a2e_live_blend_coef",
-        "a2e_transition_smoothing",
-    ):
-        assert re.search(
-            rf'emotion_controls\.prop\(\s*settings,\s*"{name}",\s*slider=True,?\s*\)',
-            UI_SOURCE,
-        )
-    assert re.search(
-        r'emotion_header, emotion_body = layout\.panel\(\s*'
-        r'"audio2face_emotion_tuning",\s*default_closed=True,?\s*\)',
-        UI_SOURCE,
-    )
-    assert re.search(
-        r'preferred_header, preferred_body = layout\.panel\(\s*'
-        r'"audio2face_preferred_emotion",\s*default_closed=True,?\s*\)',
-        UI_SOURCE,
-    )
-    assert UI_SOURCE.index("audio2face_preferred_emotion") < UI_SOURCE.index(
-        "audio2face_emotion_tuning"
-    )
-    assert (
-        'preferred_header.label(text="Preferred Emotion", icon="BOOKMARKS")'
-        in UI_SOURCE
-    )
-    assert (
-        'emotion_header.label(text="Emotion Tuning", icon="PREFERENCES")'
-        in UI_SOURCE
-    )
-    assert re.search(
-        r'preferred_body\.prop\(\s*settings,\s*'
-        r'"a2e_preferred_emotion_strength",\s*slider=True,?\s*\)',
-        UI_SOURCE,
-    )
-    assert "for emotion in settings.preferred_emotions:" in UI_SOURCE
-    assert "for emotion in settings.mixed_emotions:" in UI_SOURCE
-    assert "mixed_box = emotion_body.box()" in UI_SOURCE
-    assert "mixed_controls.enabled = False" in UI_SOURCE
-    assert UI_SOURCE.count('"a2f.reset_emotion_settings"') == 1
-    assert "preferred_body.use_property_split = True" in UI_SOURCE
-    assert "preferred_body.use_property_decorate = True" in UI_SOURCE
-    assert "emotion_body.use_property_split = True" in UI_SOURCE
-    assert "emotion_body.use_property_decorate = True" in UI_SOURCE
-
-
 def test_preferred_emotions_are_saved_and_mixed_emotions_are_transient(
     properties_module: ModuleType,
 ) -> None:
@@ -216,94 +160,76 @@ def test_automatic_emotion_strength_is_an_independent_two_x_multiplier(
     assert "subtype" not in annotation
 
 
-def test_prediction_delay_uses_a_range_slider() -> None:
-    assert (
-        'playback_box.prop(settings, "prediction_delay", slider=True)'
-        in UI_SOURCE
-    )
-
-
-def test_model_tuning_ui_exposes_only_the_fixed_audio2face_contract() -> None:
-    assert 'text="Model Tuning"' in UI_SOURCE
-    assert "AUDIO2FACE_SETTING_GROUPS" in UI_SOURCE
-    assert "tuning_body.use_property_decorate = True" in UI_SOURCE
-    assert re.search(
-        r'tuning_header, tuning_body = layout\.panel\(\s*'
-        r'"audio2face_model_tuning",\s*default_closed=True,?\s*\)',
-        UI_SOURCE,
-    )
-    assert UI_SOURCE.count('"a2f.reset_model_tuning"') == 1
-    assert "emotion_controls.enabled" not in UI_SOURCE
-
-
-def test_runtime_status_box_uses_the_persistence_gate() -> None:
-    assert "controller.status_notice(context.scene)" in UI_SOURCE
-
-
-def test_playback_ui_uses_blender_native_transport_without_seconds_slider() -> None:
-    assert "screen.is_animation_playing" in UI_SOURCE
-    assert '"a2f.play_pause", text="Pause", icon="PAUSE"' in UI_SOURCE
-    assert '"a2f.play_pause", text="Play", icon="PLAY"' in UI_SOURCE
-    assert '"a2f.bake_animation"' in UI_SOURCE
-    assert '"a2f.cancel_bake"' in UI_SOURCE
-
-
-def test_selected_play_operator_calls_blender_native_timeline_transport() -> None:
-    assert "screen.is_animation_playing" in OPERATORS_SOURCE
-    assert "bpy.ops.screen.animation_pause()" in OPERATORS_SOURCE
-    assert "bpy.ops.screen.animation_play()" in OPERATORS_SOURCE
-    assert "configure_selected_audio" in OPERATORS_SOURCE
-    assert "controller.start_selected_audio(" in OPERATORS_SOURCE
-    assert "controller.cancel_selected_audio(scene)" in OPERATORS_SOURCE
-    assert "playback_requested=start_native_playback" in OPERATORS_SOURCE
-    assert OPERATORS_SOURCE.index("def start_native_playback()") < (
-        OPERATORS_SOURCE.index("bpy.ops.screen.animation_play()")
-    )
-
-
-def test_input_mode_switch_is_never_disabled() -> None:
-    assert "input_mode_row = input_box.row(align=True)" in UI_SOURCE
-    assert 'input_mode_row.prop(settings, "input_mode", expand=True)' in UI_SOURCE
-    assert "input_mode_row.enabled" not in UI_SOURCE
-
-
-def test_target_ui_uses_the_shape_key_object_contract() -> None:
-    assert 'text="Target Objects"' in UI_SOURCE
-    assert 'text="Add Selected Objects"' in UI_SOURCE
-    assert '"target_objects"' in UI_SOURCE
-
-
-def test_audio_path_update_replaces_the_selected_native_sound_strip(
+def test_selected_audio_callbacks_manage_source_placement_and_mode(
     properties_module: ModuleType,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[tuple[object, ...]] = []
     timeline = ModuleType("audio2face.selected_audio_timeline")
     timeline.configure_selected_audio = (  # type: ignore[attr-defined]
-        lambda scene, path: calls.append(("configure", scene, path))
+        lambda scene, path, *, first_frame: calls.append(
+            ("configure", scene, path, first_frame)
+        )
+        or 42
     )
     timeline.remove_selected_audio_strips = (  # type: ignore[attr-defined]
         lambda scene: calls.append(("remove", scene))
     )
     monkeypatch.setitem(sys.modules, timeline.__name__, timeline)
-    settings = SimpleNamespace(audio_path="first.wav")
+    live = SimpleNamespace(
+        remap_timeline=lambda *args: calls.append(("remap", *args))
+    )
+    live_stream = ModuleType("audio2face.live_stream")
+    live_stream.get_live_stream_controller = lambda: live  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, live_stream.__name__, live_stream)
+    controller = SimpleNamespace(
+        discard_selected_audio=lambda scene: calls.append(("discard", scene)),
+        input_mode_changed=lambda scene: calls.append(("mode", scene)),
+    )
+    runtime = ModuleType("audio2face.runtime")
+    runtime.get_controller = lambda: controller  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, runtime.__name__, runtime)
+    settings = SimpleNamespace(
+        input_mode="SELECTED",
+        audio_path="first.wav",
+        audio_first_frame=12,
+    )
     scene = SimpleNamespace(audio2face=settings)
     context = SimpleNamespace(scene=scene)
 
     properties_module._audio_path_updated(settings, context)
-    settings.audio_path = "second.wav"
-    properties_module._audio_path_updated(settings, context)
+    settings.audio_first_frame = -3
+    properties_module._audio_first_frame_updated(settings, context)
     settings.audio_path = ""
     properties_module._audio_path_updated(settings, context)
+    settings.audio_path = "second.wav"
+    properties_module._input_mode_updated(settings, context)
+    settings.input_mode = "STREAM"
+    properties_module._input_mode_updated(settings, context)
 
     assert calls == [
-        ("configure", scene, "first.wav"),
-        ("configure", scene, "second.wav"),
+        ("discard", scene),
+        ("configure", scene, "first.wav", 12),
+        ("configure", scene, "first.wav", -3),
+        ("remap", scene, -3, 42),
+        ("discard", scene),
+        ("remove", scene),
+        ("mode", scene),
+        ("configure", scene, "second.wav", -3),
+        ("remap", scene, -3, 42),
+        ("mode", scene),
         ("remove", scene),
     ]
-    assert "update=_audio_path_updated" in (
-        properties_module.A2FSceneSettings.__annotations__["audio_path"]
-    )
+    annotations = properties_module.A2FSceneSettings.__annotations__
+    assert "update=_input_mode_updated" in annotations["input_mode"]
+    assert "update=_audio_path_updated" in annotations["audio_path"]
+    first_frame = properties_module.A2FSceneSettings.__annotations__[
+        "audio_first_frame"
+    ]
+    assert "name='First Frame'" in first_frame
+    assert "default=1" in first_frame
+    assert "update=_audio_first_frame_updated" in first_frame
+    assert "SKIP_SAVE" not in first_frame
 
 
 def test_shared_update_callback_refreshes_the_context_scene(

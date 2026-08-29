@@ -161,6 +161,7 @@ def main() -> None:
         panel_context = SimpleNamespace(
             scene=scene,
             screen=None,
+            window_manager=bpy.context.window_manager,
             region=SimpleNamespace(width=320),
             preferences=SimpleNamespace(
                 system=SimpleNamespace(ui_scale=1.0),
@@ -329,6 +330,8 @@ def main() -> None:
                 wav_file.setframerate(16_000)
                 wav_file.writeframes(bytes(16_000 * 2))
             scene.frame_start = 7
+            original_frame_end = scene.frame_end
+            settings.audio_first_frame = 12
             settings.audio_path = str(wav_path)
             sequence_editor = scene.sequence_editor
             assert sequence_editor is not None
@@ -340,10 +343,12 @@ def main() -> None:
             assert len(owned_strips) == 1
             selected_strip = owned_strips[0]
             assert selected_strip.name == SELECTED_AUDIO_STRIP_NAME
-            assert selected_strip.frame_start == 7
-            assert selected_strip.frame_final_duration == math.ceil(
+            assert selected_strip.content_start == 12
+            assert selected_strip.duration == math.ceil(
                 scene.render.fps / scene.render.fps_base
             )
+            assert scene.frame_start == 7
+            assert scene.frame_end == original_frame_end
             settings.audio_path = ""
             assert not any(
                 is_selected_audio_strip(strip)
@@ -537,15 +542,15 @@ def main() -> None:
         routed_operation = "blender-smoke-stream"
         playback_started: list[None] = []
         try:
-            live.prepare(
+            live.prepare_timeline(
                 scene,
                 routed_operation,
                 16_000,
                 tuple(MODEL_CHANNELS),
                 ("Neutral", "Joy"),
-                presentation_stopped=None,
-                timeline_playback_requested=lambda: playback_started.append(None),
-                timeline_frame_start=int(scene.frame_current),
+                int(scene.frame_current),
+                int(scene.frame_current) + 24,
+                lambda: playback_started.append(None),
             )
             controller.active_stream = runtime.ActiveStream(
                 operation_id=routed_operation,
@@ -583,7 +588,6 @@ def main() -> None:
                 },
             )
             assert playback_started == [None]
-            assert live.tick() is True
             for keyed_target in (
                 target,
                 extra_target,
@@ -701,6 +705,15 @@ def main() -> None:
         )
         assert runtime._load_pre_handler not in bpy.app.handlers.load_pre
         assert runtime._load_post_handler not in bpy.app.handlers.load_post
+        assert (
+            runtime._animation_playback_pre_handler
+            not in bpy.app.handlers.animation_playback_pre
+        )
+        assert (
+            runtime._animation_playback_post_handler
+            not in bpy.app.handlers.animation_playback_post
+        )
+        assert runtime._frame_change_post_handler not in bpy.app.handlers.frame_change_post
 
     print("Audio2Face 5.2 smoke test passed")
 

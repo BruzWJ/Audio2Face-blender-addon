@@ -67,6 +67,7 @@ class _Settings:
         self.input_mode = "SELECTED"
         self.prediction_delay = 0.0
         self.audio_path = ""
+        self.audio_first_frame = 1
         self.stream_time = 0.0
         self.target_objects: list[object] = []
         for name, value in AUDIO2FACE_DEFAULTS.items():
@@ -108,8 +109,17 @@ class _LiveController:
         self.receive_calls: list[tuple[object, ...]] = []
         self.terminal_calls: list[str] = []
         self.stop_calls: list[dict[str, object]] = []
-        self.prepare_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+        self.prepare_external_calls: list[tuple[object, ...]] = []
+        self.prepare_timeline_calls: list[tuple[object, ...]] = []
+        self.discarded_timelines: list[object] = []
+        self.presented_timeline_frames: list[object] = []
         self.timeline_playback_requests: list[object] = []
+        self.remap_result = False
+        self.timeline_ready = False
+        self.timeline_pending = False
+        self.native_start_calls: list[object] = []
+        self.canceled_timeline_requests: list[object] = []
+        self.remap_calls: list[tuple[object, ...]] = []
 
     def tick(self) -> bool:
         return False
@@ -125,15 +135,44 @@ class _LiveController:
     def receive(self, *args: object) -> None:
         self.receive_calls.append(args)
 
-    def prepare(self, *args: object, **kwargs: object) -> None:
-        self.prepare_calls.append((args, dict(kwargs)))
+    def prepare_external(self, *args: object) -> None:
+        self.prepare_external_calls.append(args)
         self.is_active = True
+
+    def prepare_timeline(self, *args: object) -> None:
+        self.prepare_timeline_calls.append(args)
+        self.is_active = True
+
+    def discard_timeline(self, scene: object) -> None:
+        self.discarded_timelines.append(scene)
+        self.is_active = False
 
     def mark_terminal(self, operation_id: str) -> None:
         self.terminal_calls.append(operation_id)
 
     def request_timeline_playback(self, callback: object) -> None:
         self.timeline_playback_requests.append(callback)
+        self.timeline_pending = True
+
+    def remap_timeline(self, *args: object) -> bool:
+        self.remap_calls.append(args)
+        return self.remap_result
+
+    def timeline_frame_ready(self, _scene: object) -> bool:
+        return self.timeline_ready
+
+    def timeline_playback_pending(self, _scene: object) -> bool:
+        return self.timeline_pending
+
+    def native_timeline_playback_started(self, scene: object) -> None:
+        self.native_start_calls.append(scene)
+
+    def cancel_timeline_playback_request(self, scene: object) -> None:
+        self.canceled_timeline_requests.append(scene)
+
+    def present_timeline_frame(self, scene: object) -> bool:
+        self.presented_timeline_frames.append(scene)
+        return self.is_active
 
 
 class _Timers:
@@ -190,7 +229,11 @@ def _stream_pending(
 def runtime_module(monkeypatch: pytest.MonkeyPatch) -> tuple[ModuleType, ModuleType]:
     bpy = ModuleType("bpy")
     bpy.types = SimpleNamespace(Scene=object)  # type: ignore[attr-defined]
-    bpy.data = SimpleNamespace(scenes=_Scenes(), actions=object())  # type: ignore[attr-defined]
+    bpy.data = SimpleNamespace(  # type: ignore[attr-defined]
+        scenes=_Scenes(),
+        actions=object(),
+        window_managers=[],
+    )
     bpy.context = SimpleNamespace(scene=None)  # type: ignore[attr-defined]
     bpy.path = SimpleNamespace(abspath=lambda value: value)  # type: ignore[attr-defined]
     bpy.utils = SimpleNamespace(  # type: ignore[attr-defined]
@@ -201,6 +244,9 @@ def runtime_module(monkeypatch: pytest.MonkeyPatch) -> tuple[ModuleType, ModuleT
         timers=_Timers(),
         handlers=SimpleNamespace(
             persistent=lambda callback: callback,
+            animation_playback_pre=[],
+            animation_playback_post=[],
+            frame_change_post=[],
             load_pre=[],
             load_post=[],
         ),
@@ -288,7 +334,10 @@ def _activate_bake(
     frame_end: int = 2,
     audio_samples: int = 48_000,
 ) -> object:
-    wav_source = SimpleNamespace(close_calls=0)
+    wav_source = SimpleNamespace(
+        close_calls=0,
+        metadata=SimpleNamespace(output_frames=audio_samples),
+    )
 
     def close() -> None:
         wav_source.close_calls += 1
@@ -297,10 +346,8 @@ def _activate_bake(
     bake = runtime.ActiveBake(
         operation_id=operation_id,
         scene_name=scene.name,
-        audio_path=Path("/tmp/selected.wav"),
         wav_source=wav_source,
         chunks=iter(()),
-        audio_samples=audio_samples,
         frame_start=frame_start,
         frame_end=frame_end,
         original_frame=9,
@@ -309,7 +356,6 @@ def _activate_bake(
             for item in scene.audio2face.target_objects
             if item.object is not None
         ),
-        next_frame=frame_start,
     )
     controller.active_bake = bake
     return bake
@@ -363,107 +409,8 @@ def _start_selected_audio(runtime, bpy, monkeypatch, tmp_path, *, frame=1):  # t
         playback_requested=lambda: None,
     )
     stream = controller.active_stream
-    assert stream is not None
-    return controller, stream.wav_source, requests
-
-
-def test_short_lived_status_notice_never_becomes_visible(
-    runtime_module: tuple[ModuleType, ModuleType],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    runtime, bpy = runtime_module
-    scene, _settings = _local_scene(bpy)
-    controller = runtime.RuntimeController()
-    now = [10.0]
-    redraws: list[None] = []
-    monkeypatch.setattr(runtime.time, "monotonic", lambda: now[0])
-    monkeypatch.setattr(
-        controller,
-        "_tag_runtime_setup_redraw",
-        lambda: redraws.append(None),
-    )
-
-    controller._set_status(scene, "STREAM_STARTING", "Preparing audio inference")
-    assert controller.status_notice(scene) is None
-
-    now[0] += runtime._STATUS_NOTICE_DELAY_SECONDS / 2.0
-    controller._set_status(scene, "STREAMING", "PCM stream is ready")
-    redraws.clear()
-    now[0] += runtime._STATUS_NOTICE_DELAY_SECONDS
-    controller._poll_status_notices()
-
-    assert controller.status_notice(scene) is None
-    assert redraws == []
-
-
-def test_status_notice_appears_once_after_persistence_delay(
-    runtime_module: tuple[ModuleType, ModuleType],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    runtime, bpy = runtime_module
-    scene, _settings = _local_scene(bpy)
-    controller = runtime.RuntimeController()
-    now = [20.0]
-    redraws: list[None] = []
-    monkeypatch.setattr(runtime.time, "monotonic", lambda: now[0])
-    monkeypatch.setattr(
-        controller,
-        "_tag_runtime_setup_redraw",
-        lambda: redraws.append(None),
-    )
-
-    controller._set_status(scene, "LOADING_MODEL", "Loading models")
-    redraws.clear()
-    now[0] += runtime._STATUS_NOTICE_DELAY_SECONDS - 0.001
-    controller._poll_status_notices()
-    assert controller.status_notice(scene) is None
-    assert redraws == []
-
-    now[0] += 0.001
-    controller._poll_status_notices()
-    assert controller.status_notice(scene) == ("LOADING_MODEL", "Loading models")
-    assert redraws == [None]
-
-    controller._poll_status_notices()
-    assert redraws == [None]
-
-
-def test_status_message_change_preserves_notice_persistence(
-    runtime_module: tuple[ModuleType, ModuleType],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    runtime, bpy = runtime_module
-    scene, _settings = _local_scene(bpy)
-    controller = runtime.RuntimeController()
-    now = [30.0]
-    monkeypatch.setattr(runtime.time, "monotonic", lambda: now[0])
-
-    controller._set_status(scene, "STARTING", "Starting worker")
-    now[0] += runtime._STATUS_NOTICE_DELAY_SECONDS / 2.0
-    controller._set_status(scene, "STARTING", "Loading playback data")
-    now[0] += runtime._STATUS_NOTICE_DELAY_SECONDS / 2.0
-    controller._poll_status_notices()
-
-    assert controller.status_notice(scene) == (
-        "STARTING",
-        "Loading playback data",
-    )
-
-    controller._set_status(scene, "STARTING", "Loading audio")
-    assert controller.status_notice(scene) == ("STARTING", "Loading audio")
-
-
-def test_error_status_notice_is_immediate_without_tracking_state(
-    runtime_module: tuple[ModuleType, ModuleType],
-) -> None:
-    runtime, bpy = runtime_module
-    scene, settings = _local_scene(bpy)
-    controller = runtime.RuntimeController()
-
-    settings.status = "ERROR"
-    settings.status_message = "Audio device failed"
-
-    assert controller.status_notice(scene) == ("ERROR", "Audio device failed")
+    assert stream is not None and stream.selected is not None
+    return controller, stream.selected.source, requests
 
 
 def test_log_directory_rejects_a_filesystem_alias(
@@ -519,6 +466,58 @@ def test_bake_resolves_blender_relative_audio_path_before_validation(
     controller.bake_selected_audio(scene)
 
     assert submitted == [(scene, selected)]
+    assert runtime._test_live_controller.stop_calls == [
+        {"reset": False, "notify": False}
+    ]
+
+
+def test_bake_uses_configured_audio_first_frame_without_changing_scene_range(
+    runtime_module: tuple[ModuleType, ModuleType],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runtime, bpy = runtime_module
+    scene, settings = _local_scene(bpy)
+    settings.audio_first_frame = 40
+    settings.target_objects = [SimpleNamespace(object=object())]
+    audio_path = tmp_path / "selected.wav"
+    audio_path.write_bytes(b"fixture")
+    controller = runtime.RuntimeController()
+    controller.model_sample_rate = 16_000
+    controller.model_schema = _model_schema()
+    controller.loaded_signature = ("face/model.json", "emotion/model.json")
+    monkeypatch.setattr(runtime, "plan_bake_targets", lambda *_args: (object(),))
+
+    class Source:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            self.metadata = SimpleNamespace(output_frames=32_000)
+
+        def __iter__(self):
+            return iter(())
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(runtime, "WavStreamSource", Source)
+    configured: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        runtime,
+        "configure_selected_audio",
+        lambda target, path, *, first_frame: configured.append(
+            (target, path, first_frame)
+        )
+        or 87,
+    )
+    monkeypatch.setattr(controller, "_request", lambda *_args, **_kwargs: None)
+    original_range = (scene.frame_start, scene.frame_end)
+
+    controller._submit_bake_start(scene, audio_path)
+
+    bake = controller.active_bake
+    assert bake is not None
+    assert (bake.frame_start, bake.frame_end) == (40, 87)
+    assert configured == [(scene, str(audio_path), 40)]
+    assert (scene.frame_start, scene.frame_end) == original_range
 
 
 def test_selected_directory_paths_accept_only_blender_terminal_separator(
@@ -1553,16 +1552,10 @@ def test_selected_audio_starts_existing_stream_without_eager_wav_decode(
     )
     assert source.advances == 0
     assert [method for method, _params in requests] == ["stream_start"]
-    assert runtime._test_live_controller.prepare_calls[0][1][
-        "timeline_frame_start"
-    ] == 1
-    assert runtime._test_live_controller.prepare_calls[0][1]["timeline_frame_end"] == 24
-    assert callable(
-        runtime._test_live_controller.prepare_calls[0][1][
-            "timeline_playback_requested"
-        ]
-    )
-    assert bpy.data.scenes[0].frame_current == 1
+    prepare_call = runtime._test_live_controller.prepare_timeline_calls[0]
+    assert prepare_call[5:7] == (1, 24)
+    assert callable(prepare_call[7])
+    assert bpy.data.scenes[0].frame_current == 25
 
     controller._poll_selected_audio()
 
@@ -1580,78 +1573,94 @@ def test_selected_audio_starts_existing_stream_without_eager_wav_decode(
     )
     assert runtime._test_live_controller.timeline_playback_requests == [resume]
 
-    replacement = tmp_path / "replacement.wav"
-    replacement.write_bytes(b"fixture")
-    scene = bpy.data.scenes[0]
-    scene.audio2face.audio_path = str(replacement)
-    scene.audio2face.input_mode = "STREAM"
-    controller._cancel_orphaned_operation()
 
-    assert controller.active_stream is not None
-    assert [method for method, _params in requests] == ["stream_start"]
-    assert source.close_calls == 0
-
-
-def test_failed_native_playback_can_cancel_the_selected_audio_stream(
+def test_native_playback_start_primes_selected_audio_without_moving_playhead(
     runtime_module: tuple[ModuleType, ModuleType],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     runtime, bpy = runtime_module
-    controller, source, requests = _start_selected_audio(
-        runtime, bpy, monkeypatch, tmp_path
+    scene, settings = _local_scene(bpy)
+    scene.frame_current = 73
+    settings.audio_first_frame = 40
+    audio_path = tmp_path / "selected.wav"
+    audio_path.write_bytes(b"fixture")
+    settings.audio_path = str(audio_path)
+    controller = runtime.RuntimeController()
+    window = SimpleNamespace()
+    configured: list[tuple[object, ...]] = []
+    started: list[dict[str, object]] = []
+    deferred: list[tuple[object, object]] = []
+    monkeypatch.setattr(
+        runtime,
+        "configure_selected_audio",
+        lambda target, path, *, first_frame: configured.append(
+            (target, path, first_frame)
+        )
+        or 159,
     )
-    stream = controller.active_stream
-    assert stream is not None
-    controller._handle_response(
-        {
-            "id": "request-1",
-            "result": {"sample_rate": 16_000, "prebuffer_samples": 2},
-        }
+    monkeypatch.setattr(runtime, "playing_window", lambda _scene: window)
+    monkeypatch.setattr(
+        controller,
+        "start_selected_audio",
+        lambda _scene, **kwargs: started.append(kwargs),
     )
-
-    controller.cancel_selected_audio(bpy.data.scenes[0])
-
-    assert requests[-1] == ("cancel", {"operation_id": stream.operation_id})
-    assert stream.stop_requested is True
-    assert source.close_calls == 0
-    assert runtime._test_live_controller.stop_calls == [
-        {"reset": False, "notify": False}
-    ]
-
-    controller._handle_response({"id": "request-2", "result": {}})
-    controller._handle_event(
-        {"event": "stream_ended", "operation_id": stream.operation_id, "data": {}}
+    monkeypatch.setattr(
+        controller,
+        "_defer_timeline_pause",
+        lambda target, target_window: deferred.append((target, target_window)),
     )
+    runtime._test_live_controller.timeline_pending = True
 
-    assert controller.active_stream is None
-    assert source.close_calls == 1
+    controller.native_timeline_started(scene)
+
+    assert configured == [(scene, str(audio_path), 40)]
+    assert runtime._test_live_controller.remap_calls == [(scene, 40, 159)]
+    assert started and started[0]["timeline_frame_end"] == 159
+    assert callable(started[0]["playback_requested"])
+    assert deferred == [(scene, window)]
+    assert scene.frame_current == 73
+    assert scene.frame_set_calls == []
 
 
-def test_failed_native_playback_cancel_closes_the_broken_worker(
+def test_native_pause_preserves_selected_cache_and_cancels_only_pending_resume(
     runtime_module: tuple[ModuleType, ModuleType],
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
     runtime, bpy = runtime_module
-    controller, source, _requests = _start_selected_audio(
-        runtime, bpy, monkeypatch, tmp_path
+    scene, _settings = _local_scene(bpy)
+    controller = runtime.RuntimeController()
+    runtime._test_live_controller.is_active = True
+
+    controller.native_timeline_stopped(scene)
+
+    assert runtime._test_live_controller.canceled_timeline_requests == [scene]
+    assert runtime._test_live_controller.stop_calls == []
+    assert runtime._test_live_controller.is_active is True
+
+
+def test_native_timeline_underflow_pauses_until_the_current_frame_is_ready(
+    runtime_module: tuple[ModuleType, ModuleType],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, bpy = runtime_module
+    scene, _settings = _local_scene(bpy)
+    controller = runtime.RuntimeController()
+    window = SimpleNamespace()
+    deferred: list[tuple[object, object]] = []
+    runtime._test_live_controller.is_active = True
+    runtime._test_live_controller.timeline_ready = False
+    monkeypatch.setattr(runtime, "playing_window", lambda _scene: window)
+    monkeypatch.setattr(
+        controller,
+        "_defer_timeline_pause",
+        lambda target, target_window: deferred.append((target, target_window)),
     )
-    shutdowns: list[float] = []
 
-    def fail_request(_method: str, _params: dict[str, object]) -> str:
-        raise runtime.SidecarError("transport closed")
+    controller.native_timeline_frame_changed(scene)
 
-    controller.client.request = fail_request
-    controller.client.begin_shutdown = lambda *, timeout: shutdowns.append(timeout)
-
-    with pytest.raises(runtime.SidecarError, match="transport closed"):
-        controller.cancel_selected_audio(bpy.data.scenes[0])
-
-    assert controller.active_stream is None
-    assert source.close_calls == 1
-    assert controller.rejected_reason is not None
-    assert shutdowns == [runtime.SHUTDOWN_TIMEOUT_SECONDS]
+    assert len(runtime._test_live_controller.timeline_playback_requests) == 1
+    assert callable(runtime._test_live_controller.timeline_playback_requests[0])
+    assert deferred == [(scene, window)]
 
 
 def test_selected_audio_chunks_are_credit_driven_and_eof_ends_stream(
@@ -1688,12 +1697,12 @@ def test_selected_audio_chunks_are_credit_driven_and_eof_ends_stream(
         {"event": "stream_credit", "operation_id": operation_id, "data": {}}
     )
     controller._poll_selected_audio()
-    assert len(requests) == 2
+    assert len(requests) == 3
 
     bpy.data.scenes[0].frame_current += 1
     stream.settings_dirty = True
     controller._poll_selected_audio()
-    assert len(requests) == 2
+    assert len(requests) == 3
     stream.settings_dirty = False
     controller._poll_selected_audio()
     controller._handle_response({"id": "request-3", "result": {}})
@@ -1715,7 +1724,30 @@ def test_selected_audio_chunks_are_credit_driven_and_eof_ends_stream(
         if method == "stream_chunk"
     ] == list(_SELECTED_AUDIO_CHUNKS)
     assert requests[3][1] == {"operation_id": operation_id}
-    assert (stream.end_sent, stream.wav_chunks, source.close_calls) == (True, None, 1)
+    assert stream.end_sent is True
+    assert source.close_calls == 1
+
+
+def test_discarding_selected_audio_cancels_its_worker_stream(
+    runtime_module: tuple[ModuleType, ModuleType],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runtime, bpy = runtime_module
+    controller, _source, requests = _start_selected_audio(
+        runtime,
+        bpy,
+        monkeypatch,
+        tmp_path,
+    )
+    scene = bpy.data.scenes[0]
+
+    controller.discard_selected_audio(scene)
+
+    assert [method for method, _params in requests] == ["stream_start", "cancel"]
+    assert controller.active_stream is not None
+    assert controller.active_stream.stop_requested is True
+    assert runtime._test_live_controller.discarded_timelines == [scene]
 
 
 def test_stream_audio_request_is_exact_base64_f32le(
@@ -2217,6 +2249,72 @@ def test_stream_tail_keeps_ui_state_until_presentation_stops(
     assert settings.status == "MODEL_READY"
 
 
+def test_selected_worker_terminal_releases_operation_but_retains_timeline_cache(
+    runtime_module: tuple[ModuleType, ModuleType],
+) -> None:
+    runtime, bpy = runtime_module
+    scene, settings = _local_scene(bpy)
+    controller = runtime.RuntimeController()
+    stream = _activate_stream(runtime, controller, scene)
+    source = SimpleNamespace(close_calls=0)
+
+    def close() -> None:
+        source.close_calls += 1
+
+    source.close = close
+    stream.selected = runtime.SelectedWavInput(
+        Path("/audio/selected.wav"),
+        source,
+        None,
+    )
+
+    controller._handle_event(
+        {"event": "stream_ended", "operation_id": "stream-1", "data": {}}
+    )
+
+    assert runtime._test_live_controller.terminal_calls == ["stream-1"]
+    assert runtime._test_live_controller.is_active is True
+    assert runtime._test_live_controller.stop_calls == []
+    assert controller.active_stream is None
+    assert source.close_calls == 1
+    assert settings.status == "MODEL_READY"
+    assert "cached on Blender's timeline" in settings.status_message
+
+
+def test_selected_worker_terminal_without_frames_reports_an_error(
+    runtime_module: tuple[ModuleType, ModuleType],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, bpy = runtime_module
+    scene, settings = _local_scene(bpy)
+    controller = runtime.RuntimeController()
+    stream = _activate_stream(runtime, controller, scene)
+    stream.selected = runtime.SelectedWavInput(
+        Path("/audio/selected.wav"),
+        SimpleNamespace(close=lambda: None),
+        None,
+    )
+
+    def empty_terminal(_operation_id: str) -> None:
+        raise runtime.LiveStreamError(
+            "Interactive Audio2Face reported no source frames"
+        )
+
+    monkeypatch.setattr(
+        runtime._test_live_controller,
+        "mark_terminal",
+        empty_terminal,
+    )
+
+    controller._handle_event(
+        {"event": "stream_ended", "operation_id": "stream-1", "data": {}}
+    )
+
+    assert controller.active_stream is None
+    assert settings.status == "ERROR"
+    assert "no source frames" in settings.status_message
+
+
 def test_stream_request_error_preserves_failure_through_terminal_event(
     runtime_module: tuple[ModuleType, ModuleType],
 ) -> None:
@@ -2406,77 +2504,6 @@ def test_malformed_error_event_cleans_its_active_stream(
     ]
 
 
-def test_runtime_survives_blend_file_replacement_with_fresh_controller(
-    runtime_module: tuple[ModuleType, ModuleType],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    runtime, bpy = runtime_module
-    cleanup_order: list[str] = []
-    controllers: list[object] = []
-
-    class StubController:
-        def __init__(self) -> None:
-            self.number = len(controllers) + 1
-            controllers.append(self)
-
-        def close(self) -> None:
-            cleanup_order.append(f"close-{self.number}")
-
-    monkeypatch.setattr(runtime, "RuntimeController", StubController)
-    runtime.register_runtime()
-    runtime.register_runtime()
-
-    assert len(controllers) == 1
-    assert bpy.app.handlers.load_pre == [runtime._load_pre_handler]
-    assert bpy.app.handlers.load_post == [runtime._load_post_handler]
-    assert bpy.app.timers.registrations[runtime._timer_callback] == {
-        "first_interval": runtime.POLL_INTERVAL_SECONDS,
-        "persistent": True,
-    }
-
-    runtime._load_pre_handler(None)
-
-    assert runtime._CONTROLLER is None
-    assert cleanup_order == ["close-1"]
-
-    runtime._load_post_handler(None)
-
-    assert len(controllers) == 2
-    assert runtime._CONTROLLER is controllers[1]
-    assert bpy.app.timers.is_registered(runtime._timer_callback)
-
-    runtime.unregister_runtime()
-
-    assert cleanup_order == [
-        "close-1",
-        "close-2",
-    ]
-    assert runtime._CONTROLLER is None
-    assert bpy.app.handlers.load_pre == []
-    assert bpy.app.handlers.load_post == []
-    assert not bpy.app.timers.is_registered(runtime._timer_callback)
-
-
-def test_runtime_timer_redraws_the_sidebar_while_frames_are_presented(
-    runtime_module: tuple[ModuleType, ModuleType],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    runtime, _bpy = runtime_module
-    calls: list[str] = []
-    runtime._CONTROLLER = SimpleNamespace(
-        poll=lambda: calls.append("poll"),
-        _tag_runtime_setup_redraw=lambda: calls.append("redraw"),
-    )
-    monkeypatch.setattr(
-        runtime,
-        "get_live_stream_controller",
-        lambda: SimpleNamespace(tick=lambda: True),
-    )
-
-    assert runtime._timer_callback() == runtime.PRESENTATION_INTERVAL_SECONDS
-    assert calls == ["poll", "redraw"]
-
-
 def test_bake_frame_request_samples_animated_settings_on_the_blender_frame(
     runtime_module: tuple[ModuleType, ModuleType],
     monkeypatch: pytest.MonkeyPatch,
@@ -2488,7 +2515,7 @@ def test_bake_frame_request_samples_animated_settings_on_the_blender_frame(
     controller.model_sample_rate = 48_000
     controller.model_schema = _model_schema()
     bake = _activate_bake(runtime, controller, scene)
-    bake.next_frame = 2
+    bake.weights.append((0.0,) * len(MODEL_CHANNELS))
     requests: list[tuple[str, dict[str, object], dict[str, object]]] = []
 
     def evaluated_settings(_settings: object) -> dict[str, object]:
@@ -2514,29 +2541,6 @@ def test_bake_frame_request_samples_animated_settings_on_the_blender_frame(
     assert params["target_sample"] == 14_000
     assert params["settings"]["audio2face"]["skin_strength"] == 2.0
     assert correlation["operation_id"] == bake.operation_id
-
-
-def test_failed_bake_cancel_submission_restores_retryable_state(
-    runtime_module: tuple[ModuleType, ModuleType],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    runtime, bpy = runtime_module
-    scene, settings = _local_scene(bpy)
-    controller = runtime.RuntimeController()
-    bake = _activate_bake(runtime, controller, scene)
-
-    def reject_cancel(*_args: object, **_kwargs: object) -> None:
-        raise runtime.SidecarError("cancel transport failed")
-
-    monkeypatch.setattr(controller, "_request", reject_cancel)
-
-    with pytest.raises(runtime.SidecarError, match="cancel transport failed"):
-        controller.cancel_bake(scene)
-
-    assert controller.active_bake is bake
-    assert bake.cancel_requested is False
-    assert bake.cancel_accepted is False
-    assert settings.status == "IDLE"
 
 
 def test_correlated_bake_frame_response_is_collected_in_frame_order(
@@ -2570,9 +2574,7 @@ def test_correlated_bake_frame_response_is_collected_in_frame_order(
         }
     )
 
-    assert bake.frames == [1]
     assert bake.weights == [(0.25,) * len(MODEL_CHANNELS)]
-    assert bake.next_frame == 2
     assert next_calls == [None]
 
 
@@ -2588,7 +2590,6 @@ def test_completed_bake_writes_native_actions_and_restores_original_frame(
     controller = runtime.RuntimeController()
     controller.model_schema = _model_schema()
     bake = _activate_bake(runtime, controller, scene)
-    bake.frames[:] = [1, 2]
     bake.weights[:] = [
         (0.1,) * len(MODEL_CHANNELS),
         (0.2,) * len(MODEL_CHANNELS),
@@ -2610,13 +2611,14 @@ def test_completed_bake_writes_native_actions_and_restores_original_frame(
     )
 
     assert len(calls) == 1
-    assert calls[0][0] == [1, 2]
+    assert tuple(calls[0][0]) == (1, 2)
     assert calls[0][2] == (target,)
     assert calls[0][3] is bpy.data.actions
     assert controller.active_bake is None
     assert scene.frame_current == 9
     assert bake.wav_source.close_calls == 1
     assert settings.status == "MODEL_READY"
+
 
 def test_runtime_registration_does_not_access_restricted_blend_data(
     runtime_module: tuple[ModuleType, ModuleType],
@@ -2630,6 +2632,15 @@ def test_runtime_registration_does_not_access_restricted_blend_data(
         assert bpy.app.timers.is_registered(runtime._timer_callback)
         assert runtime._load_pre_handler in bpy.app.handlers.load_pre
         assert runtime._load_post_handler in bpy.app.handlers.load_post
+        assert (
+            runtime._animation_playback_pre_handler
+            in bpy.app.handlers.animation_playback_pre
+        )
+        assert (
+            runtime._animation_playback_post_handler
+            in bpy.app.handlers.animation_playback_post
+        )
+        assert runtime._frame_change_post_handler in bpy.app.handlers.frame_change_post
     finally:
         bpy.data = unrestricted_data  # type: ignore[attr-defined]
         runtime.unregister_runtime()

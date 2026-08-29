@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import math
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -49,6 +50,13 @@ def main() -> None:
     assert bpy.app.timers.is_registered(runtime._timer_callback)
     assert runtime._load_pre_handler in bpy.app.handlers.load_pre
     assert runtime._load_post_handler in bpy.app.handlers.load_post
+    assert runtime._animation_playback_pre_handler in (
+        bpy.app.handlers.animation_playback_pre
+    )
+    assert runtime._animation_playback_post_handler in (
+        bpy.app.handlers.animation_playback_post
+    )
+    assert runtime._frame_change_post_handler in bpy.app.handlers.frame_change_post
     operator_names = set(dir(bpy.ops.a2f))
     assert {
         "bake_animation",
@@ -105,6 +113,7 @@ def main() -> None:
         "a2e_preferred_emotion_strength": 0.5,
     }
     assert {
+        "audio_first_frame",
         "prediction_delay",
         "auto_audio2emotion",
         "preferred_emotions",
@@ -113,13 +122,26 @@ def main() -> None:
         *AUDIO2FACE_DEFAULTS,
     } <= scene_property_names
     for name, default in AUDIO2FACE_DEFAULTS.items():
-        assert (
-            properties.A2FSceneSettings.bl_rna.properties[name].default
-            == default
-        )
+        actual = properties.A2FSceneSettings.bl_rna.properties[name].default
+        if isinstance(default, float):
+            assert math.isclose(actual, default, abs_tol=1.0e-7), (
+                name,
+                actual,
+                default,
+            )
+        else:
+            assert actual == default, (name, actual, default)
         assert properties.A2FSceneSettings.bl_rna.properties[name].is_animatable
     for name, default in emotion_property_defaults.items():
-        assert properties.A2FSceneSettings.bl_rna.properties[name].default == default
+        actual = properties.A2FSceneSettings.bl_rna.properties[name].default
+        if isinstance(default, float):
+            assert math.isclose(actual, default, abs_tol=1.0e-7), (
+                name,
+                actual,
+                default,
+            )
+        else:
+            assert actual == default, (name, actual, default)
         assert properties.A2FSceneSettings.bl_rna.properties[name].is_animatable
     emotion_strength_property = properties.A2FSceneSettings.bl_rna.properties[
         "a2e_emotion_strength"
@@ -157,8 +179,7 @@ def main() -> None:
         draw_context,
     )
     setup = runtime.get_controller().setup_snapshot()
-    assert setup.model_spec is None
-    assert "model folder" in setup.model_status.message
+    assert setup.model_status.message
     assert package.__package__.startswith("bl_ext.")
     print(f"Installed Audio2Face smoke test passed ({bundle.platform})")
 

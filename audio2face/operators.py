@@ -10,10 +10,7 @@ from .properties import (
     reset_emotion_settings,
     reset_model_tuning,
 )
-from .runtime import RuntimeController, get_controller
-from .selected_audio_timeline import (
-    configure_selected_audio,
-)
+from .runtime import RuntimeController, get_controller, playing_window
 from .shape_keys import supports_shape_keys
 from .sidecar import Lifecycle, SidecarError
 
@@ -207,44 +204,29 @@ class A2F_OT_play_pause(bpy.types.Operator):
         if not settings.audio_path:
             cls.poll_message_set("select a WAV file first")
             return False
-        if context.screen is None:
+        if context.window is None:
             cls.poll_message_set("native playback requires a Blender screen")
             return False
         return True
 
     def execute(self, context: bpy.types.Context) -> set[str]:
-        settings = context.scene.audio2face
-        screen = context.screen
-        if screen is None:
-            self.report({"ERROR"}, "native playback requires a Blender screen")
-            return {"CANCELLED"}
-        try:
-            if screen.is_animation_playing:
-                bpy.ops.screen.animation_pause()
+        window = context.window
+        playback_window = playing_window(context.scene)
+        if playback_window is not None:
+            with bpy.context.temp_override(
+                window=playback_window,
+                screen=playback_window.screen,
+            ):
+                result = bpy.ops.screen.animation_pause()
+            if result == {"FINISHED"}:
                 return {"FINISHED"}
+            self.report({"ERROR"}, "Blender could not pause native timeline playback")
+            return {"CANCELLED"}
 
-            scene = context.scene
-            audio_path = bpy.path.abspath(settings.audio_path)
-            _strip, audio_end = configure_selected_audio(scene, audio_path)
-            controller = get_controller()
-            window = context.window
-
-            def start_native_playback() -> None:
-                with bpy.context.temp_override(window=window, screen=window.screen):
-                    playback_result = bpy.ops.screen.animation_play()
-                if playback_result != {"FINISHED"}:
-                    controller.cancel_selected_audio(scene)
-                    raise RuntimeError(
-                        "Blender could not start native timeline playback"
-                    )
-
-            controller.start_selected_audio(
-                scene,
-                timeline_frame_end=audio_end,
-                playback_requested=start_native_playback,
-            )
-        except (OSError, RuntimeError, SidecarError, ValueError) as exc:
-            self.report({"ERROR"}, str(exc))
+        with bpy.context.temp_override(window=window, screen=window.screen):
+            result = bpy.ops.screen.animation_play()
+        if result != {"FINISHED"}:
+            self.report({"ERROR"}, "Blender could not start native timeline playback")
             return {"CANCELLED"}
         return {"FINISHED"}
 

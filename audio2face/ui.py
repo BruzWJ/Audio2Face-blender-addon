@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import bpy
 
 from .properties import AUDIO2FACE_SETTING_GROUPS
-from .runtime import RuntimeController, get_controller
+from .runtime import RuntimeController, get_controller, playing_window
 from .sidecar import Lifecycle
 from .ui_text import context_wrap_width, draw_wrapped_label
 
@@ -19,8 +19,7 @@ def _draw_audio_playback(
     layout: bpy.types.UILayout,
     settings: A2FSceneSettings,
     controller: RuntimeController,
-    scene_name: str,
-    screen: bpy.types.Screen | None,
+    scene: bpy.types.Scene,
 ) -> None:
     """Draw playback controls that apply to the current input mode."""
 
@@ -28,7 +27,7 @@ def _draw_audio_playback(
         playback_box = layout.box()
         playback_box.label(text="Playback", icon="SPEAKER")
         playback_row = playback_box.row(align=True)
-        if screen is not None and screen.is_animation_playing:
+        if playing_window(scene) is not None:
             playback_row.operator(
                 "a2f.play_pause", text="Pause", icon="PAUSE"
             )
@@ -37,7 +36,7 @@ def _draw_audio_playback(
                 "a2f.play_pause", text="Play", icon="PLAY"
             )
         bake = controller.active_bake
-        if bake is not None and bake.scene_name == scene_name:
+        if bake is not None and bake.scene_name == scene.name:
             bake_row = playback_box.row(align=True)
             bake_row.operator(
                 "a2f.cancel_bake",
@@ -50,13 +49,12 @@ def _draw_audio_playback(
                 text="Bake Shape Key Animation",
                 icon="ACTION",
             )
+        playback_box.prop(settings, "audio_first_frame")
         playback_box.prop(settings, "prediction_delay", slider=True)
         return
 
-    if settings.input_mode != "STREAM":
-        raise RuntimeError(f"invalid input mode {settings.input_mode!r}")
     stream = controller.active_stream
-    if stream is None or stream.scene_name != scene_name:
+    if stream is None or stream.scene_name != scene.name:
         return
     playback_box = layout.box()
     playback_box.label(text="Stream", icon="SPEAKER")
@@ -153,16 +151,14 @@ class A2F_PT_main(bpy.types.Panel):
         elif not setup.engine_status.ready:
             runtime_message = setup.engine_status.message
 
-        status_notice = controller.status_notice(context.scene)
-        if status_notice is not None:
-            status, message = status_notice
+        if settings.status not in {"IDLE", "MODEL_READY", "STREAMING"}:
             status_box = layout.box()
-            status_box.alert = status == "ERROR"
+            status_box.alert = settings.status == "ERROR"
             draw_wrapped_label(
                 status_box,
-                message,
+                settings.status_message,
                 width=text_width,
-                icon="ERROR" if status == "ERROR" else "TIME",
+                icon="ERROR" if settings.status == "ERROR" else "TIME",
             )
         if controller.optimization_in_progress:
             runtime_box = layout.box()
@@ -242,8 +238,7 @@ class A2F_PT_main(bpy.types.Panel):
             input_box,
             settings,
             controller,
-            context.scene.name,
-            context.screen,
+            context.scene,
         )
         if settings.input_mode == "SELECTED":
             input_box.prop(settings, "audio_path")
