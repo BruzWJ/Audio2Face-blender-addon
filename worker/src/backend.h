@@ -49,9 +49,14 @@ struct TrackRequest {
   std::uint32_t sample_rate;
 };
 
+struct TrackSettingsEntry {
+  std::uint64_t sample;
+  json settings;
+};
+
 struct TrackRenderRequest {
   std::uint64_t revision;
-  json settings;
+  std::vector<TrackSettingsEntry> settings_timeline;
   std::optional<std::int64_t> preview_sample;
 };
 
@@ -86,7 +91,6 @@ class Backend final {
       const std::atomic<std::uint64_t>& latest_revision,
       const TrackPreviewCallback& preview,
       const TrackCacheCallback& cache);
-  void interrupt_operation() noexcept;
   void abort_operation() noexcept;
 
  private:

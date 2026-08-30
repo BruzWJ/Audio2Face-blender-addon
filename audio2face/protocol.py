@@ -10,8 +10,8 @@ from typing import Any
 from .strict_json import duplicate_key_hook, invalid_constant_hook
 
 
-PROTOCOL_VERSION = "audio2face/12"
-WORKER_PROFILE = "nvidia-a2f3-a2e3-gpu-arkit52/12"
+PROTOCOL_VERSION = "audio2face/13"
+WORKER_PROFILE = "nvidia-a2f3-a2e3-gpu-arkit52/13"
 MAX_CONTROL_LINE_BYTES = 1_048_576
 _CONTROL_TYPES = frozenset({"request", "response", "error", "event"})
 _REQUEST_METHODS = frozenset(

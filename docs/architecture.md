@@ -8,9 +8,9 @@ external Stream path:
 ```text
 Selected WAV -- add-on-owned VSE strip --> native timeline/audio clock
        |
-       +-- decode/resample/upload once --> persistent interactive track
+       +-- decode/resample/upload once --> persistent prepared track
                                                   |
-                                      ComputeAllFrames (A2E, then A2F)
+                                  sequential A2E/A2F settings-timeline render
                                                   |
                                       atomic timestamped cache
                                          ^                 ^
@@ -18,7 +18,7 @@ native Blender frame -- target sample ---+                 +--- Bake
 
 external mono f32le PCM --> sequential Stream executors
 
-Blender 5.2 extension -- private audio2face/12 JSONL -- native worker
+Blender 5.2 extension -- private audio2face/13 JSONL -- native worker
                                                             |
                                  +--------------------------+------------------+
                                  |                                             |
@@ -41,8 +41,8 @@ Blender owns the package-local worker as a child process. The worker opens no
 port, and CUDA, TensorRT, Audio2X, model metadata, and inference executors stay
 outside Blender's process. **Start Worker** launches the child, loads the two
 models, and makes the backend ready for an audio operation. A Selected WAV
-creates a persistent interactive track when both model and source are ready; a
-true Stream creates its sequential executors when external PCM begins. **Stop
+creates a persistent prepared track when both model and source are ready; a true
+Stream uses the resident sequential executors when external PCM begins. **Stop
 Worker** exits the child and releases the active operation, models, and CUDA
 resources. Installing or enabling the extension does not start the worker.
 
@@ -69,12 +69,13 @@ The extension owns:
 
 Selected WAV PCM is uploaded once. A settings revision runs Audio2Emotion and
 Audio2Face continuously over the complete track, then publishes bounded frame
-batches atomically. Native frame changes perform no protocol or GPU work; they
-sample the published timestamps on Blender's main thread. Bake samples that
-same cache. External PCM alone advances through the sequential Stream protocol's
-per-chunk dequeue credits and bounded rolling presentation buffer. A registered
-timer advances protocol work, and `frame_change_post` makes Blender's current
-frame authoritative without an add-on playback handler.
+batches atomically. Native frame changes with matching settings only sample the
+published timestamps on Blender's main thread. Bake samples that same cache.
+External PCM alone advances through the sequential Stream protocol's per-chunk
+dequeue credits and bounded rolling presentation buffer. A registered timer
+advances protocol work; `frame_change_post` makes Blender's current frame
+authoritative, while `depsgraph_update_post` invalidates edited Actions without
+starting, pausing, or otherwise controlling Blender transport.
 
 ### Shape Key targets
 
@@ -140,33 +141,42 @@ The Timeline, Spacebar, and other native Blender transports enter the same
 media lifecycle. They do not enter or leave a worker operation. As soon as a
 valid source and loaded models are both ready, the add-on decodes, downmixes,
 and resamples the WAV to model-rate mono f32le, uploads it once through the
-`track_*` protocol, and retains the prepared interactive track. Source
+`track_*` protocol, and retains the prepared track. Source
 replacement or worker shutdown ends that track; play, pause, seek, and loop do
 not.
 
-`frame_change_post` maps `(scene.frame_current - strip.content_start)` through
-effective FPS and Prediction Delay to a target sample, then linearly samples
-the latest complete cache. It sends no worker request. Frames outside the
-native sound span are neutral.
+After Blender evaluates the new frame, `frame_change_post` maps
+`(scene.frame_current - strip.content_start)` through effective FPS and
+Prediction Delay to a target sample, then linearly samples the latest complete
+cache. It requests a new render only when the frame-evaluated settings differ
+from the rendered settings timeline. Frames outside the native sound span are
+neutral. When an Action used by the scene changes, `depsgraph_update_post`
+queues a complete settings reevaluation on the existing main-thread timer, so
+an edit to a future FCurve cannot remain hidden by an unchanged current-frame
+value. If playback or baking is active, that invalidation remains pending while
+the prior cache continues; the full frame sweep runs after the native operation
+stops. No add-on handler observes or controls native transport.
 
-A tuning or emotion edit sends a newer `track_render` revision. The worker
-interrupts an older revision without canceling the track, runs continuous
-Audio2Emotion and Audio2Face passes, and publishes the replacement only after
-all frames are complete. The requested current-frame sample is emitted from
-that completed continuous result before its cache batches. There is no
+A tuning, emotion, or keyframe edit sends a newer `track_render` revision with
+one sample-based settings timeline evaluated over the native sound span. The
+worker supersedes older work without canceling the track, resets its regular
+executors, replays the retained PCM once, and applies settings as the source
+timeline advances. The requested current-frame sample is emitted as soon as
+sequential output brackets it; native playback continues on the previous cache
+until the replacement publishes after all frames are complete. There is no
 inference-side playback clock: rewind, scrub, repeated play, pause, and loop
 only change Blender's native frame and sound transport.
 If the native scene or preview range ends before the sound, Blender intentionally
 wraps both sources there; the user extends that native range to play the full
 clip.
 
-**Bake Shape Key Animation** is a separate persistence operation. It snapshots
-the current settings, waits for the matching continuous cache if necessary,
-then maps every integer Blender frame in the native strip span to a cache sample
-using `fps / fps_base` and Prediction Delay. Preview and bake therefore consume
-identical values. It writes only matching Shape Key `value` curves without
-changing Blender's current frame; it does not run `ComputeFrame`, upload audio
-again, or create a second executor family.
+**Bake Shape Key Animation** is a separate persistence operation. It evaluates
+settings and Prediction Delay at every integer Blender frame in the native
+strip span, restores the user's frame, and waits for the matching continuous
+cache if necessary. Preview and bake therefore consume identical values and
+frame-to-sample mappings. Bake writes only matching Shape Key `value` curves;
+it does not upload audio again, run stateless per-frame inference, or create a
+second executor family.
 
 ### External PCM
 
@@ -183,23 +193,26 @@ Model loading during **Start Worker** initializes the model-owned CUDA resources
 on device 0 and makes the backend ready to create the executor family required
 by the chosen audio mode.
 
-A Selected WAV `track_start` creates one interactive Audio2Emotion and
+A Selected WAV `track_start` retains one regular sequential Audio2Emotion and
 Audio2Face/device-blendshape family. `track_chunk` uploads complete PCM once and
-`track_prepare` closes its audio accumulator. Each `track_render` installs a
-complete settings snapshot. A changed emotion-driver snapshot uses
-Audio2Emotion `ComputeAllFrames` to replace the timestamped emotion accumulator;
-an unchanged snapshot reuses that exact curve. Audio2Face then uses
-`ComputeAllFrames` to produce temporally regularized weights. Results are
-emitted in batches of at most 64 frames and published atomically by Blender.
-Stateless `ComputeFrame` is never used; the current-frame preview, full cache,
-and bake all share the continuous result.
+`track_prepare` marks that retained source ready. Each `track_render` resets the
+regular executors, replays the retained PCM, and applies the expanded settings
+timeline at source-sample boundaries while draining sequential inference.
+Results are emitted in batches of at most 64 frames and published atomically by
+Blender. The current-frame preview, full cache, and bake all share that
+continuous result. Postprocessed face and emotion controls advance from the
+SDK's next-frame callbacks; Input Strength advances before the next regular
+inference execution, whose batch can contain multiple output frames. No
+interactive executor or stateless per-frame path is used.
 
 A true Stream owns the regular sequential Audio2Emotion and
 Audio2Face/device-blendshape family. Each PCM chunk is appended once. A
 face-first, emotion-second readiness loop advances available work, publishes
 strictly increasing timestamps, and drops only inputs consumed by both models.
-`stream_settings` applies validated setters between queued chunks. It does not
-reset executors, retain or replay PCM, destroy the family, or restart media.
+At each chunk boundary, `stream_settings` collapses pending complete snapshots
+to the newest value, acknowledges every request, applies that value once, and
+then services one already-credited PCM command. It does not reset executors,
+retain or replay PCM, destroy the family, restart media, or starve audio.
 
 ## Model schema and inference settings
 
@@ -217,11 +230,12 @@ Preferred Emotion and transient Mixed Emotion collections, plus target
 delivery, from the loaded default model schema, and seeds all Audio2Face
 controls from the returned defaults.
 
-Each operation uses the complete `audio2face` and compositional
-`emotion_driver` snapshot defined by the [protocol](protocol.md#settings-document).
-A Selected edit revises the continuous cache without changing track or media
-lifecycle. A Stream edit changes live executor parameters between chunks
-without resetting inference or replaying audio.
+Each operation uses the `audio2face` and compositional `emotion_driver` settings
+defined by the [protocol](protocol.md#settings-document). Selected mode sends a
+complete initial snapshot followed by changed-leaf patches at source samples;
+an edit revises the continuous cache without changing track or media lifecycle.
+A Stream edit sends a complete snapshot and changes live executor parameters
+between chunks without resetting inference or replaying audio.
 
 Preferred and Mixed Emotion have disjoint ownership. Blender owns the saved,
 animatable Preferred values and represents all-zero values as an absent source.

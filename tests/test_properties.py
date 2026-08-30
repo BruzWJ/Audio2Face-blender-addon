@@ -181,6 +181,9 @@ def test_selected_audio_callbacks_manage_source_placement_and_mode(
         selected_audio_failed=lambda scene, message: calls.append(
             ("failure", scene, message)
         ),
+        refresh_inference_settings=lambda scene, *, rebuild_selected=False: calls.append(
+            ("refresh", scene, rebuild_selected)
+        ),
         request_selected_frame=lambda scene: calls.append(("frame", scene)),
         input_mode_changed=lambda scene: calls.append(("mode", scene)),
     )
@@ -211,11 +214,13 @@ def test_selected_audio_callbacks_manage_source_placement_and_mode(
         ("configure", scene, "first.wav", 12),
         ("source", scene),
         ("configure", scene, "first.wav", -3),
+        ("refresh", scene, True),
         ("frame", scene),
         ("source", scene),
         ("remove", scene),
         ("mode", scene),
         ("configure", scene, "second.wav", -3),
+        ("refresh", scene, True),
         ("frame", scene),
         ("mode", scene),
         ("remove", scene),

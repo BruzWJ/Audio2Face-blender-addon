@@ -38,7 +38,7 @@ def test_windows_native_transport_uses_binary_stdio() -> None:
 
 
 def test_native_worker_mirrors_the_python_wire_identity() -> None:
-    assert WORKER_PROFILE.rpartition("/")[2] == "12"
+    assert WORKER_PROFILE.rpartition("/")[2] == "13"
     assert f'constexpr const char* kProtocol = "{PROTOCOL_VERSION}";' in (
         WORKER_PROTOCOL_SOURCE
     )
@@ -251,7 +251,7 @@ def test_removed_operation_aliases_are_rejected(method: str) -> None:
     assert f'if (method == "{method}")' not in WORKER_PROTOCOL_SOURCE
 
 
-def test_native_stream_chunk_emits_one_dequeue_credit() -> None:
+def test_native_stream_coalesces_settings_then_services_queued_pcm() -> None:
     enqueue_start = WORKER_PROTOCOL_SOURCE.index("  void enqueue_stream_chunk(")
     enqueue_end = WORKER_PROTOCOL_SOURCE.index(
         "  void enqueue_stream_end(", enqueue_start
@@ -264,15 +264,37 @@ def test_native_stream_chunk_emits_one_dequeue_credit() -> None:
         "  void emit_stream_ended(", loop_start
     )
     loop_source = WORKER_PROTOCOL_SOURCE[loop_start:loop_end]
-    pop = loop_source.index("stream_queue_.pop_front();")
-    response_gate = loop_source.index("command.response_gate.get();")
+    collect_settings = loop_source.index(
+        "settings_request_ids.push_back(std::move(it->request_id));"
+    )
+    latest_settings = loop_source.index(
+        "latest_settings = std::move(it->settings);"
+    )
+    pop_pcm = loop_source.index("stream_queue_.pop_front();")
+    apply_settings = loop_source.index(
+        "backend_.stream_settings(latest_settings, canceled_);"
+    )
+    respond_settings = loop_source.index(
+        "respond_to_active_stream_settings(operation_id,"
+    )
+    response_gate = loop_source.index("command->response_gate.get();")
     credit = loop_source.index(
         'emit_active_stream_event(operation_id, "stream_credit", json::object());'
     )
     inference = loop_source.index(
-        "backend_.stream_chunk(command.audio, canceled_, emit_frame);"
+        "backend_.stream_chunk(command->audio, canceled_, emit_frame);"
     )
-    assert pop < response_gate < credit < inference
+    assert (
+        collect_settings
+        < latest_settings
+        < pop_pcm
+        < apply_settings
+        < respond_settings
+        < response_gate
+        < credit
+        < inference
+    )
+    assert "for (const json& request_id : request_ids)" in WORKER_PROTOCOL_SOURCE
     assert "stream_queue_.push_back(std::move(command));" in WORKER_PROTOCOL_SOURCE
 
 
@@ -304,7 +326,8 @@ def test_native_track_supersedes_old_renders_and_batches_the_publish() -> None:
     assert "if (revision <= latest)" in enqueue_source
     assert "latest_track_revision_.store(revision" in enqueue_source
     assert "track_queue_.erase(it)" in enqueue_source
-    assert "backend_.interrupt_operation();" in enqueue_source
+    assert 'params.at("settings_timeline")' in enqueue_source
+    assert "backend_.interrupt_operation();" not in enqueue_source
 
     loop_start = WORKER_PROTOCOL_SOURCE.index("  void track_loop(")
     loop_end = WORKER_PROTOCOL_SOURCE.index("  void emit_track_ended(", loop_start)
@@ -318,7 +341,23 @@ def test_native_track_supersedes_old_renders_and_batches_the_publish() -> None:
     assert batch < render < response
 
 
-def test_native_cancel_interrupts_interactive_compute_before_waiting() -> None:
+def test_native_track_settings_timeline_expands_recursive_patches() -> None:
+    start = WORKER_PROTOCOL_SOURCE.index(
+        "std::vector<TrackSettingsEntry> parse_settings_timeline("
+    )
+    end = WORKER_PROTOCOL_SOURCE.index("\njson parse_request(", start)
+    source = WORKER_PROTOCOL_SOURCE[start:end]
+    for expression in (
+        'require_exact_keys(entry, {"sample", "settings"});',
+        '"settings_timeline must start at sample 0"',
+        '"settings_timeline samples must be strictly increasing"',
+        "apply_object_patch(settings, patch);",
+        "timeline.push_back(TrackSettingsEntry{sample, settings});",
+    ):
+        assert expression in source
+
+
+def test_native_cancel_cooperatively_stops_the_operation_before_waiting() -> None:
     cancel_start = WORKER_PROTOCOL_SOURCE.index("  void cancel_operation(")
     cancel_end = WORKER_PROTOCOL_SOURCE.index(
         "  void respond_and_release(", cancel_start
@@ -327,16 +366,20 @@ def test_native_cancel_interrupts_interactive_compute_before_waiting() -> None:
     cancel_flag = cancel_source.index(
         "canceled_.store(true, std::memory_order_release);"
     )
-    interrupt = cancel_source.index("backend_.interrupt_operation();")
+    notify = cancel_source.index("operation_condition_.notify_all();")
     response = cancel_source.index("respond_and_release(request_id, response_gate);")
-    assert cancel_flag < interrupt < response
+    assert cancel_flag < notify < response
+    assert "backend_.interrupt_operation();" not in cancel_source
 
     stop_start = WORKER_PROTOCOL_SOURCE.index("  void stop_operation(")
     stop_source = WORKER_PROTOCOL_SOURCE[stop_start:]
-    assert "backend_.interrupt_operation();" in stop_source
-    assert stop_source.index("backend_.interrupt_operation();") < stop_source.index(
-        "operation_thread_.join();"
+    cancel_flag = stop_source.index(
+        "canceled_.store(true, std::memory_order_release);"
     )
+    notify = stop_source.index("operation_condition_.notify_all();")
+    join = stop_source.index("operation_thread_.join();")
+    assert cancel_flag < notify < join
+    assert "backend_.interrupt_operation();" not in stop_source
 
 
 def test_error_requires_one_exact_shape() -> None:

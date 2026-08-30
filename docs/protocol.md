@@ -1,4 +1,4 @@
-# Worker protocol `audio2face/12`
+# Worker protocol `audio2face/13`
 
 ## Transport
 
@@ -12,10 +12,10 @@ A request, response, request error, and asynchronous event have these exact
 envelopes:
 
 ```json
-{"protocol":"audio2face/12","type":"request","id":"1","method":"hello","params":{}}
-{"protocol":"audio2face/12","type":"response","id":"1","result":{}}
-{"protocol":"audio2face/12","type":"error","id":"1","error":{"code":"invalid_params","message":"invalid request","details":{}}}
-{"protocol":"audio2face/12","type":"event","event":"stream_ended","operation_id":"stream-1","data":{}}
+{"protocol":"audio2face/13","type":"request","id":"1","method":"hello","params":{}}
+{"protocol":"audio2face/13","type":"response","id":"1","result":{}}
+{"protocol":"audio2face/13","type":"error","id":"1","error":{"code":"invalid_params","message":"invalid request","details":{}}}
+{"protocol":"audio2face/13","type":"event","event":"stream_ended","operation_id":"stream-1","data":{}}
 ```
 
 Request IDs and operation IDs are non-empty strings of at most 128 characters.
@@ -33,7 +33,7 @@ persistent Selected track.
 `hello` takes `{}` and returns exactly:
 
 ```json
-{"worker_profile":"nvidia-a2f3-a2e3-gpu-arkit52/12","worker_version":"0.1.0"}
+{"worker_profile":"nvidia-a2f3-a2e3-gpu-arkit52/13","worker_version":"0.1.0"}
 ```
 
 `load_model` takes the two validated absolute top-level descriptors:
@@ -53,7 +53,8 @@ protocol option.
 
 ## Settings document
 
-`stream_start`, `stream_settings`, and `track_render` carry one complete object:
+`stream_start` and `stream_settings` carry one complete object. The first entry
+of a `track_render` settings timeline carries the same complete object:
 
 ```json
 {
@@ -149,9 +150,10 @@ to `[0, 1]`. Timestamps are model-rate sample positions and strictly increase.
 ### `stream_settings`
 
 Parameters are exactly `operation_id` and a complete `settings` document. The
-command is serialized between queued chunks and returns `{}` after applying the
-regular Audio2Face and Audio2Emotion setters. It does not reset executors,
-retain or replay audio, move timestamps, or affect media transport.
+worker coalesces all snapshots pending at the next chunk boundary to their
+newest value, acknowledges every request ID, applies that value once, and then
+services one already-credited PCM command. It does not reset executors, retain
+or replay audio, move timestamps, starve PCM, or affect media transport.
 
 ### `stream_end`
 
@@ -163,14 +165,13 @@ events precede the terminal event.
 
 ### Upload
 
-`track_start` takes `operation_id` and model `sample_rate`, creates the
-interactive executor family, and returns `{}`. `track_chunk` accepts the same
+`track_start` takes `operation_id` and model `sample_rate`, retains the regular
+sequential executor family, and returns `{}`. `track_chunk` accepts the same
 canonical PCM encoding as Stream, with at most 65,536 samples per request and
 at most two maximum blocks queued. Each accepted chunk returns `{}`.
 
-`track_prepare` takes only `operation_id`, installs and closes the complete
-audio input, releases the upload buffer, and returns `{}`. It does not run
-inference or change Blender transport.
+`track_prepare` takes only `operation_id`, marks the complete retained PCM ready,
+and returns `{}`. It does not run inference or change Blender transport.
 
 ### `track_render`
 
@@ -180,23 +181,39 @@ After preparation, the request is exactly:
 {
   "operation_id": "track-1",
   "revision": 7,
-  "settings": {"audio2face": {}, "emotion_driver": {}},
+  "settings_timeline": [
+    {
+      "sample": 0,
+      "settings": {"audio2face": {"...": "complete"}, "emotion_driver": {"...": "complete"}}
+    },
+    {"sample": 16000, "settings": {"audio2face": {"skin_strength": 1.4}}},
+    {"sample": 32000, "settings": {"emotion_driver": {"preferred": null}}}
+  ],
   "preview_sample": 22400
 }
 ```
 
-The abbreviated `settings` above denotes the complete Settings document.
+The abbreviated first `settings` value above denotes the complete Settings
+document. `settings_timeline` is non-empty; every entry has exactly `sample`
+and `settings`. The first sample is 0. Later samples are strictly increasing,
+inside the retained audio, and carry recursive changed-leaf object patches.
+Objects merge recursively, while scalar, array, and null values replace the
+previous value; fields are never deleted. The worker cumulatively expands and
+validates every entry as a complete Settings document. A setting becomes active
+from its sample onward.
+
 `revision` is a strictly increasing positive integer. `preview_sample` is null
 or an in-range non-negative audio sample.
 
-The worker applies settings. When the emotion-driver snapshot changed, it
-computes all Audio2Emotion frames into a timestamped emotion accumulator;
-otherwise it reuses that curve. It then computes all Audio2Face frames. These
-continuous SDK passes preserve temporal smoothing and recurrent state. A
-single-frame SDK call is never used as cache or bake source.
+The worker resets its regular sequential executors, supplies the retained PCM,
+and applies expanded settings as Audio2Emotion and Audio2Face advance through
+the source samples. The continuous pass preserves temporal and recurrent state;
+the worker does not run stateless per-frame inference.
 
-When `preview_sample` is present, the worker linearly samples the completed
-continuous result and emits `track_preview` before transferring cache batches:
+When `preview_sample` is present, the worker linearly samples the continuous
+result and emits `track_preview` as soon as sequential output brackets that
+sample. If the requested sample is later than the final output row, the worker
+uses that last row. Full-track inference continues before cache transfer:
 
 ```json
 {
@@ -234,10 +251,11 @@ precedes its completion response:
 That response is the publication barrier. Blender commits the staged cache
 only when all `frame_count` rows arrived and `superseded` is false.
 
-A newer revision replaces any queued render and interrupts an active
-interactive compute without canceling the resident track. Displaced requests
-receive `{"revision":N,"frame_count":0,"superseded":true}`; stale frame events
-are suppressed or ignored. Cancel is reserved for ending the track.
+A newer revision replaces any queued render. An active render observes the new
+revision between sequential executions and stops cooperatively without
+canceling the resident track. Displaced requests receive
+`{"revision":N,"frame_count":0,"superseded":true}`; stale frame events are
+suppressed or ignored. Cancel is reserved for ending the track.
 
 ## Cancel, shutdown, and errors
 
@@ -251,7 +269,7 @@ emits `track_ended {"reason":"canceled"}`. Unknown or terminal IDs return
 An operation failure is asynchronous:
 
 ```json
-{"protocol":"audio2face/12","type":"event","event":"error","operation_id":"track-1","data":{"code":"inference_failed","message":"operation failed"}}
+{"protocol":"audio2face/13","type":"event","event":"error","operation_id":"track-1","data":{"code":"inference_failed","message":"operation failed"}}
 ```
 
 Validation failures use request error envelopes. Worker codes include

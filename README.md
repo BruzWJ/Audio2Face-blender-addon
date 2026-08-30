@@ -130,17 +130,18 @@ driver caches.
 5. Click **Start Worker**. Blender launches the verified package-local worker,
    negotiates the protocol, and loads both selected models. When the worker,
    models, and Selected WAV source are ready, Blender uploads that source once
-   and keeps its interactive track prepared independently of media playback.
+   and keeps its track prepared independently of media playback.
 6. Configure the saved, animatable **Preferred Emotion** sliders. Any nonzero
    value enables that source; set every value to zero to clear it. **Mixed
    Emotion** is read-only output from Selected WAV frame evaluation or Stream
    input.
 7. In Selected WAV mode, set **First Frame**, then use Blender's Timeline or
    Spacebar transport. Each native frame change samples the corresponding row
-   from the prepared cache and transiently updates matching Shape Keys. Tuning
-   edits revise the cache and update the paused frame without changing media
-   or worker lifecycle. Click **Bake Shape Key Animation** separately when the
-   preview should become native Shape Key Actions.
+   from the prepared cache and transiently updates matching Shape Keys. Model,
+   emotion, and Preferred Emotion keyframes are evaluated over the sound span;
+   edits revise that animated cache without changing media or worker lifecycle.
+   Click **Bake Shape Key Animation** separately when the preview should become
+   native Shape Key Actions.
 8. In Stream mode, the first `push_audio_f32le` call automatically starts the
    inference stream. `end_pcm_stream` marks normal end-of-input after all
    queued chunks. **Stop Worker** exits the child process and releases its
@@ -148,7 +149,7 @@ driver caches.
 
 Installing or enabling the extension does not start the worker. Loading the
 models prepares the GPU/model process but does not start Blender media.
-Selected WAV source readiness creates and retains one interactive track and
+Selected WAV source readiness creates and retains one prepared track and
 its latest complete render; Blender playback merely selects cached samples.
 The first external PCM chunk instead starts a true sequential Stream operation.
 **Start Worker** and **Stop Worker** alone control the GPU/model process
@@ -180,7 +181,7 @@ Blender's Video Sequencer at the saved **First Frame**. The add-on preserves
 unrelated strips and never changes Blender's scene or preview playback range.
 When both the source and loaded models are ready, the add-on decodes,
 downmixes, and resamples the WAV, uploads it once, and prepares a persistent
-interactive track operation.
+track operation.
 
 Blender's Timeline and Spacebar are the only Selected WAV transport controls.
 The strip keeps Blender's native duration, and the scene uses **Sync to Audio**
@@ -190,11 +191,18 @@ cache. Pause freezes it, scrubbing samples it immediately, and a native range
 loop wraps sound and facial values together. The worker has no play, pause,
 loop, or seconds-position state. Frames outside the sound interval are neutral.
 
-Changing model tuning, emotion tuning, or Preferred Emotion starts a newer
-continuous render revision. The older revision is interrupted without
-canceling the resident track; a completed revision is published atomically.
-The requested current-frame sample is emitted from that same continuous result
-before its cache batches, so paused preview and bake remain identical.
+Changing model tuning, emotion tuning, Preferred Emotion, or their keyframes
+starts a newer continuous render revision. Blender sends the values evaluated
+at native frames as one sample-based settings timeline. Editing an Action
+invalidates and rebuilds the complete schedule before transport is involved, so
+future FCurve edits are included even when the current value is unchanged. A
+newer revision supersedes older work without canceling the resident track, and
+a completed revision is published atomically; native playback keeps sampling
+the prior complete cache while that work runs. Edits made during playback or a
+bake stay pending until it stops, avoiding a hidden full-timeline seek inside
+native transport. The requested current-frame sample is emitted from the new
+continuous result before its cache batches, so paused preview and bake remain
+identical.
 
 **Bake Shape Key Animation** is asynchronous and separate from playback. From
 the native sound-strip start through its inclusive end, it samples the same
@@ -225,11 +233,13 @@ zero clears it. **Mixed Emotion** is transient, read-only output from Selected
 WAV frame evaluation and external Stream input, and never overwrites Preferred
 values.
 
-In Selected WAV mode, edits revise the continuous render and update the current
-frame whether playback is running or paused. In Stream mode, emotion,
-Preferred, and model-tuning edits update the live executors in place; they do
-not reset inference, replay PCM, or restart the worker. Exact settings fields
-and ranges are in the
+In Selected WAV mode, Blender evaluates the rendered animated settings on
+native frames. Paused edits revise the continuous cache and update the current
+frame; edits authored during playback are retained and rendered after it stops,
+without interrupting the active cache. In Stream mode, frame-evaluated emotion,
+Preferred, and model-tuning changes update the live executors in place before
+subsequent PCM; they do not reset inference, replay PCM, or restart the worker.
+Exact settings fields and ranges are in the
 [protocol](docs/protocol.md#settings-document).
 
 ## Output contract

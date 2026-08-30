@@ -31,7 +31,7 @@ WorkerError::WorkerError(std::string code, std::string message, json details)
 
 namespace {
 
-constexpr const char* kProtocol = "audio2face/12";
+constexpr const char* kProtocol = "audio2face/13";
 constexpr std::size_t kMaximumRequestBytes = 1024U * 1024U;
 constexpr std::size_t kStreamQueueSeconds = 4;
 constexpr std::size_t kMaximumTrackChunkSamples = 64U * 1024U;
@@ -126,6 +126,21 @@ std::int64_t required_nonnegative_int64(const json& value,
   return parsed;
 }
 
+std::uint64_t required_nonnegative_uint64(const json& value,
+                                          const char* name) {
+  if (!value.is_number_integer()) {
+    throw WorkerError("invalid_params",
+                      std::string(name) + " must be a JSON integer");
+  }
+  if (value.is_number_unsigned()) return value.get<std::uint64_t>();
+  const std::int64_t parsed = value.get<std::int64_t>();
+  if (parsed < 0) {
+    throw WorkerError("invalid_params",
+                      std::string(name) + " must be non-negative");
+  }
+  return static_cast<std::uint64_t>(parsed);
+}
+
 std::uint64_t required_positive_revision(const json& value) {
   const std::int64_t revision =
       required_nonnegative_int64(value, "revision");
@@ -166,6 +181,66 @@ void require_exact_keys(
   if (!valid) {
     throw WorkerError(code, message, {{"expected", std::move(names)}});
   }
+}
+
+void apply_object_patch(json& target, const json& patch) {
+  for (auto item = patch.begin(); item != patch.end(); ++item) {
+    const std::string& name = item.key();
+    const json& value = item.value();
+    if (value.is_object() && target.contains(name) &&
+        target.at(name).is_object()) {
+      apply_object_patch(target[name], value);
+    } else {
+      target[name] = value;
+    }
+  }
+}
+
+std::vector<TrackSettingsEntry> parse_settings_timeline(const json& value) {
+  if (!value.is_array() || value.empty()) {
+    throw WorkerError("invalid_params",
+                      "settings_timeline must be a non-empty array");
+  }
+  std::vector<TrackSettingsEntry> timeline;
+  timeline.reserve(value.size());
+  json settings;
+  std::uint64_t previous_sample = 0;
+  for (std::size_t index = 0; index < value.size(); ++index) {
+    const json& entry = value.at(index);
+    if (!entry.is_object()) {
+      throw WorkerError("invalid_params",
+                        "settings_timeline entries must be objects",
+                        {{"index", index}});
+    }
+    require_exact_keys(entry, {"sample", "settings"});
+    const std::string sample_name =
+        "settings_timeline[" + std::to_string(index) + "].sample";
+    const std::uint64_t sample =
+        required_nonnegative_uint64(entry.at("sample"), sample_name.c_str());
+    if ((index == 0 && sample != 0) ||
+        (index != 0 && sample <= previous_sample)) {
+      throw WorkerError(
+          "invalid_params",
+          index == 0
+              ? "settings_timeline must start at sample 0"
+              : "settings_timeline samples must be strictly increasing",
+          {{"index", index}, {"sample", sample}});
+    }
+    const json& patch = entry.at("settings");
+    if (!patch.is_object()) {
+      throw WorkerError("invalid_params",
+                        "settings_timeline settings must be objects",
+                        {{"index", index}});
+    }
+    if (index == 0) {
+      settings = patch;
+    } else {
+      apply_object_patch(settings, patch);
+    }
+    timeline.push_back(TrackSettingsEntry{sample, settings});
+    previous_sample = sample;
+  }
+  return timeline;
 }
 
 json parse_request(const std::string& line) {
@@ -296,7 +371,7 @@ struct TrackCommand {
   json request_id;
   std::vector<float> audio;
   std::uint64_t revision{0};
-  json settings;
+  std::vector<TrackSettingsEntry> settings_timeline;
   std::optional<std::int64_t> preview_sample;
 };
 
@@ -397,7 +472,7 @@ class Server {
     if (method == "hello") {
       require_exact_keys(params, {});
       emitter_.response(
-          id, {{"worker_profile", "nvidia-a2f3-a2e3-gpu-arkit52/12"},
+          id, {{"worker_profile", "nvidia-a2f3-a2e3-gpu-arkit52/13"},
                {"worker_version", A2F_WORKER_VERSION}});
       negotiated_ = true;
       return;
@@ -674,11 +749,8 @@ class Server {
   void enqueue_track_render(const json& request_id, const json& params) {
     require_exact_keys(
         params,
-        {"operation_id", "revision", "settings", "preview_sample"});
+        {"operation_id", "revision", "settings_timeline", "preview_sample"});
     const std::string operation_id = required_operation_id(params);
-    if (!params.at("settings").is_object()) {
-      throw WorkerError("invalid_params", "settings must be an object");
-    }
     std::optional<std::int64_t> preview_sample;
     if (!params.at("preview_sample").is_null()) {
       preview_sample = required_nonnegative_int64(
@@ -691,7 +763,7 @@ class Server {
         request_id,
         {},
         revision,
-        params.at("settings"),
+        parse_settings_timeline(params.at("settings_timeline")),
         preview_sample};
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
@@ -718,10 +790,6 @@ class Server {
         it = track_queue_.erase(it);
       }
       track_queue_.push_back(std::move(command));
-      // Keep the operation-state lock through Interrupt. Otherwise the worker
-      // thread could begin the newer render in the gap and receive the old
-      // render's interruption.
-      backend_.interrupt_operation();
     }
     operation_condition_.notify_one();
   }
@@ -744,7 +812,6 @@ class Server {
       canceled_.store(true, std::memory_order_release);
     }
     operation_condition_.notify_all();
-    backend_.interrupt_operation();
     respond_and_release(request_id, response_gate);
   }
 
@@ -778,7 +845,7 @@ class Server {
   }
 
   void respond_to_active_stream_settings(const std::string& operation_id,
-                                          const json& request_id) {
+                                          const std::vector<json>& request_ids) {
     std::lock_guard<std::mutex> lock(state_mutex_);
     if (canceled_.load(std::memory_order_acquire)) {
       throw WorkerError("canceled", "Stream was stopped");
@@ -788,7 +855,9 @@ class Server {
       throw WorkerError("operation_not_found", "The stream is no longer active",
                         {{"operation_id", operation_id}});
     }
-    emitter_.response(request_id, json::object());
+    for (const json& request_id : request_ids) {
+      emitter_.response(request_id, json::object());
+    }
   }
 
   void respond_to_track_render(const std::string& operation_id,
@@ -861,7 +930,9 @@ class Server {
     };
     try {
       while (true) {
-        StreamCommand command;
+        std::optional<StreamCommand> command;
+        std::vector<json> settings_request_ids;
+        json latest_settings;
         {
           std::unique_lock<std::mutex> lock(state_mutex_);
           operation_condition_.wait(lock, [this] {
@@ -869,23 +940,32 @@ class Server {
                    !stream_queue_.empty();
           });
           if (canceled_.load(std::memory_order_acquire)) break;
-          command = std::move(stream_queue_.front());
-          stream_queue_.pop_front();
-          stream_queued_samples_ -= command.audio.size();
+          for (auto it = stream_queue_.begin(); it != stream_queue_.end();) {
+            if (it->kind != StreamCommand::Kind::Settings) {
+              ++it;
+              continue;
+            }
+            settings_request_ids.push_back(std::move(it->request_id));
+            latest_settings = std::move(it->settings);
+            it = stream_queue_.erase(it);
+          }
+          if (!stream_queue_.empty()) {
+            command.emplace(std::move(stream_queue_.front()));
+            stream_queue_.pop_front();
+            stream_queued_samples_ -= command->audio.size();
+          }
         }
-        if (command.kind != StreamCommand::Kind::Settings) {
-          command.response_gate.get();
-          if (canceled_.load(std::memory_order_acquire)) break;
-        }
-        if (command.kind == StreamCommand::Kind::Chunk) {
-          emit_active_stream_event(operation_id, "stream_credit", json::object());
-          backend_.stream_chunk(command.audio, canceled_, emit_frame);
-          continue;
-        }
-        if (command.kind == StreamCommand::Kind::Settings) {
-          backend_.stream_settings(command.settings, canceled_);
+        if (!settings_request_ids.empty()) {
+          backend_.stream_settings(latest_settings, canceled_);
           respond_to_active_stream_settings(operation_id,
-                                            command.request_id);
+                                            settings_request_ids);
+        }
+        if (!command.has_value()) continue;
+        command->response_gate.get();
+        if (canceled_.load(std::memory_order_acquire)) break;
+        if (command->kind == StreamCommand::Kind::Chunk) {
+          emit_active_stream_event(operation_id, "stream_credit", json::object());
+          backend_.stream_chunk(command->audio, canceled_, emit_frame);
           continue;
         }
         backend_.stream_end(canceled_, emit_frame);
@@ -1010,7 +1090,7 @@ class Server {
               };
           const std::size_t frame_count = backend_.track_render(
               TrackRenderRequest{command.revision,
-                                 std::move(command.settings),
+                                 std::move(command.settings_timeline),
                                  command.preview_sample},
               canceled_, latest_track_revision_, emit_preview, emit_cache);
           respond_to_track_render(operation_id, command.request_id,
@@ -1169,7 +1249,6 @@ class Server {
   void stop_operation() {
     if (operation_thread_.joinable()) {
       canceled_.store(true, std::memory_order_release);
-      backend_.interrupt_operation();
       operation_condition_.notify_all();
       operation_thread_.join();
     }

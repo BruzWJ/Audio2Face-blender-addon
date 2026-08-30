@@ -244,7 +244,9 @@ def _audio_first_frame_updated(
         return
     if _configure_selected_audio_timeline(settings, scene) is None:
         return
-    get_controller().request_selected_frame(scene)
+    controller = get_controller()
+    controller.refresh_inference_settings(scene, rebuild_selected=True)
+    controller.request_selected_frame(scene)
 
 
 def _selected_frame_mapping_updated(

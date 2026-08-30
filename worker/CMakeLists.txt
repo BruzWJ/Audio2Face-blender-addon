@@ -49,6 +49,23 @@ if(NOT EXISTS "${_a2f_nlohmann_include}/nlohmann/json.hpp" OR
   message(FATAL_ERROR
     "Audio2Face-3D-SDK 1.0.0 did not resolve nlohmann/json.hpp")
 endif()
+set(_a2f_refl_include
+  "${A2F_SDK_SOURCE_DIR}/_deps/target-deps/refl-cpp/include")
+if(NOT EXISTS "${_a2f_refl_include}/refl.hpp" OR
+   IS_DIRECTORY "${_a2f_refl_include}/refl.hpp")
+  message(FATAL_ERROR
+    "Audio2Face-3D-SDK 1.0.0 did not resolve refl.hpp")
+endif()
+set(_a2f_cuda_include "${CUDAToolkit_ROOT}/include")
+if(NOT EXISTS "${_a2f_cuda_include}/cublas_v2.h" OR
+   IS_DIRECTORY "${_a2f_cuda_include}/cublas_v2.h")
+  message(FATAL_ERROR "Pinned CUDA toolkit did not resolve cublas_v2.h")
+endif()
+set(_a2f_tensorrt_include "${TENSORRT_ROOT_DIR}/include")
+if(NOT EXISTS "${_a2f_tensorrt_include}/NvInfer.h" OR
+   IS_DIRECTORY "${_a2f_tensorrt_include}/NvInfer.h")
+  message(FATAL_ERROR "Pinned TensorRT did not resolve NvInfer.h")
+endif()
 
 set(A2F_RUNTIME_OUTPUT_DIR "" CACHE PATH
   "Final platform runtime directory populated by the release builder")
@@ -66,6 +83,9 @@ target_compile_definitions(audio2face_worker PRIVATE
 )
 target_include_directories(audio2face_worker PRIVATE
   "${_a2f_nlohmann_include}"
+  "${_a2f_refl_include}"
+  "${_a2f_cuda_include}"
+  "${_a2f_tensorrt_include}"
 )
 target_link_libraries(audio2face_worker PRIVATE
   audio2x)

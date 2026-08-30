@@ -43,6 +43,9 @@ def _assert_native_transport_handlers(runtime: object) -> None:
 
     assert owned(bpy.app.handlers.animation_playback_pre) == ()
     assert owned(bpy.app.handlers.animation_playback_post) == ()
+    assert owned(bpy.app.handlers.depsgraph_update_post) == (
+        runtime._depsgraph_update_post_handler,
+    )
     assert owned(bpy.app.handlers.frame_change_post) == (
         runtime._frame_change_post_handler,
     )

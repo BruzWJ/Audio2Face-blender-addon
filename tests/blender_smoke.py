@@ -111,6 +111,10 @@ def _assert_native_transport_handlers(*, registered: bool) -> None:
     assert owned(bpy.app.handlers.animation_playback_post) == ()
     expected = (runtime._frame_change_post_handler,) if registered else ()
     assert owned(bpy.app.handlers.frame_change_post) == expected
+    expected_depsgraph = (
+        (runtime._depsgraph_update_post_handler,) if registered else ()
+    )
+    assert owned(bpy.app.handlers.depsgraph_update_post) == expected_depsgraph
 
 
 def _make_shape_key_target(
@@ -452,6 +456,82 @@ def main() -> None:
             controller.refresh_inference_settings = original_refresh
         for item, expected in zip(settings.preferred_emotions, (0.6, 0.5)):
             _assert_close(item.value, expected, label=f"authored {item.name}")
+
+        animated_values = ((7, (0.25, 0.2, 0.1)), (9, (1.75, 1.2, 0.9)))
+        preferred_joy = settings.preferred_emotions[1]
+        original_values = (
+            settings.input_mode,
+            settings.skin_strength,
+            settings.a2e_emotion_strength,
+            preferred_joy.value,
+        )
+        preferred_path = preferred_joy.path_from_id("value")
+        keyed_paths = (
+            "audio2face.skin_strength",
+            "audio2face.a2e_emotion_strength",
+            preferred_path,
+        )
+        for frame, values in animated_values:
+            settings.skin_strength, settings.a2e_emotion_strength = values[:2]
+            preferred_joy.value = values[2]
+            for data_path in keyed_paths:
+                scene.keyframe_insert(data_path=data_path, frame=frame)
+
+        action_invalidation = Mock()
+        original_invalidation = controller.invalidate_selected_settings
+        controller.invalidate_selected_settings = action_invalidation
+        try:
+            action = scene.animation_data.action
+            action_slot = scene.animation_data.action_slot
+            skin_curve = None
+            for layer in action.layers:
+                for strip in layer.strips:
+                    channelbag = strip.channelbag(action_slot)
+                    if channelbag is not None:
+                        skin_curve = channelbag.fcurves.find(keyed_paths[0])
+                    if skin_curve is not None:
+                        break
+                if skin_curve is not None:
+                    break
+            assert skin_curve is not None
+            skin_curve.keyframe_points[0].interpolation = "LINEAR"
+            skin_curve.update()
+            bpy.context.view_layer.update()
+            action_invalidation.assert_called_with(scene)
+        finally:
+            controller.invalidate_selected_settings = original_invalidation
+
+        evaluated_settings: list[dict[str, object]] = []
+        settings.input_mode = "STREAM"
+        controller.refresh_inference_settings = lambda evaluated_scene: (
+            evaluated_settings.append(inference_settings(evaluated_scene.audio2face))
+        )
+        try:
+            for frame, expected in animated_values:
+                evaluated_settings.clear()
+                scene.frame_set(frame)
+                bpy.context.view_layer.update()
+                assert evaluated_settings
+                payload = evaluated_settings[-1]
+                actual = (
+                    payload["audio2face"]["skin_strength"],
+                    payload["emotion_driver"]["emotion_strength"],
+                    payload["emotion_driver"]["preferred"]["values"]["Joy"],
+                )
+                for value, wanted, label in zip(
+                    actual,
+                    expected,
+                    ("Skin Strength", "Emotion Strength", "Preferred Joy"),
+                    strict=True,
+                ):
+                    _assert_close(value, wanted, label=f"animated {label} at {frame}")
+        finally:
+            controller.refresh_inference_settings = original_refresh
+            scene.animation_data_clear()
+            settings.input_mode = original_values[0]
+            settings.skin_strength, settings.a2e_emotion_strength = original_values[1:3]
+            preferred_joy.value = original_values[3]
+
         apply_mixed_emotions(
             settings,
             ("Neutral", "Joy"),
@@ -575,6 +655,7 @@ def main() -> None:
             controller.active_stream = runtime.ActiveStream(
                 operation_id=routed_operation,
                 scene_name=scene.name,
+                submitted_settings=inference_settings(settings),
             )
             streamed_frame = [0.0] * len(MODEL_CHANNELS)
             streamed_frame[MODEL_CHANNELS.index("jawOpen")] = 0.375

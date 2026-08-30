@@ -76,10 +76,15 @@ def test_worker_reports_exact_model_owned_audio2face_defaults() -> None:
 
 
 def test_audio2emotion_output_matches_the_effective_emotion_schema() -> None:
-    setup = SOURCE[SOURCE.index("emotion_model_info_ = require_sdk_ptr") :]
-    setup = setup[: setup.index("Installing interactive Audio2Emotion callback")]
-    assert "GetNetworkInfo().GetEmotionsCount()" not in setup
-    assert "interactive_emotion_executor_->GetEmotionsSize() !=" in setup
+    setup = re.search(
+        r"  void ensure_stream_executors\(\).*?(?=\n  void require_model_locked\()",
+        SOURCE,
+        flags=re.DOTALL,
+    )
+    assert setup is not None
+    setup_source = setup.group(0)
+    assert "GetNetworkInfo().GetEmotionsCount()" not in setup_source
+    assert "emotion_executor_->GetEmotionsSize() !=" in setup_source
     assert "results.emotions.Size() != capture.emotion_count" in SOURCE
 
 
@@ -148,27 +153,28 @@ def test_stream_snapshot_validates_and_applies_exact_skin_eyes_controls() -> Non
     assert found_ranges == expected_ranges
 
     configure = re.search(
-        r"  void configure_interactive_audio2face\(.*?"
-        r"(?=\n  void configure_interactive_generated_emotion\()",
-        SOURCE,
-        flags=re.DOTALL,
+        r"  void configure_audio2face_input\(.*?"
+        r"(?=\n  void configure_stream_emotion\()", SOURCE, flags=re.DOTALL
     )
     assert configure is not None
-    for setter in (
-        "nva2f::SetInteractiveExecutorInputStrength(",
-        "nva2f::SetInteractiveExecutorSkinParameters(",
-        "nva2f::SetInteractiveExecutorEyesParameters(",
+    configure_source = configure.group(0)
+    for expression in (
+        "IFaceExecutorAccessorInputStrength",
+        "IFaceExecutorAccessorSkinParameters",
+        "IFaceExecutorAccessorEyesParameters",
+        "accessor.SetInputStrength(input_strength)",
+        "skin.Set(0, settings.skin)",
+        "eyes.Set(0, settings.eyes)",
+        "configure_audio2face_input(settings.input_strength);",
+        "configure_audio2face_postprocess(settings);",
     ):
-        assert setter in configure.group(0)
+        assert expression in configure_source
     assert "SetExecutorTongueParameters" not in SOURCE
     assert "SetExecutorTeethParameters" not in SOURCE
 
 
 def test_output_keeps_model_order_and_named_eye_resolution() -> None:
-    assert (
-        "interactive_executor_->GetWeightCount() != kArkit52ChannelCount"
-        in SOURCE
-    )
+    assert "stream_executor.GetWeightCount() != kArkit52ChannelCount" in SOURCE
     assert "copy_finite_values(\n        *pending.weights" in SOURCE
     assert not re.search(r"weights\[\d+\]\s*=", SOURCE)
     resolver = re.search(
@@ -182,52 +188,10 @@ def test_output_keeps_model_order_and_named_eye_resolution() -> None:
 
 def test_stream_frames_carry_the_model_channel_order() -> None:
     assert '{"channels", std::move(output_channels)}' in SOURCE
-    assert "capture.weight_count = interactive_executor_->GetWeightCount()" in SOURCE
     assert "capture.weight_count = executor().GetWeightCount()" in SOURCE
     assert "capture.emotion_count = emotion_channels_.size()" in SOURCE
     assert "copy_finite_values(\n        *pending.weights" in SOURCE
-    assert "interactive_effective_emotions_" in SOURCE
     assert "frame_callback(make_stream_frame(" in SOURCE
-
-
-def test_interactive_arkit_solve_initializes_all_sdk_postprocessors() -> None:
-    assert "constexpr std::size_t kDefaultIdentityIndex = 0" in SOURCE
-    assert "ReadDiffusionBlendshapeSolveExecutorBundle(" in SOURCE
-    assert "&geometry_model_info" in SOURCE
-    assert "&blendshape_model_info" in SOURCE
-    assert "ExecutionOption::All" in SOURCE
-    assert "ExecutionOption::Skin |" in SOURCE
-    interactive_setup = SOURCE[SOURCE.index("  void ensure_interactive_executors()") :]
-    interactive_setup = interactive_setup[: interactive_setup.index("  void require_model_locked()")]
-    assert "ExecutionOption::All" in interactive_setup
-    assert "ExecutionOption::Skin," in interactive_setup
-    assert "blendshape_parameters.initializationSkinParams" in SOURCE
-    assert "kDefaultIdentityIndex, true" in SOURCE
-    assert "CreateDeviceBlendshapeSolveInteractiveExecutor(" in SOURCE
-
-
-def test_callbacks_follow_the_sdk_result_stream_contract() -> None:
-    geometry_callback = SOURCE.index("SetInteractiveExecutorGeometryResultsCallback(")
-    weights_callback = SOURCE.index("interactive_executor_->SetResultsCallback(")
-    emotions_callback = SOURCE.index(
-        "interactive_emotion_executor_->SetResultsCallback("
-    )
-    assert geometry_callback < weights_callback < emotions_callback
-    assert "results.eyesRotation, results.eyesCudaStream" in SOURCE
-    assert "results.emotions, results.cudaStream" in SOURCE
-    assert "results.weights, results.cudaStream" in SOURCE
-    assert "results.eyesCudaStream !=" not in SOURCE
-    assert "results.emotions.Size() != capture.emotion_count" in SOURCE
-    assert "results.cudaStream !=" not in SOURCE
-
-
-def test_interactive_audio2emotion_matches_the_one_track_engine_profile() -> None:
-    creation = re.search(
-        r"CreateClassifierEmotionInteractiveExecutor\(\s*"
-        r"emotion_parameters, classifier_parameters, 1\)",
-        SOURCE,
-    )
-    assert creation is not None
 
 
 def test_worker_uses_one_compositional_emotion_driver() -> None:
@@ -241,41 +205,33 @@ def test_worker_uses_one_compositional_emotion_driver() -> None:
     assert "#include <variant>" not in SOURCE
     assert not re.search(r"(?:Manual|Automatic)EmotionDriver", SOURCE)
 
-    prepare = SOURCE[SOURCE.index("  bool prepare_interactive_settings(") :]
-    prepare = prepare[: prepare.index("  static std::vector<float> copy_finite_values(")]
-    assert "const bool generated = parsed.emotion_driver.generated.has_value();" in prepare
-    assert "if (generated)" in prepare
-    assert "install_interactive_driver_emotions();" in prepare
-    driver = SOURCE[SOURCE.index("  void install_interactive_driver_emotions(") :]
-    driver = driver[: driver.index("  void configure_interactive_generated_emotion(")]
-    assert "emotion(emotion_channels_.size(), 0.0F)" in driver
-    assert "interactive_emotion_driver_.emotion_strength *" in driver
-
     configure = re.search(
-        r"  void configure_interactive_generated_emotion\(.*?"
-        r"(?=\n  static bool render_is_superseded\()",
+        r"  void configure_stream_emotion\(.*?"
+        r"(?=\n  static std::size_t settings_index_at\()",
         SOURCE,
         flags=re.DOTALL,
     )
     assert configure is not None
     configure_source = configure.group(0)
     for expression in (
-        "nva2e::GetInteractiveExecutorPostProcessParameters",
-        "interactive_emotion_driver_.generated.value()",
+        "emotion_postprocess_accessor()",
+        "settings.generated",
         "parameters.emotionStrength",
         "parameters.emotionContrast",
         "parameters.maxEmotions",
         "parameters.liveBlendCoef",
         "parameters.liveTransitionTime",
         "parameters.enablePreferredEmotion",
-        "interactive_emotion_driver_.preferred.has_value()",
+        "settings.preferred.has_value()",
         "parameters.preferredEmotionStrength",
         "parameters.preferredEmotion =",
-        "*interactive_emotion_driver_.preferred",
+        "*settings.preferred",
         "preferred.values.data()",
-        "nva2e::SetInteractiveExecutorPostProcessParameters",
+        "accessor.Get(0, parameters)",
+        "accessor.Set(0, parameters)",
     ):
         assert expression in configure_source
+    assert "value * preferred.strength" in configure_source
 
     assert '{"audio2face", "emotion_driver"}' in SOURCE
     assert '{"emotion_strength", "generated", "preferred"}' in SOURCE
@@ -310,7 +266,7 @@ def test_stream_uses_incremental_regular_executors() -> None:
     assert begin is not None
     begin_source = begin.group(0)
     assert "ensure_stream_executors();" in begin_source
-    assert "reset_stream_inference(settings);" in begin_source
+    assert "reset_stream_inference(parse_settings(settings));" in begin_source
 
     chunk = re.search(
         r"  void stream_chunk\(.*?(?=\n  void stream_end\()",
@@ -324,7 +280,7 @@ def test_stream_uses_incremental_regular_executors() -> None:
     assert "interactive" not in chunk_source
     drain = re.search(
         r"  void drain_interleaved_ready\(.*?"
-        r"(?=\n  void execute_generated_emotion_once\()",
+        r"(?=\n  std::size_t execute_generated_emotion_once\()",
         SOURCE,
         flags=re.DOTALL,
     )
@@ -349,55 +305,28 @@ def test_stream_settings_update_executors_without_reset_or_audio_replay() -> Non
         assert removed not in update_source
 
 
-def test_track_start_swaps_to_the_interactive_executor_family() -> None:
+def test_track_reuses_regular_executors_and_retains_uploaded_audio() -> None:
     track_start = SOURCE[SOURCE.index("  void track_start(") :]
     track_start = track_start[: track_start.index("  void track_chunk(")]
-    assert track_start.index("clear_stream_executors();") < track_start.index(
-        "ensure_interactive_executors();"
-    )
+    assert "ensure_stream_executors();" in track_start
 
-def test_track_path_uses_supported_interactive_setters_and_closed_inputs() -> None:
-    for expression in (
-        "CreateDiffusionGeometryInteractiveExecutor(",
-        "CreateDeviceBlendshapeSolveInteractiveExecutor(",
-        "CreateClassifierEmotionInteractiveExecutor(",
-        "SetInteractiveExecutorInputStrength(",
-        "SetInteractiveExecutorSkinParameters(",
-        "SetInteractiveExecutorEyesParameters(",
-        "SetInteractiveExecutorPostProcessParameters(",
-        "interactive_audio_accumulator_->Close()",
-        "interactive_emotion_accumulator_->Close()",
-        "executor.ComputeAllFrames()",
-        "generate_interactive_emotions(revision, canceled",
-        "active_interactive_compute_->Interrupt()",
-        '"Synchronizing streaming audio upload"',
-        '"Synchronizing interactive audio upload"',
-        '"Synchronizing constant interactive emotions"',
+    track_chunk = SOURCE[SOURCE.index("  void track_chunk(") :]
+    track_chunk = track_chunk[: track_chunk.index("  void track_prepare(")]
+    assert "track_audio_.insert(" in track_chunk
+
+    track_prepare = SOURCE[SOURCE.index("  void track_prepare(") :]
+    track_prepare = track_prepare[: track_prepare.index("  std::size_t track_render(")]
+    assert "track_audio_samples_ = track_audio_.size();" in track_prepare
+    for obsolete in (
+        "clear_stream_executors",
+        "interactive",
+        "accumulate_audio",
+        "ComputeAllFrames",
     ):
-        assert expression in SOURCE
-    assert "ComputeFrame" not in SOURCE
+        assert obsolete not in track_start + track_prepare
 
 
-def test_track_render_builds_one_continuous_timestamped_cache() -> None:
-    prepare = re.search(
-        r"  void track_prepare\(.*?(?=\n  std::size_t track_render\()",
-        SOURCE,
-        flags=re.DOTALL,
-    )
-    assert prepare is not None
-    prepare_source = prepare.group(0)
-    assert "refill_interactive_audio(track_audio_);" in prepare_source
-    assert "install_constant_interactive_emotions(" not in prepare_source
-    assert "ComputeFrame" not in prepare_source
-
-    track = re.search(
-        r"  std::size_t track_render\(.*?(?=\n  void interrupt_operation\()",
-        SOURCE,
-        flags=re.DOTALL,
-    )
-    assert track is not None
-    assert "compute_track_render(request, canceled, latest_revision" in track.group(0)
-
+def test_track_render_replays_audio_with_sample_scheduled_settings() -> None:
     render = re.search(
         r"  std::size_t compute_track_render\(.*?(?=\n  void accumulate_audio\()",
         SOURCE,
@@ -405,27 +334,55 @@ def test_track_render_builds_one_continuous_timestamped_cache() -> None:
     )
     assert render is not None
     source = render.group(0)
-    assert "prepare_interactive_settings(request.settings, request.revision" in source
-    assert "compute_interactive(*interactive_executor_, canceled," in source
-    assert "candidate.reserve(capture.frames.size());" in source
-    assert "preview(sample_track_frames(candidate, *request.preview_sample));" in source
-    assert "cache(candidate);" in source
-    assert "return superseded() ? 0 : candidate.size();" in source
+    for expression in (
+        "for (const TrackSettingsEntry& entry : request.settings_timeline)",
+        "reset_stream_inference(settings_timeline.front().settings);",
+        "accumulate_audio(track_audio_.data(), track_audio_.size());",
+        "bundle_->GetAudioAccumulator(0).Close()",
+        "advance_face_input_settings(settings_schedule, timestamp);",
+        "advance_face_postprocess_settings(settings_schedule, timestamp);",
+        "advance_emotion_postprocess_settings(settings_schedule, timestamp);",
+        "nva2x::GetNbReadyTracks(executor())",
+        "nva2x::GetNbReadyTracks(*emotion_executor_)",
+        "bool preview_emitted = false;",
+        "frame.timestamp_sample >= *request.preview_sample",
+        "preview(sample_track_frames(candidate, *request.preview_sample));",
+        "preview_emitted = true;",
+        "if (request.preview_sample && !preview_emitted)",
+        "cache(candidate);",
+        "return superseded() ? 0 : candidate.size();",
+    ):
+        assert expression in source
+    assert source.count(
+        "preview(sample_track_frames(candidate, *request.preview_sample));"
+    ) == 2
+    for obsolete in ("interactive", "ComputeAllFrames", "Interrupt("):
+        assert obsolete not in source
 
-    assert "emotion_settings == interactive_emotion_settings_" in SOURCE
-    assert "interactive_emotions_valid_ = true;" in SOURCE
 
-
-def test_generated_emotion_is_a_continuous_timestamped_pass() -> None:
-    emotion = re.search(
-        r"  bool generate_interactive_emotions\(.*?"
-        r"(?=\n  static std::vector<float> interpolate_values\()",
+def test_animated_postprocessing_advances_at_sdk_frame_callbacks() -> None:
+    geometry = re.search(
+        r"  static bool geometry_callback\(.*?(?=\n  static bool weights_callback\()",
         SOURCE,
         flags=re.DOTALL,
     )
+    emotion = re.search(
+        r"  static bool generated_emotion_callback\(.*?"
+        r"(?=\n  static void effective_emotions_callback\()",
+        SOURCE,
+        flags=re.DOTALL,
+    )
+    assert geometry is not None
     assert emotion is not None
-    source = emotion.group(0)
-    assert "compute_interactive(*interactive_emotion_executor_" in source
-    assert "interactive_emotion_accumulator_->Close()" in source
-    assert "for (auto& [timestamp, frame] : emotion_frames)" in source
-    assert "interactive_effective_emotions_.swap(effective_emotions);" in source
+    assert (
+        "advance_face_postprocess_settings(\n"
+        "            *capture.settings_schedule, results.timeStampNextFrame);"
+        in geometry.group(0)
+    )
+    assert (
+        "advance_emotion_postprocess_settings(\n"
+        "            *capture.settings_schedule, results.timeStampNextFrame);"
+        in emotion.group(0)
+    )
+    assert "capture.callback_error = std::current_exception();" in geometry.group(0)
+    assert "capture.callback_error = std::current_exception();" in emotion.group(0)

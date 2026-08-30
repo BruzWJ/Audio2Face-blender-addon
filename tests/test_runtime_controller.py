@@ -52,6 +52,21 @@ def _inference_settings_payload() -> dict[str, object]:
     }
 
 
+def _settings_with_skin(settings: _Settings) -> dict[str, object]:
+    payload = _inference_settings_payload()
+    payload["audio2face"]["skin_strength"] = settings.skin_strength
+    return payload
+
+
+def _timeline(
+    runtime: ModuleType,
+    settings: dict[str, object] | None = None,
+) -> object:
+    return runtime._settings_timeline(
+        [(0, _inference_settings_payload() if settings is None else settings)]
+    )
+
+
 def _model_schema() -> dict[str, object]:
     return {
         "channels": list(MODEL_CHANNELS),
@@ -87,16 +102,21 @@ class _Scene:
         self.frame_start = 1
         self.frame_end = 250
         self.frame_current = 1
+        self.frame_subframe = 0.0
         self.render = SimpleNamespace(fps=24, fps_base=1.0)
         self.sequence_editor = SimpleNamespace(strips=[])
-        self.frame_set_calls: list[int] = []
+        self.animation_data = None
+        self.frame_set_calls: list[tuple[int, float]] = []
+        self.frame_evaluator = lambda _frame: None
 
     def as_pointer(self) -> int:
         return id(self)
 
-    def frame_set(self, frame: int) -> None:
+    def frame_set(self, frame: int, *, subframe: float = 0.0) -> None:
         self.frame_current = frame
-        self.frame_set_calls.append(frame)
+        self.frame_subframe = subframe
+        self.frame_set_calls.append((frame, subframe))
+        self.frame_evaluator(frame)
 
 
 class _SoundStrip(dict[str, str]):
@@ -222,6 +242,7 @@ def runtime_module(monkeypatch: pytest.MonkeyPatch) -> tuple[ModuleType, ModuleT
             persistent=lambda callback: callback,
             animation_playback_pre=[],
             animation_playback_post=[],
+            depsgraph_update_post=[],
             frame_change_post=[],
             load_pre=[],
             load_post=[],
@@ -302,6 +323,7 @@ def _activate_stream(
     stream = runtime.ActiveStream(
         operation_id=operation_id,
         scene_name=scene.name,
+        submitted_settings=_inference_settings_payload(),
         prebuffer_samples=prebuffer_samples,
         stop_requested=stop_requested,
         worker_ended=worker_ended,
@@ -329,8 +351,10 @@ def _activate_bake(
             for item in scene.audio2face.target_objects
             if item.object is not None
         ),
-        settings=_inference_settings_payload(),
-        prediction_delay=float(scene.audio2face.prediction_delay),
+        settings_timeline=_timeline(runtime),
+        frame_samples=tuple(
+            index * 2_000 for index in range(frame_end - frame_start + 1)
+        ),
     )
     controller.active_bake = bake
     return bake
@@ -366,6 +390,15 @@ def _activate_track(
     )
     controller.selected_track = track
     return track
+
+
+def _publish_settings_timeline(
+    runtime: ModuleType,
+    track: object,
+    timeline: object,
+) -> None:
+    track.published_timeline = timeline
+    track.render_timeline = timeline
 
 
 _SELECTED_AUDIO_CHUNKS = (struct.pack("<ff", 0.1, 0.2), struct.pack("<f", 0.3))
@@ -1270,7 +1303,11 @@ def test_cancel_state_changes_only_after_the_request_is_submitted(
     scene, _settings = _local_scene(bpy)
     controller = runtime.RuntimeController()
     track = _activate_track(runtime, controller, scene)
-    stream = runtime.ActiveStream("stream-1", scene.name)
+    stream = runtime.ActiveStream(
+        "stream-1",
+        scene.name,
+        _inference_settings_payload(),
+    )
 
     def reject(_method: str, _params: dict[str, object]) -> str:
         raise OSError("transport failed")
@@ -1353,8 +1390,9 @@ def test_deleted_stream_scene_cancel_not_found_waits_for_terminal_event(
     assert controller.rejected_reason is None
 
 
-def test_setting_edit_updates_an_active_stream_without_stalling_audio(
+def test_native_frame_setting_edit_updates_stream_without_stalling_audio(
     runtime_module: tuple[ModuleType, ModuleType],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runtime, bpy = runtime_module
     scene, settings = _local_scene(bpy)
@@ -1367,11 +1405,19 @@ def test_setting_edit_updates_an_active_stream_without_stalling_audio(
         scene,
         prebuffer_samples=0,
     )
+
+    monkeypatch.setattr(runtime, "inference_settings", _settings_with_skin)
+    stream.submitted_settings = _settings_with_skin(settings)
     requests: list[tuple[str, dict[str, object]]] = []
     controller.client.request = lambda method, params: (
         requests.append((method, params)) or f"request-{len(requests)}"
     )
-    controller.refresh_inference_settings(scene)
+    runtime._CONTROLLER = controller
+
+    runtime._frame_change_post_handler(scene)
+    settings.skin_strength = 0.25
+    runtime._frame_change_post_handler(scene)
+    runtime._frame_change_post_handler(scene)
     controller.queue_pcm_audio(struct.pack("<f", 0.5), scene_name=scene.name)
     controller._poll_pcm_ingress()
 
@@ -1379,7 +1425,7 @@ def test_setting_edit_updates_an_active_stream_without_stalling_audio(
         "stream_settings",
         {
             "operation_id": stream.operation_id,
-            "settings": _inference_settings_payload(),
+            "settings": _settings_with_skin(settings),
         },
     )
     assert [method for method, _params in requests] == [
@@ -1395,7 +1441,8 @@ def test_setting_edit_updates_an_active_stream_without_stalling_audio(
         raise runtime.SidecarError("worker pipe closed")
 
     controller.client.request = reject_request
-    controller.refresh_inference_settings(scene)
+    settings.skin_strength = 0.5
+    runtime._frame_change_post_handler(scene)
 
     assert settings.status == "ERROR"
     assert "worker pipe closed" in settings.status_message
@@ -1435,6 +1482,7 @@ def test_stream_start_submits_the_same_complete_inference_settings(
         "settings": _inference_settings_payload(),
     }
     assert kwargs["operation_id"] == operation_id
+    assert controller.active_stream.submitted_settings == params["settings"]
 
 
 def test_stream_to_selected_waits_for_stream_terminal_then_starts_track(
@@ -1644,7 +1692,7 @@ def test_selected_track_uploads_once_then_starts_one_continuous_render(
         {
             "operation_id": track.operation_id,
             "revision": 1,
-            "settings": _inference_settings_payload(),
+            "settings_timeline": list(_timeline(runtime).payload),
             "preview_sample": 0,
         },
     )
@@ -1730,6 +1778,85 @@ def test_replacement_cancel_race_preserves_a_later_error(
     assert settings.status_message == "timeline failure"
 
 
+def test_settings_timeline_uses_changed_leaf_patches_and_null_replacements(
+    runtime_module: tuple[ModuleType, ModuleType],
+) -> None:
+    runtime, _bpy = runtime_module
+    first = {"face": {"strength": 1.0, "emotion": {"joy": 0.25}}, "auto": True}
+    final = {"face": {"strength": 0.5, "emotion": None}, "auto": False}
+
+    timeline = runtime._settings_timeline(
+        [
+            (0, first),
+            (10, first),
+            (20, {"face": {"strength": 0.5, "emotion": None}, "auto": True}),
+            (20, final),
+            (30, final),
+        ]
+    )
+
+    assert timeline.payload == (
+        {"sample": 0, "settings": first},
+        {
+            "sample": 20,
+            "settings": {
+                "face": {"strength": 0.5, "emotion": None},
+                "auto": False,
+            },
+        },
+    )
+    assert runtime._settings_at_sample(timeline, 19) == first
+    assert runtime._settings_at_sample(timeline, 20) == final
+
+
+def test_selected_settings_timeline_evaluates_native_frames_and_restores_subframe(
+    runtime_module: tuple[ModuleType, ModuleType],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, bpy = runtime_module
+    scene, settings = _local_scene(bpy)
+    settings.audio_path = "/audio/selected.wav"
+    scene.frame_current = 22
+    scene.frame_subframe = 0.375
+    controller = runtime.RuntimeController()
+    controller.model_sample_rate = 48_000
+    track = _activate_track(runtime, controller, scene, audio_samples=8_001)
+    _install_selected_audio_span(scene, 10, 13)
+
+    def evaluate_frame(frame: int) -> None:
+        settings.skin_strength = 1.0 if frame < 12 else 0.5
+        if frame == 22:
+            settings.skin_strength = 0.75
+        settings.prediction_delay = 0.5
+
+    scene.frame_evaluator = evaluate_frame
+    monkeypatch.setattr(runtime, "inference_settings", _settings_with_skin)
+
+    timeline, frame_samples = controller._evaluate_settings_timeline(scene, track)
+
+    expected_initial = _inference_settings_payload()
+    expected_initial["audio2face"]["skin_strength"] = 1.0
+    assert timeline.payload == (
+        {"sample": 0, "settings": expected_initial},
+        {
+            "sample": 4_000,
+            "settings": {"audio2face": {"skin_strength": 0.5}},
+        },
+    )
+    assert frame_samples == (8_000, 8_000, 8_000, 8_000)
+    assert scene.frame_set_calls == [
+        (10, 0.0),
+        (11, 0.0),
+        (12, 0.0),
+        (13, 0.0),
+        (22, 0.375),
+    ]
+    assert scene.frame_current == 22
+    assert scene.frame_subframe == 0.375
+    assert settings.skin_strength == 0.75
+    assert controller.evaluating_settings_timeline is False
+
+
 def test_setting_edits_supersede_render_revisions_and_ignore_stale_output(
     runtime_module: tuple[ModuleType, ModuleType],
     monkeypatch: pytest.MonkeyPatch,
@@ -1743,12 +1870,7 @@ def test_setting_edits_supersede_render_revisions_and_ignore_stale_output(
     track = _activate_track(runtime, controller, scene)
     requests: list[tuple[str, dict[str, object]]] = []
 
-    def evaluated_settings(value: object) -> dict[str, object]:
-        payload = _inference_settings_payload()
-        payload["audio2face"]["skin_strength"] = value.skin_strength
-        return payload
-
-    monkeypatch.setattr(runtime, "inference_settings", evaluated_settings)
+    monkeypatch.setattr(runtime, "inference_settings", _settings_with_skin)
     controller.client.request = lambda method, params: (
         requests.append((method, params)) or f"request-{len(requests)}"
     )
@@ -1762,7 +1884,9 @@ def test_setting_edits_supersede_render_revisions_and_ignore_stale_output(
         "track_render",
     ]
     assert [params["revision"] for _method, params in requests] == [1, 2]
-    assert requests[1][1]["settings"]["audio2face"]["skin_strength"] == 0.25
+    assert requests[1][1]["settings_timeline"][0]["settings"]["audio2face"][
+        "skin_strength"
+    ] == 0.25
     assert track.render_revision == 2
     assert track.stage == runtime.TrackRenderStage(2)
 
@@ -1869,13 +1993,12 @@ def test_reverting_to_published_settings_supersedes_inflight_render(
     controller.model_schema = _model_schema()
     track = _activate_track(runtime, controller, scene)
 
-    def evaluated_settings(value: object) -> dict[str, object]:
-        payload = _inference_settings_payload()
-        payload["audio2face"]["skin_strength"] = value.skin_strength
-        return payload
-
-    monkeypatch.setattr(runtime, "inference_settings", evaluated_settings)
-    track.published_settings = evaluated_settings(settings)
+    monkeypatch.setattr(runtime, "inference_settings", _settings_with_skin)
+    _publish_settings_timeline(
+        runtime,
+        track,
+        _timeline(runtime, _settings_with_skin(settings)),
+    )
     requests: list[tuple[str, dict[str, object]]] = []
     controller.client.request = lambda method, params: (
         requests.append((method, params)) or f"request-{len(requests)}"
@@ -1888,9 +2011,14 @@ def test_reverting_to_published_settings_supersedes_inflight_render(
     controller.refresh_inference_settings(scene)
 
     assert [params["revision"] for _method, params in requests] == [1, 2]
-    assert requests[1][1]["settings"] == track.published_settings
+    assert (
+        requests[1][1]["settings_timeline"]
+        == list(track.published_timeline.payload)
+    )
     assert track.render_revision == 2
-    assert track.render_settings == track.published_settings
+    assert (
+        track.render_timeline == track.published_timeline
+    )
     assert track.stage == runtime.TrackRenderStage(2)
 
     track.stage = None
@@ -1903,8 +2031,9 @@ def test_reverting_to_published_settings_supersedes_inflight_render(
     assert settings.status == "MODEL_READY"
 
 
-def test_native_frame_changes_only_sample_the_published_cache(
+def test_action_edit_rebuilds_future_curve_changes_before_native_frames(
     runtime_module: tuple[ModuleType, ModuleType],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runtime, bpy = runtime_module
     scene, settings = _local_scene(bpy)
@@ -1912,39 +2041,94 @@ def test_native_frame_changes_only_sample_the_published_cache(
     controller = runtime.RuntimeController()
     controller.model_sample_rate = 48_000
     controller.model_schema = _model_schema()
-    track = _activate_track(
+    track = _activate_track(runtime, controller, scene, audio_samples=6_001)
+    _install_selected_audio_span(scene, 1, 3)
+    initial_settings = _inference_settings_payload()
+    initial_settings["audio2face"]["skin_strength"] = 0.5
+    final_settings = _inference_settings_payload()
+    final_settings["audio2face"]["skin_strength"] = 1.5
+    _publish_settings_timeline(
         runtime,
-        controller,
-        scene,
-        audio_samples=96_001,
+        track,
+        runtime._settings_timeline(
+            [(0, initial_settings), (2_000, final_settings)]
+        ),
     )
-    track.published_settings = _inference_settings_payload()
-    track.timestamps = (0, 48_000, 96_000)
+    track.timestamps = (0, 2_000, 4_000)
     track.weights = tuple(
-        (value,) * len(MODEL_CHANNELS) for value in (0.0, 1.0, 2.0)
+        (value,) * len(MODEL_CHANNELS) for value in (0.1, 0.2, 0.3)
     )
-    track.effective_emotions = ((0.0,), (0.5,), (1.0,))
+    track.effective_emotions = ((0.1,), (0.2,), (0.3,))
     requests: list[tuple[str, dict[str, object]]] = []
     controller.client.request = lambda method, params: (
         requests.append((method, params)) or f"request-{len(requests)}"
     )
     runtime._CONTROLLER = controller
-    _activate_bake(runtime, controller, scene)
 
-    scene.frame_current = 13
+    curve_changed = False
+
+    def evaluate_frame(frame: int) -> None:
+        settings.skin_strength = (
+            0.5 if frame == 1 else (0.25 if curve_changed else 1.5)
+        )
+
+    scene.frame_evaluator = evaluate_frame
+    monkeypatch.setattr(runtime, "inference_settings", _settings_with_skin)
+
+    scene.frame_set(1)
     runtime._frame_change_post_handler(scene)
-    scene.frame_current = 37
+    scene.frame_set(2)
     runtime._frame_change_post_handler(scene)
 
     assert requests == []
-    assert controller.active_bake is not None
     assert [call[3][0] for call in runtime._test_live_stream.model_frame_calls] == [
-        0.5,
-        1.5,
+        0.1,
+        0.2,
     ]
-    assert [call[4][0] for call in runtime._test_live_stream.model_frame_calls] == [
-        0.25,
-        0.75,
+    curve_changed = True
+    scene.frame_set(1)
+    action = object()
+    scene.animation_data = SimpleNamespace(action=action, nla_tracks=[])
+    runtime._depsgraph_update_post_handler(
+        scene,
+        SimpleNamespace(updates=[SimpleNamespace(id=object())]),
+    )
+    assert controller.invalidated_selected_scene is None
+
+    runtime._depsgraph_update_post_handler(
+        scene,
+        SimpleNamespace(updates=[SimpleNamespace(id=action)]),
+    )
+
+    assert controller.invalidated_selected_scene == scene.name
+    assert requests == []
+
+    screen = SimpleNamespace(is_animation_playing=True)
+    bpy.data.window_managers = [
+        SimpleNamespace(windows=[SimpleNamespace(screen=screen)])
+    ]
+    frame_set_count = len(scene.frame_set_calls)
+    controller._refresh_invalidated_selected_settings()
+    controller.refresh_inference_settings(scene)
+    runtime._frame_change_post_handler(scene)
+
+    assert controller.invalidated_selected_scene == scene.name
+    assert requests == []
+    assert len(scene.frame_set_calls) == frame_set_count
+
+    screen.is_animation_playing = False
+    controller._refresh_invalidated_selected_settings()
+
+    assert [method for method, _params in requests] == ["track_render"]
+    assert requests[0][1]["settings_timeline"][1] == {
+        "sample": 2_000,
+        "settings": {"audio2face": {"skin_strength": 0.25}},
+    }
+    assert [call[3][0] for call in runtime._test_live_stream.model_frame_calls] == [
+        0.1,
+        0.2,
+        0.1,
+        0.1,
     ]
 
 
@@ -1964,13 +2148,17 @@ def test_bounded_track_frame_batches_publish_atomically_on_render_completion(
     track.timestamps = (0,)
     track.weights = old_weights
     track.effective_emotions = ((0.75,),)
-    track.published_settings = {"old": True}
+    _publish_settings_timeline(
+        runtime,
+        track,
+        _timeline(runtime, {"old": True}),
+    )
     requests: list[tuple[str, dict[str, object]]] = []
     controller.client.request = lambda method, params: (
         requests.append((method, params)) or f"request-{len(requests)}"
     )
 
-    controller._request_track_render(scene, track, _inference_settings_payload())
+    controller._request_track_render(scene, track, _timeline(runtime))
     timestamps = [index * 1_000 for index in range(65)]
     rows = [
         [index / 100.0] * len(MODEL_CHANNELS) for index in range(65)
@@ -2012,7 +2200,7 @@ def test_bounded_track_frame_batches_publish_atomically_on_render_completion(
     assert track.timestamps == tuple(timestamps)
     assert track.weights == tuple(tuple(row) for row in rows)
     assert track.effective_emotions == tuple(tuple(row) for row in emotions)
-    assert track.published_settings == _inference_settings_payload()
+    assert track.published_timeline == _timeline(runtime)
     assert track.stage is None
     assert controller.rejected_reason is None
     assert settings.status == "MODEL_READY"
@@ -2798,7 +2986,7 @@ def test_bake_waits_for_one_continuous_render_without_reuploading_audio(
                 {
                     "operation_id": track.operation_id,
                     "revision": 1,
-                    "settings": _inference_settings_payload(),
+                    "settings_timeline": list(_timeline(runtime).payload),
                     "preview_sample": 0,
                 },
             )
@@ -2825,6 +3013,17 @@ def test_bake_samples_the_exact_published_cache_on_blender_frames(
     target = object()
     settings.target_objects = [SimpleNamespace(object=target)]
     scene.frame_current = 6
+    scene.frame_subframe = 0.375
+    prediction_delays = {
+        10: 0.0,
+        11: 1.0 / 24.0,
+        12: -1.0 / 24.0,
+    }
+    scene.frame_evaluator = lambda frame: setattr(
+        settings,
+        "prediction_delay",
+        prediction_delays.get(frame, 0.0),
+    )
     controller = runtime.RuntimeController()
     controller.model_sample_rate = 48_000
     controller.model_schema = _model_schema()
@@ -2841,7 +3040,7 @@ def test_bake_samples_the_exact_published_cache_on_blender_frames(
         (value,) * len(MODEL_CHANNELS) for value in (0.1, 0.2, 0.3)
     )
     track.effective_emotions = ((0.1,), (0.2,), (0.3,))
-    track.published_settings = _inference_settings_payload()
+    _publish_settings_timeline(runtime, track, _timeline(runtime))
     plan = object()
     monkeypatch.setattr(controller, "_require_worker_ready", lambda: None)
     monkeypatch.setattr(runtime, "plan_bake_targets", lambda *_args: (plan,))
@@ -2861,6 +3060,8 @@ def test_bake_samples_the_exact_published_cache_on_blender_frames(
         if intervening_error:
             settings.status = "ERROR"
             settings.status_message = "timeline failure"
+            settings.skin_strength = 0.25
+            controller.refresh_inference_settings(scene)
         calls.append(args)
         return (object(),)
 
@@ -2871,23 +3072,32 @@ def test_bake_samples_the_exact_published_cache_on_blender_frames(
     assert requests == []
     assert len(calls) == 1
     assert tuple(calls[0][0]) == (10, 11, 12)
-    assert calls[0][1] == track.weights
+    assert [row[0] for row in calls[0][1]] == [0.1, 0.3, 0.2]
     assert calls[0][2] == (plan,)
     assert calls[0][3] is bpy.data.actions
     assert controller.active_bake is None
     assert controller.selected_track is track
     assert scene.frame_current == 6
-    assert scene.frame_set_calls == []
+    assert scene.frame_subframe == 0.375
+    assert scene.frame_set_calls == [
+        (10, 0.0),
+        (11, 0.0),
+        (12, 0.0),
+        (6, 0.375),
+    ]
     assert track.wav_source.close_calls == 0
     assert settings.status == "MODEL_READY"
 
     intervening_error = True
+    monkeypatch.setattr(runtime, "inference_settings", _settings_with_skin)
     _activate_bake(runtime, controller, scene, frame_start=10, frame_end=12)
     settings.status = "BAKING"
     controller._finish_bake(scene)
 
     assert settings.status == "ERROR"
     assert settings.status_message == "timeline failure"
+    assert controller.invalidated_selected_scene is None
+    assert [method for method, _params in requests] == ["track_render"]
 
 
 def test_timer_failure_does_not_stop_the_worker(
@@ -2927,6 +3137,10 @@ def test_runtime_registration_does_not_access_restricted_blend_data(
         assert runtime._load_post_handler in bpy.app.handlers.load_post
         assert bpy.app.handlers.animation_playback_pre == []
         assert bpy.app.handlers.animation_playback_post == []
+        assert (
+            runtime._depsgraph_update_post_handler
+            in bpy.app.handlers.depsgraph_update_post
+        )
         assert runtime._frame_change_post_handler in bpy.app.handlers.frame_change_post
     finally:
         bpy.data = unrestricted_data  # type: ignore[attr-defined]

@@ -74,6 +74,75 @@ def _model_emotion_channels(model_schema: dict[str, Any]) -> tuple[str, ...]:
 
 
 @dataclass(frozen=True, slots=True)
+class SettingsTimeline:
+    """Compact worker payload and cumulative settings at each change sample."""
+
+    payload: tuple[dict[str, object], ...]
+    snapshots: tuple[tuple[int, dict[str, object]], ...]
+
+
+def _object_patch(
+    previous: dict[str, object],
+    current: dict[str, object],
+) -> dict[str, object]:
+    """Return the recursive changed-leaf patch from one settings object to another."""
+
+    patch: dict[str, object] = {}
+    for name, value in current.items():
+        old_value = previous[name]
+        if isinstance(old_value, dict) and isinstance(value, dict):
+            nested = _object_patch(old_value, value)
+            if nested:
+                patch[name] = nested
+        elif value != old_value:
+            patch[name] = value
+    return patch
+
+
+def _settings_timeline(
+    snapshots: list[tuple[int, dict[str, object]]],
+) -> SettingsTimeline:
+    """Encode full per-frame snapshots as one full object followed by patches."""
+
+    unique_samples: list[tuple[int, dict[str, object]]] = []
+    for sample, settings in snapshots:
+        if unique_samples and unique_samples[-1][0] == sample:
+            unique_samples[-1] = (sample, settings)
+        else:
+            unique_samples.append((sample, settings))
+
+    first_settings = unique_samples[0][1]
+    payload: list[dict[str, object]] = [
+        {"sample": 0, "settings": first_settings}
+    ]
+    cumulative = [(0, first_settings)]
+    previous = first_settings
+    for sample, settings in unique_samples[1:]:
+        patch = _object_patch(previous, settings)
+        if patch:
+            payload.append({"sample": sample, "settings": patch})
+            cumulative.append((sample, settings))
+            previous = settings
+    return SettingsTimeline(tuple(payload), tuple(cumulative))
+
+
+def _settings_at_sample(
+    timeline: SettingsTimeline,
+    sample: int,
+) -> dict[str, object]:
+    snapshots = timeline.snapshots
+    low = 0
+    high = len(snapshots)
+    while low < high:
+        middle = (low + high) // 2
+        if snapshots[middle][0] <= sample:
+            low = middle + 1
+        else:
+            high = middle
+    return snapshots[low - 1][1]
+
+
+@dataclass(frozen=True, slots=True)
 class SetupStatus:
     ready: bool
     message: str
@@ -160,6 +229,7 @@ class ActiveStream:
 
     operation_id: str
     scene_name: str
+    submitted_settings: dict[str, object]
     chunk_credit: threading.Event = field(default_factory=threading.Event)
     prebuffer_samples: int | None = None
     end_sent: bool = False
@@ -180,7 +250,7 @@ class TrackRenderStage:
 
 @dataclass(slots=True)
 class SelectedTrack:
-    """One persistent interactive Selected WAV source."""
+    """One retained Selected WAV source and its prepared render cache."""
 
     operation_id: str
     scene_name: str
@@ -193,8 +263,8 @@ class SelectedTrack:
     restart_after_cancel: bool = False
     render_error: str | None = None
     render_revision: int = 0
-    render_settings: dict[str, object] | None = None
-    published_settings: dict[str, object] | None = None
+    render_timeline: SettingsTimeline | None = None
+    published_timeline: SettingsTimeline | None = None
     stage: TrackRenderStage | None = None
     timestamps: tuple[int, ...] = ()
     weights: tuple[tuple[float, ...], ...] = ()
@@ -209,8 +279,8 @@ class ActiveBake:
     frame_start: int
     frame_end: int
     targets: tuple[BakeTarget, ...]
-    settings: dict[str, object]
-    prediction_delay: float
+    settings_timeline: SettingsTimeline
+    frame_samples: tuple[int, ...]
 
 
 POLL_INTERVAL_SECONDS = 0.10
@@ -221,6 +291,14 @@ SHUTDOWN_TIMEOUT_SECONDS = 2.0
 HANDSHAKE_TIMEOUT_SECONDS = 15.0
 MAX_STREAM_CHUNK_BYTES = 256 * 1024
 MAX_PENDING_STREAM_CHUNKS = 64
+
+
+def _native_playback_active() -> bool:
+    return any(
+        window.screen.is_animation_playing
+        for manager in bpy.data.window_managers
+        for window in manager.windows
+    )
 
 
 class RuntimeController:
@@ -255,6 +333,8 @@ class RuntimeController:
         self.selected_track: SelectedTrack | None = None
         self.active_bake: ActiveBake | None = None
         self.pcm_ingress: PCMIngress | None = None
+        self.evaluating_settings_timeline = False
+        self.invalidated_selected_scene: str | None = None
 
     def _scene(self, name: str | None) -> bpy.types.Scene | None:
         return bpy.data.scenes.get(name) if name else None
@@ -699,9 +779,9 @@ class RuntimeController:
             ActiveStream(
                 operation_id=operation_id,
                 scene_name=scene.name,
+                submitted_settings=settings,
             ),
             sample_rate,
-            settings,
         )
 
     def _stream_start_metadata(
@@ -722,7 +802,6 @@ class RuntimeController:
         scene: bpy.types.Scene,
         stream: ActiveStream,
         sample_rate: int,
-        settings: dict[str, object],
     ) -> None:
         try:
             self._request(
@@ -731,7 +810,7 @@ class RuntimeController:
                 {
                     "operation_id": stream.operation_id,
                     "sample_rate": sample_rate,
-                    "settings": settings,
+                    "settings": stream.submitted_settings,
                 },
                 model_signature=None,
                 operation_id=stream.operation_id,
@@ -744,7 +823,7 @@ class RuntimeController:
         self._set_status(scene, "STREAM_STARTING", "Preparing audio inference")
 
     def _ensure_selected_track(self, scene: bpy.types.Scene) -> None:
-        """Load the configured WAV into one persistent interactive executor."""
+        """Upload the configured WAV into one retained prepared track."""
 
         settings = scene.audio2face
         if (
@@ -847,6 +926,7 @@ class RuntimeController:
             return
         track.wav_source.close()
         self.selected_track = None
+        self.invalidated_selected_scene = None
         with self.pending_lock:
             stale = tuple(
                 request_id
@@ -1021,6 +1101,63 @@ class RuntimeController:
             audio_samples=track.wav_source.metadata.output_frames,
         )
 
+    def _evaluate_settings_timeline(
+        self,
+        scene: bpy.types.Scene,
+        track: SelectedTrack,
+    ) -> tuple[SettingsTimeline, tuple[int, ...]]:
+        """Evaluate inference settings and presentation samples over the sound span."""
+
+        span = selected_audio_frame_span(scene)
+        if span is None:
+            raise SidecarError("selected WAV sound strip is unavailable")
+        frame_start, frame_end = span
+        original_frame = int(scene.frame_current)
+        original_subframe = float(scene.frame_subframe)
+        snapshots: list[tuple[int, dict[str, object]]] = []
+        frame_samples: list[int] = []
+        self.evaluating_settings_timeline = True
+        try:
+            for frame in range(frame_start, frame_end + 1):
+                scene.frame_set(frame, subframe=0.0)
+                sample = cast(
+                    int,
+                    self._track_sample(
+                        scene,
+                        track,
+                        frame,
+                        prediction_delay=0.0,
+                    ),
+                )
+                snapshots.append((sample, inference_settings(scene.audio2face)))
+                frame_samples.append(
+                    cast(int, self._track_sample(scene, track, frame))
+                )
+        finally:
+            try:
+                scene.frame_set(original_frame, subframe=original_subframe)
+            finally:
+                self.evaluating_settings_timeline = False
+        return _settings_timeline(snapshots), tuple(frame_samples)
+
+    def _settings_timeline_matches_current_frame(
+        self,
+        scene: bpy.types.Scene,
+        track: SelectedTrack,
+        timeline: SettingsTimeline | None,
+    ) -> bool:
+        if timeline is None:
+            return False
+        sample = self._track_sample(
+            scene,
+            track,
+            int(scene.frame_current),
+            prediction_delay=0.0,
+        )
+        return sample is not None and _settings_at_sample(
+            timeline, sample
+        ) == inference_settings(scene.audio2face)
+
     def _apply_selected_cache(
         self,
         scene: bpy.types.Scene,
@@ -1033,10 +1170,7 @@ class RuntimeController:
         if target_sample is None:
             self._apply_neutral_selected_frame(scene)
             return
-        if (
-            not track.timestamps
-            or track.published_settings != inference_settings(scene.audio2face)
-        ):
+        if not track.timestamps:
             return
         apply_model_frame(
             scene.audio2face,
@@ -1091,13 +1225,13 @@ class RuntimeController:
         self,
         scene: bpy.types.Scene,
         track: SelectedTrack,
-        settings: dict[str, object],
+        settings_timeline: SettingsTimeline,
     ) -> None:
         if track.cancel_requested or not track.prepared:
             return
-        if track.stage is not None and track.render_settings == settings:
+        if track.stage is not None and track.render_timeline == settings_timeline:
             return
-        if track.published_settings == settings and track.stage is None:
+        if track.published_timeline == settings_timeline and track.stage is None:
             render_error = track.render_error
             track.render_error = None
             if render_error is not None:
@@ -1111,11 +1245,11 @@ class RuntimeController:
         revision = track.render_revision + 1
         previous = (
             track.render_revision,
-            track.render_settings,
+            track.render_timeline,
             track.stage,
         )
         track.render_revision = revision
-        track.render_settings = settings
+        track.render_timeline = settings_timeline
         track.stage = TrackRenderStage(revision)
         try:
             self._request(
@@ -1124,7 +1258,7 @@ class RuntimeController:
                 {
                     "operation_id": track.operation_id,
                     "revision": revision,
-                    "settings": settings,
+                    "settings_timeline": list(settings_timeline.payload),
                     "preview_sample": self._track_sample(
                         scene,
                         track,
@@ -1137,7 +1271,7 @@ class RuntimeController:
         except Exception:
             (
                 track.render_revision,
-                track.render_settings,
+                track.render_timeline,
                 track.stage,
             ) = previous
             raise
@@ -1194,13 +1328,16 @@ class RuntimeController:
         ):
             raise SidecarError("selected WAV track is not available")
 
+        settings_timeline, frame_samples = self._evaluate_settings_timeline(
+            scene, track
+        )
         bake = ActiveBake(
             scene_name=scene.name,
             frame_start=frame_start,
             frame_end=frame_end,
             targets=target_plans,
-            settings=inference_settings(settings),
-            prediction_delay=float(settings.prediction_delay),
+            settings_timeline=settings_timeline,
+            frame_samples=frame_samples,
         )
         self.active_bake = bake
         try:
@@ -1209,11 +1346,14 @@ class RuntimeController:
                 "BAKING",
                 "Rendering one continuous Audio2Face animation",
             )
-            if track.published_settings == bake.settings and track.timestamps:
+            if (
+                track.published_timeline == bake.settings_timeline
+                and track.timestamps
+            ):
                 self._finish_bake(scene)
                 return
             if track.prepared:
-                self._request_track_render(scene, track, bake.settings)
+                self._request_track_render(scene, track, bake.settings_timeline)
         except Exception:
             self._release_active_bake()
             raise
@@ -1228,7 +1368,10 @@ class RuntimeController:
         self._release_active_bake()
         if scene.audio2face.status == "BAKING":
             self._set_status(scene, "MODEL_READY", "Animation bake canceled")
-        self.refresh_inference_settings(scene)
+        if self.invalidated_selected_scene == scene.name:
+            self._refresh_invalidated_selected_settings()
+        else:
+            self.refresh_inference_settings(scene)
 
     def _release_active_bake(self) -> None:
         self.active_bake = None
@@ -1244,29 +1387,17 @@ class RuntimeController:
         if (
             track is None
             or not track.timestamps
-            or track.published_settings != bake.settings
+            or track.published_timeline != bake.settings_timeline
         ):
             return
         frames = tuple(range(bake.frame_start, bake.frame_end + 1))
-        weights = tuple(
-            sample_linear(
-                track.timestamps,
-                track.weights,
-                cast(
-                    int,
-                    self._track_sample(
-                        scene,
-                        track,
-                        frame,
-                        bake.prediction_delay,
-                    ),
-                ),
-            )
-            for frame in frames
+        sampled_weights = tuple(
+            sample_linear(track.timestamps, track.weights, sample)
+            for sample in bake.frame_samples
         )
         actions = bake_shape_key_actions(
             frames,
-            weights,
+            sampled_weights,
             bake.targets,
             bpy.data.actions,
         )
@@ -1278,7 +1409,7 @@ class RuntimeController:
                 f"Baked {len(frames)} Blender frames to {len(actions)} Shape Key Action"
                 f"{'s' if len(actions) != 1 else ''}",
             )
-        self.refresh_inference_settings(scene)
+        self._refresh_invalidated_selected_settings()
 
     def _fail_bake(
         self,
@@ -1290,6 +1421,7 @@ class RuntimeController:
         self._release_active_bake()
         if scene.audio2face.status == "BAKING":
             self._set_status(scene, "ERROR", message)
+        self._refresh_invalidated_selected_settings()
 
     @staticmethod
     def _validate_f32le_chunk(audio_f32le: bytes) -> bytes:
@@ -1642,14 +1774,20 @@ class RuntimeController:
             except (OSError, RuntimeError, ValueError) as exc:
                 self._set_status(scene, "ERROR", str(exc))
 
-    def refresh_inference_settings(self, scene: bpy.types.Scene) -> None:
+    def refresh_inference_settings(
+        self,
+        scene: bpy.types.Scene,
+        *,
+        rebuild_selected: bool = False,
+    ) -> None:
         """Apply settings to the resident source independently of transport."""
 
-        if (
-            not scene.is_editable
-            or self.active_bake is not None
-            or self.expected_worker_exit
+        if not scene.is_editable or self.expected_worker_exit:
+            return
+        if scene.audio2face.input_mode == "SELECTED" and (
+            self.active_bake is not None or _native_playback_active()
         ):
+            self.invalidate_selected_settings(scene)
             return
         if scene.audio2face.input_mode == "STREAM":
             stream = self.active_stream
@@ -1661,17 +1799,21 @@ class RuntimeController:
                 or stream.worker_ended
             ):
                 return
+            settings = inference_settings(scene.audio2face)
+            if settings == stream.submitted_settings:
+                return
             try:
                 self._request(
                     scene,
                     "stream_settings",
                     {
                         "operation_id": stream.operation_id,
-                        "settings": inference_settings(scene.audio2face),
+                        "settings": settings,
                     },
                     model_signature=None,
                     operation_id=stream.operation_id,
                 )
+                stream.submitted_settings = settings
             except (OSError, RuntimeError, ValueError) as exc:
                 self._fail_stream(
                     scene,
@@ -1682,6 +1824,8 @@ class RuntimeController:
             return
         if scene.audio2face.input_mode != "SELECTED":
             return
+        if rebuild_selected and self.invalidated_selected_scene == scene.name:
+            self.invalidated_selected_scene = None
         track = self.selected_track
         if (
             track is None
@@ -1691,14 +1835,84 @@ class RuntimeController:
         ):
             return
         try:
+            render_timeline = track.render_timeline
+            if (
+                not rebuild_selected
+                and render_timeline is not None
+                and self._settings_timeline_matches_current_frame(
+                    scene, track, render_timeline
+                )
+            ):
+                if (
+                    track.render_error is not None
+                    and track.stage is None
+                    and track.published_timeline == render_timeline
+                ):
+                    self._request_track_render(scene, track, render_timeline)
+                return
             self._request_track_render(
                 scene,
                 track,
-                inference_settings(scene.audio2face),
+                self._evaluate_settings_timeline(scene, track)[0],
             )
         except (OSError, RuntimeError, ValueError) as exc:
             track.render_error = str(exc)
             self._set_status(scene, "ERROR", track.render_error)
+
+    def refresh_frame_inference_settings(self, scene: bpy.types.Scene) -> None:
+        """Forward settings evaluated by Blender for the current native frame."""
+
+        if scene.audio2face.input_mode == "SELECTED":
+            span = selected_audio_frame_span(scene)
+            if span is None or not span[0] <= int(scene.frame_current) <= span[1]:
+                return
+            if _native_playback_active():
+                track = self.selected_track
+                if (
+                    track is not None
+                    and track.scene_name == scene.name
+                    and not self._settings_timeline_matches_current_frame(
+                        scene, track, track.render_timeline
+                    )
+                ):
+                    self.invalidate_selected_settings(scene)
+                return
+        self.refresh_inference_settings(scene)
+
+    def invalidate_selected_settings(self, scene: bpy.types.Scene) -> None:
+        """Queue one full settings rescan after Blender edits the scene Action."""
+
+        track = self.selected_track
+        if (
+            scene.is_editable
+            and scene.audio2face.input_mode == "SELECTED"
+            and track is not None
+            and track.scene_name == scene.name
+            and not track.cancel_requested
+        ):
+            self.invalidated_selected_scene = scene.name
+
+    def _refresh_invalidated_selected_settings(self) -> None:
+        scene_name = self.invalidated_selected_scene
+        if scene_name is None:
+            return
+        scene = self._scene(scene_name)
+        if scene is None:
+            self.invalidated_selected_scene = None
+            return
+        track = self.selected_track
+        if (
+            self.active_bake is not None
+            or _native_playback_active()
+            or track is None
+            or track.scene_name != scene_name
+            or not track.prepared
+            or track.cancel_requested
+        ):
+            return
+        self.invalidated_selected_scene = None
+        self.refresh_inference_settings(scene, rebuild_selected=True)
+        self.request_selected_frame(scene)
 
     def _fail_stream(
         self,
@@ -1946,13 +2160,16 @@ class RuntimeController:
             track.prepared = True
             try:
                 bake = self.active_bake
+                if bake is None and _native_playback_active():
+                    self.invalidate_selected_settings(scene)
+                    return
                 self._request_track_render(
                     scene,
                     track,
                     (
-                        bake.settings
+                        bake.settings_timeline
                         if bake is not None and bake.scene_name == scene.name
-                        else inference_settings(scene.audio2face)
+                        else self._evaluate_settings_timeline(scene, track)[0]
                     ),
                 )
             except (OSError, RuntimeError, ValueError) as exc:
@@ -2019,12 +2236,12 @@ class RuntimeController:
                     "worker completed an incomplete track render"
                 )
                 return
-            initial_render = track.published_settings is None
+            initial_render = track.published_timeline is None
             render_error = track.render_error
             track.timestamps = tuple(stage.timestamps)
             track.weights = tuple(stage.weights)
             track.effective_emotions = tuple(stage.effective_emotions)
-            track.published_settings = track.render_settings
+            track.published_timeline = track.render_timeline
             track.stage = None
             track.render_error = None
             try:
@@ -2256,7 +2473,11 @@ class RuntimeController:
             if scene is None:
                 return
             try:
-                if track.render_settings != inference_settings(scene.audio2face):
+                if not self._settings_timeline_matches_current_frame(
+                    scene,
+                    track,
+                    track.render_timeline,
+                ):
                     return
                 target_sample = self._track_sample(
                     scene,
@@ -2615,6 +2836,7 @@ class RuntimeController:
 
     def poll(self) -> None:
         self._poll_optimization_events()
+        self._refresh_invalidated_selected_settings()
         self._cancel_orphaned_operation()
         self._poll_pcm_ingress()
         self.client.tick()
@@ -2757,9 +2979,38 @@ def _frame_change_post_handler(
     """Apply Selected Audio values after Blender evaluates the current frame."""
 
     controller = _CONTROLLER
-    if controller is None:
+    if controller is None or controller.evaluating_settings_timeline:
         return
+    controller.refresh_frame_inference_settings(scene)
     controller.request_selected_frame(scene)
+
+
+@bpy.app.handlers.persistent
+def _depsgraph_update_post_handler(
+    scene: bpy.types.Scene,
+    depsgraph: bpy.types.Depsgraph,
+) -> None:
+    """Invalidate Selected settings when an Action used by the scene changes."""
+
+    controller = _CONTROLLER
+    if controller is None or controller.evaluating_settings_timeline:
+        return
+    animation_data = scene.animation_data
+    if animation_data is None:
+        return
+    actions = [animation_data.action]
+    actions.extend(
+        strip.action
+        for nla_track in animation_data.nla_tracks
+        for strip in nla_track.strips
+    )
+    if any(
+        update.id == action
+        for update in depsgraph.updates
+        for action in actions
+        if action is not None
+    ):
+        controller.invalidate_selected_settings(scene)
 
 
 @bpy.app.handlers.persistent
@@ -2784,6 +3035,8 @@ def _load_post_handler(_unused: object) -> None:
 
 def register_runtime() -> None:
     get_controller()
+    if _depsgraph_update_post_handler not in bpy.app.handlers.depsgraph_update_post:
+        bpy.app.handlers.depsgraph_update_post.append(_depsgraph_update_post_handler)
     if _frame_change_post_handler not in bpy.app.handlers.frame_change_post:
         bpy.app.handlers.frame_change_post.append(_frame_change_post_handler)
     if _load_pre_handler not in bpy.app.handlers.load_pre:
@@ -2807,4 +3060,6 @@ def unregister_runtime() -> None:
         bpy.app.handlers.load_post.remove(_load_post_handler)
     if _frame_change_post_handler in bpy.app.handlers.frame_change_post:
         bpy.app.handlers.frame_change_post.remove(_frame_change_post_handler)
+    if _depsgraph_update_post_handler in bpy.app.handlers.depsgraph_update_post:
+        bpy.app.handlers.depsgraph_update_post.remove(_depsgraph_update_post_handler)
     _dispose_runtime_state()
