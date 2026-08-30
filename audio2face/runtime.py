@@ -1782,7 +1782,11 @@ class RuntimeController:
     ) -> None:
         """Apply settings to the resident source independently of transport."""
 
-        if not scene.is_editable or self.expected_worker_exit:
+        if (
+            self.evaluating_settings_timeline
+            or not scene.is_editable
+            or self.expected_worker_exit
+        ):
             return
         if scene.audio2face.input_mode == "SELECTED" and (
             self.active_bake is not None or _native_playback_active()

@@ -1857,6 +1857,63 @@ def test_selected_settings_timeline_evaluates_native_frames_and_restores_subfram
     assert controller.evaluating_settings_timeline is False
 
 
+def test_animated_setting_callbacks_do_not_reenter_the_timeline_scan(
+    runtime_module: tuple[ModuleType, ModuleType],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, bpy = runtime_module
+    scene, settings = _local_scene(bpy)
+    settings.audio_path = "/audio/selected.wav"
+    settings.skin_strength = 0.5
+    controller = runtime.RuntimeController()
+    controller.model_sample_rate = 48_000
+    controller.model_schema = _model_schema()
+    track = _activate_track(runtime, controller, scene, audio_samples=6_001)
+    _install_selected_audio_span(scene, 1, 3)
+
+    initial_settings = _settings_with_skin(settings)
+    _publish_settings_timeline(
+        runtime,
+        track,
+        runtime._settings_timeline([(0, initial_settings)]),
+    )
+    requests: list[tuple[str, dict[str, object]]] = []
+    controller.client.request = lambda method, params: (
+        requests.append((method, params)) or f"request-{len(requests)}"
+    )
+    monkeypatch.setattr(runtime, "inference_settings", _settings_with_skin)
+
+    def evaluate_frame(frame: int) -> None:
+        value = 0.5 if frame < 3 else 1.5
+        if settings.skin_strength == value:
+            return
+        settings.skin_strength = value
+        # Blender invokes the RNA update callback while applying an animated
+        # PropertyGroup value. It reaches this same controller method.
+        controller.refresh_inference_settings(scene)
+
+    scene.frame_evaluator = evaluate_frame
+
+    controller.refresh_inference_settings(scene, rebuild_selected=True)
+
+    assert scene.frame_set_calls == [
+        (1, 0.0),
+        (2, 0.0),
+        (3, 0.0),
+        (1, 0.0),
+    ]
+    assert [method for method, _params in requests] == ["track_render"]
+    assert requests[0][1]["settings_timeline"] == [
+        {"sample": 0, "settings": initial_settings},
+        {
+            "sample": 4_000,
+            "settings": {"audio2face": {"skin_strength": 1.5}},
+        },
+    ]
+    assert track.render_error is None
+    assert settings.status != "ERROR"
+
+
 def test_setting_edits_supersede_render_revisions_and_ignore_stale_output(
     runtime_module: tuple[ModuleType, ModuleType],
     monkeypatch: pytest.MonkeyPatch,
