@@ -110,7 +110,7 @@ def _prepare_external(controller: object, scene: _Scene, channels: list[str]) ->
         16_000,
         tuple(channels),
         tuple(MODEL_EMOTION_CHANNELS),
-        presentation_stopped=lambda: None,
+        presentation_stopped=lambda _error: None,
     )
 
 
@@ -236,7 +236,7 @@ def test_external_pcm_buffer_remains_bounded(
         16_000,
         tuple(MODEL_CHANNELS),
         tuple(MODEL_EMOTION_CHANNELS),
-        presentation_stopped=lambda: None,
+        presentation_stopped=lambda _error: None,
     )
     weights = [0.0] * len(MODEL_CHANNELS)
     for timestamp in range(0, 160_001, 16_000):
@@ -423,14 +423,14 @@ def test_terminal_event_cleans_external_stream_and_holds_final_values(
 ) -> None:
     live, scene, applied = live_module
     controller = live.LiveStreamController()
-    stopped: list[str] = []
+    stopped: list[str | None] = []
     controller.prepare_external(
         scene,
         "stream-1",
         16_000,
         tuple(MODEL_CHANNELS),
         tuple(MODEL_EMOTION_CHANNELS),
-        presentation_stopped=lambda: stopped.append("stream-1"),
+        presentation_stopped=stopped.append,
     )
     weights = [0.5] * len(MODEL_CHANNELS)
     controller.receive("stream-1", 1600, weights, MODEL_EMOTIONS.copy())
@@ -440,4 +440,32 @@ def test_terminal_event_cleans_external_stream_and_holds_final_values(
     assert applied == [(tuple(MODEL_CHANNELS), tuple(weights))]
     assert controller.active is False
     assert scene.audio2face.stream_time == 0.0
-    assert stopped == ["stream-1"]
+    assert stopped == [None]
+
+
+def test_presentation_failure_is_reported_to_its_runtime_owner(
+    live_module: tuple[ModuleType, _Scene, list[AppliedFrame]],
+) -> None:
+    live, scene, _applied = live_module
+    scene.audio2face.prediction_delay = float("nan")
+    controller = live.LiveStreamController()
+    stopped: list[str | None] = []
+    controller.prepare_external(
+        scene,
+        "stream-1",
+        16_000,
+        tuple(MODEL_CHANNELS),
+        tuple(MODEL_EMOTION_CHANNELS),
+        presentation_stopped=stopped.append,
+    )
+
+    controller.receive(
+        "stream-1",
+        0,
+        [0.0] * len(MODEL_CHANNELS),
+        MODEL_EMOTIONS.copy(),
+    )
+
+    assert controller.active is False
+    assert scene.audio2face.status == "MODEL_READY"
+    assert stopped == ["prediction delay must be finite"]

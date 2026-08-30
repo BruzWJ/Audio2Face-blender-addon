@@ -120,7 +120,7 @@ class LiveStreamController:
         self._timestamps: list[int] = []
         self._weights: list[tuple[float, ...]] = []
         self._effective_emotions: list[tuple[float, ...]] = []
-        self._external_stopped: Callable[[], None] | None = None
+        self._external_stopped: Callable[[str | None], None] | None = None
         self._terminal = False
         self._stream_clock_started: float | None = None
         self._stream_clock_origin = 0
@@ -152,7 +152,7 @@ class LiveStreamController:
         sample_rate: int,
         channels: tuple[str, ...],
         emotion_channels: tuple[str, ...],
-        presentation_stopped: Callable[[], None],
+        presentation_stopped: Callable[[str | None], None],
     ) -> None:
         """Prepare an external PCM stream driven by its monotonic audio clock."""
 
@@ -200,11 +200,11 @@ class LiveStreamController:
             not self._timestamps
             or scene is None
             or not scene.is_editable
-            or self._terminal_reached(scene)
+            or self._terminal_reached()
         ):
             self.stop(reset=False, notify=True)
 
-    def _terminal_reached(self, scene: bpy.types.Scene) -> bool:
+    def _terminal_reached(self) -> bool:
         return self._stream_sample_position() >= self._timestamps[-1]
 
     def _stream_sample_position(self) -> float:
@@ -274,14 +274,12 @@ class LiveStreamController:
             self._apply_sampled_frame(settings, requested_sample)
             settings.stream_time = max(0.0, sample_position / self._sample_rate)
             self._drop_old_frames(min(sample_position, requested_sample))
-            if self._terminal and self._terminal_reached(scene):
+            if self._terminal and self._terminal_reached():
                 self.stop(reset=False, notify=True)
                 return False
             return True
         except (LiveStreamError, RuntimeError, ValueError) as exc:
-            self.stop(reset=False, notify=True)
-            settings.status = "ERROR"
-            settings.status_message = str(exc)
+            self.stop(reset=False, notify=True, error=str(exc))
             return False
 
     def stop(
@@ -289,9 +287,14 @@ class LiveStreamController:
         *,
         reset: bool,
         notify: bool = True,
+        error: str | None = None,
     ) -> None:
-        if type(reset) is not bool or type(notify) is not bool:
-            raise TypeError("reset and notify must be exact bool values")
+        if (
+            type(reset) is not bool
+            or type(notify) is not bool
+            or (error is not None and not isinstance(error, str))
+        ):
+            raise TypeError("reset, notify, and error have invalid types")
         scene = bpy.data.scenes.get(self._scene_name) if self._scene_name else None
         settings = scene.audio2face if scene is not None and scene.is_editable else None
         if reset and settings is not None:
@@ -317,7 +320,7 @@ class LiveStreamController:
         self._stream_clock_started = None
         self._stream_clock_origin = 0
         if stopped_callback is not None:
-            stopped_callback()
+            stopped_callback(error)
 
 
 _LIVE_STREAM_CONTROLLER: LiveStreamController | None = None

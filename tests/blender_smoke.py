@@ -562,7 +562,7 @@ def main() -> None:
 
         live = runtime.get_live_stream_controller()
         routed_operation = "blender-smoke-stream"
-        presentation_stopped: list[None] = []
+        presentation_stopped: list[str | None] = []
         try:
             live.prepare_external(
                 scene,
@@ -570,7 +570,7 @@ def main() -> None:
                 16_000,
                 tuple(MODEL_CHANNELS),
                 ("Neutral", "Joy"),
-                lambda: presentation_stopped.append(None),
+                lambda error: presentation_stopped.append(error),
             )
             controller.active_stream = runtime.ActiveStream(
                 operation_id=routed_operation,

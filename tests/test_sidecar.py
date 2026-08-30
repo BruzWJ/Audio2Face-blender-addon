@@ -138,6 +138,7 @@ def test_sidecar_exchanges_jsonl_and_shuts_down_cleanly(tmp_path: Path) -> None:
             event for event in shutdown_events if isinstance(event, ProcessExited)
         )
         assert exit_event.returncode == 0
+        assert shutdown_events[-1] is exit_event
         assert client.state is Lifecycle.STOPPED
     finally:
         client.close(timeout=1.0)

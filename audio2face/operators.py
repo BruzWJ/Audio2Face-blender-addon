@@ -12,17 +12,32 @@ from .properties import (
 )
 from .runtime import RuntimeController, get_controller
 from .shape_keys import supports_shape_keys
-from .sidecar import Lifecycle, SidecarError
+from .sidecar import Lifecycle
 
 
 def _run_runtime(
-    operator: bpy.types.Operator,
+    scene: bpy.types.Scene,
     operation: Callable[[RuntimeController], None],
 ) -> set[str]:
+    controller = get_controller()
     try:
-        operation(get_controller())
-    except (OSError, SidecarError, ValueError) as exc:
-        operator.report({"ERROR"}, str(exc))
+        operation(controller)
+    except (OSError, RuntimeError, ValueError) as exc:
+        controller._set_status(scene, "ERROR", str(exc))
+        return {"CANCELLED"}
+    return {"FINISHED"}
+
+
+def _run_optimization(
+    operation: Callable[[RuntimeController], None],
+) -> set[str]:
+    controller = get_controller()
+    try:
+        operation(controller)
+    except (OSError, RuntimeError, ValueError) as exc:
+        controller.optimization_failed = True
+        controller.optimization_message = str(exc)
+        controller._tag_runtime_setup_redraw()
         return {"CANCELLED"}
     return {"FINISHED"}
 
@@ -33,7 +48,10 @@ class A2F_OT_start_worker(bpy.types.Operator):
     bl_description = "Start the bundled local Audio2Face GPU worker"
 
     def execute(self, context: bpy.types.Context) -> set[str]:
-        return _run_runtime(self, lambda controller: controller.start(context.scene))
+        return _run_runtime(
+            context.scene,
+            lambda controller: controller.start(context.scene),
+        )
 
 
 class A2F_OT_optimize_models(bpy.types.Operator):
@@ -52,7 +70,7 @@ class A2F_OT_optimize_models(bpy.types.Operator):
         return can_optimize
 
     def execute(self, _context: bpy.types.Context) -> set[str]:
-        return _run_runtime(self, lambda controller: controller.optimize_models())
+        return _run_optimization(lambda controller: controller.optimize_models())
 
 
 class A2F_OT_cancel_model_optimization(bpy.types.Operator):
@@ -68,9 +86,8 @@ class A2F_OT_cancel_model_optimization(bpy.types.Operator):
         return in_progress
 
     def execute(self, _context: bpy.types.Context) -> set[str]:
-        return _run_runtime(
-            self,
-            lambda controller: controller.cancel_model_optimization(),
+        return _run_optimization(
+            lambda controller: controller.cancel_model_optimization()
         )
 
 
@@ -80,7 +97,10 @@ class A2F_OT_stop_worker(bpy.types.Operator):
     bl_description = "Request graceful worker shutdown without blocking Blender"
 
     def execute(self, context: bpy.types.Context) -> set[str]:
-        return _run_runtime(self, lambda controller: controller.stop(context.scene))
+        return _run_runtime(
+            context.scene,
+            lambda controller: controller.stop(context.scene),
+        )
 
 
 class A2F_OT_reset_model_tuning(bpy.types.Operator):
@@ -89,9 +109,11 @@ class A2F_OT_reset_model_tuning(bpy.types.Operator):
     bl_description = "Reset all Model Tuning controls to their default values"
 
     def execute(self, context: bpy.types.Context) -> set[str]:
-        reset_model_tuning(context.scene.audio2face)
-        get_controller().refresh_inference_settings(context.scene)
-        return {"FINISHED"}
+        def reset(controller: RuntimeController) -> None:
+            reset_model_tuning(context.scene.audio2face)
+            controller.refresh_inference_settings(context.scene)
+
+        return _run_runtime(context.scene, reset)
 
 
 class A2F_OT_reset_emotion_settings(bpy.types.Operator):
@@ -100,9 +122,11 @@ class A2F_OT_reset_emotion_settings(bpy.types.Operator):
     bl_description = "Reset Emotion Tuning controls to their default values"
 
     def execute(self, context: bpy.types.Context) -> set[str]:
-        reset_emotion_settings(context.scene.audio2face)
-        get_controller().refresh_inference_settings(context.scene)
-        return {"FINISHED"}
+        def reset(controller: RuntimeController) -> None:
+            reset_emotion_settings(context.scene.audio2face)
+            controller.refresh_inference_settings(context.scene)
+
+        return _run_runtime(context.scene, reset)
 
 
 class A2F_OT_add_selected_targets(bpy.types.Operator):
@@ -125,13 +149,6 @@ class A2F_OT_add_selected_targets(bpy.types.Operator):
         selected = [
             obj for obj in context.selected_objects if supports_shape_keys(obj)
         ]
-        if not selected:
-            self.report(
-                {"ERROR"},
-                "select a Mesh, Curve, Surface, or Lattice object",
-            )
-            return {"CANCELLED"}
-
         last_added_index: int | None = None
         existing = {
             item.object.as_pointer()
@@ -145,11 +162,8 @@ class A2F_OT_add_selected_targets(bpy.types.Operator):
             item.object = target
             existing.add(target.as_pointer())
             last_added_index = len(settings.target_objects) - 1
-        if last_added_index is None:
-            self.report({"INFO"}, "Selected objects are already targets")
-            return {"FINISHED"}
-        settings.target_object_index = last_added_index
-        self.report({"INFO"}, "Added selected objects as targets")
+        if last_added_index is not None:
+            settings.target_object_index = last_added_index
         return {"FINISHED"}
 
 
@@ -174,9 +188,6 @@ class A2F_OT_remove_target(bpy.types.Operator):
     def execute(self, context: bpy.types.Context) -> set[str]:
         settings = context.scene.audio2face
         index = settings.target_object_index
-        if not 0 <= index < len(settings.target_objects):
-            self.report({"ERROR"}, "selected target object index is invalid")
-            return {"CANCELLED"}
         settings.target_objects.remove(index)
         if settings.target_objects:
             settings.target_object_index = min(
@@ -216,7 +227,7 @@ class A2F_OT_bake_animation(bpy.types.Operator):
 
     def execute(self, context: bpy.types.Context) -> set[str]:
         return _run_runtime(
-            self,
+            context.scene,
             lambda controller: controller.bake_selected_audio(context.scene),
         )
 
@@ -239,7 +250,7 @@ class A2F_OT_cancel_bake(bpy.types.Operator):
 
     def execute(self, context: bpy.types.Context) -> set[str]:
         return _run_runtime(
-            self,
+            context.scene,
             lambda controller: controller.cancel_bake(context.scene),
         )
 

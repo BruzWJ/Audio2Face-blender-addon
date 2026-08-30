@@ -143,16 +143,22 @@ class A2F_PT_main(bpy.types.Panel):
         elif not setup.engine_status.ready:
             runtime_message = setup.engine_status.message
 
-        status_notice = controller.status_notice(context.scene)
-        if status_notice is not None:
-            status, message = status_notice
+        if settings.status not in {
+            "IDLE",
+            "MODEL_READY",
+            "STREAM_STARTING",
+            "STREAMING",
+            "STREAM_ENDING",
+            "BAKING",
+            "STOPPING",
+        }:
             status_box = layout.box()
-            status_box.alert = status == "ERROR"
+            status_box.alert = settings.status == "ERROR"
             draw_wrapped_label(
                 status_box,
-                message,
+                settings.status_message,
                 width=text_width,
-                icon="ERROR" if status == "ERROR" else "TIME",
+                icon="ERROR" if settings.status == "ERROR" else "TIME",
             )
         if controller.optimization_in_progress:
             runtime_box = layout.box()

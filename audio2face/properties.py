@@ -168,6 +168,7 @@ def _configure_selected_audio_timeline(
     settings: bpy.types.PropertyGroup,
     scene: bpy.types.Scene,
 ) -> tuple[int, int] | None:
+    from .runtime import get_controller
     from .selected_audio_timeline import (
         configure_selected_audio,
         remove_selected_audio_strips,
@@ -182,10 +183,13 @@ def _configure_selected_audio_timeline(
             audio_path,
             first_frame=settings.audio_first_frame,
         )
-    except (OSError, ValueError) as exc:
-        remove_selected_audio_strips(scene)
-        settings.status = "ERROR"
-        settings.status_message = str(exc)
+    except (OSError, RuntimeError, ValueError) as exc:
+        message = str(exc)
+        try:
+            remove_selected_audio_strips(scene)
+        except (OSError, RuntimeError, ValueError) as cleanup_exc:
+            message = f"{message}; could not remove selected audio strip: {cleanup_exc}"
+        get_controller().selected_audio_failed(scene, message)
         return None
     return frame_span
 
@@ -204,17 +208,27 @@ def _audio_path_updated(
         return
     controller = get_controller()
     if not settings.audio_path:
-        controller.selected_audio_changed(scene)
-        remove_selected_audio_strips(scene)
-        return
-    if _configure_selected_audio_timeline(settings, scene) is None:
+        message: str | None = None
         try:
             controller.selected_audio_changed(scene)
         except (OSError, RuntimeError, ValueError) as exc:
-            settings.status = "ERROR"
-            settings.status_message = str(exc)
+            message = str(exc)
+        try:
+            remove_selected_audio_strips(scene)
+        except (OSError, RuntimeError, ValueError) as cleanup_exc:
+            cleanup_message = f"could not remove selected audio strip: {cleanup_exc}"
+            message = (
+                cleanup_message if message is None else f"{message}; {cleanup_message}"
+            )
+        if message is not None:
+            controller.selected_audio_failed(scene, message)
         return
-    controller.selected_audio_changed(scene)
+    if _configure_selected_audio_timeline(settings, scene) is None:
+        return
+    try:
+        controller.selected_audio_changed(scene)
+    except (OSError, RuntimeError, ValueError) as exc:
+        controller.selected_audio_failed(scene, str(exc))
 
 
 def _audio_first_frame_updated(
@@ -259,11 +273,21 @@ def _input_mode_updated(
     scene = _update_scene(context)
     if scene is None:
         return
-    get_controller().input_mode_changed(scene)
+    controller = get_controller()
+    controller.input_mode_changed(scene)
     if settings.input_mode == "SELECTED":
         _audio_first_frame_updated(settings, context)
         return
-    remove_selected_audio_strips(scene)
+    try:
+        remove_selected_audio_strips(scene)
+    except (OSError, RuntimeError, ValueError) as cleanup_exc:
+        cleanup_message = f"could not remove selected audio strip: {cleanup_exc}"
+        message = (
+            f"{settings.status_message}; {cleanup_message}"
+            if settings.status == "ERROR"
+            else cleanup_message
+        )
+        controller.selected_audio_failed(scene, message)
 
 
 def _target_object_poll(

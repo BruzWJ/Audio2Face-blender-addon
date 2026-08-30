@@ -201,58 +201,6 @@ def _stream_pending(
     )
 
 
-def test_status_notice_debounces_one_continuous_busy_period(
-    runtime_module: tuple[ModuleType, ModuleType],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    runtime, bpy = runtime_module
-    scene, _settings = _local_scene(bpy)
-    controller = runtime.RuntimeController()
-    now = [10.0]
-    redraws: list[None] = []
-    monkeypatch.setattr(runtime.time, "monotonic", lambda: now[0])
-    monkeypatch.setattr(
-        controller,
-        "_tag_runtime_setup_redraw",
-        lambda: redraws.append(None),
-    )
-
-    controller._set_status(scene, "STREAM_STARTING", "Preparing inference")
-    now[0] += runtime._STATUS_NOTICE_DELAY_SECONDS / 2.0
-    controller._set_status(scene, "STREAMING", "PCM stream is ready")
-    now[0] += runtime._STATUS_NOTICE_DELAY_SECONDS
-    controller._poll_status_notices()
-    assert controller.status_notice(scene) is None
-
-    controller._set_status(scene, "ERROR", "Audio device failed")
-    assert controller.status_notice(scene) == ("ERROR", "Audio device failed")
-    controller.startup_scene = scene.name
-    controller.client.poll = lambda: [runtime.ClientDiagnostic("worker log")]
-    controller.poll()
-    assert controller.last_worker_diagnostic == "worker log"
-    assert controller.status_notice(scene) == ("ERROR", "Audio device failed")
-
-    controller._set_status(scene, "MODEL_READY", "Selected WAV is ready")
-    redraws.clear()
-    controller._set_status(scene, "TRACK_UPLOADING", "Uploading audio")
-    assert controller.status_notice(scene) is None
-    now[0] += runtime._STATUS_NOTICE_DELAY_SECONDS / 2.0
-    controller._set_status(scene, "TRACK_PREPARING", "Rendering audio")
-    redraws.clear()
-    now[0] += runtime._STATUS_NOTICE_DELAY_SECONDS / 2.0
-    controller._poll_status_notices()
-
-    assert controller.status_notice(scene) == ("TRACK_PREPARING", "Rendering audio")
-    assert redraws == [None]
-    controller._poll_status_notices()
-    assert redraws == [None]
-    controller._set_status(scene, "BAKING", "Rendering animation")
-    assert controller.status_notice(scene) == ("BAKING", "Rendering animation")
-
-    controller._set_status(scene, "MODEL_READY", "Selected WAV is ready")
-    assert controller.status_notice(scene) is None
-
-
 @pytest.fixture
 def runtime_module(monkeypatch: pytest.MonkeyPatch) -> tuple[ModuleType, ModuleType]:
     bpy = ModuleType("bpy")
@@ -797,12 +745,20 @@ def test_hello_without_its_startup_spec_is_rejected(
     assert stopped == [runtime.SHUTDOWN_TIMEOUT_SECONDS]
 
 
-def test_exact_model_response_marks_model_ready(
+@pytest.mark.parametrize(
+    ("initial_status", "expected_status"),
+    [("LOADING_MODEL", "MODEL_READY"), ("ERROR", "ERROR")],
+)
+def test_exact_model_response_only_completes_its_owned_status(
     runtime_module: tuple[ModuleType, ModuleType],
+    initial_status: str,
+    expected_status: str,
 ) -> None:
     runtime, bpy = runtime_module
     scene, settings = _local_scene(bpy)
     controller = runtime.RuntimeController()
+    settings.status = initial_status
+    settings.status_message = "timeline failure"
     signature = ("audio2face/model.json", "audio2emotion/model.json")
     controller.pending["load"] = _model_pending(runtime, scene.name, signature)
 
@@ -816,7 +772,9 @@ def test_exact_model_response_marks_model_ready(
         }
     )
 
-    assert settings.status == "MODEL_READY"
+    assert settings.status == expected_status
+    if expected_status == "ERROR":
+        assert settings.status_message == "timeline failure"
     assert controller.loaded_signature == signature
     assert controller.model_sample_rate == 16_000
     assert controller.model_schema == _model_schema()
@@ -991,6 +949,22 @@ def test_idless_worker_error_is_a_terminal_diagnostic(
     assert shutdown_timeouts == [runtime.SHUTDOWN_TIMEOUT_SECONDS]
 
 
+def test_worker_stderr_is_telemetry_not_operation_status(
+    runtime_module: tuple[ModuleType, ModuleType],
+) -> None:
+    runtime, bpy = runtime_module
+    scene, settings = _local_scene(bpy)
+    controller = runtime.RuntimeController()
+    controller.startup_scene = scene.name
+    controller._set_status(scene, "TRACK_PREPARING", "Rendering audio")
+    controller.client.poll = lambda: [runtime.ClientDiagnostic("worker log")]
+
+    controller.poll()
+
+    assert controller.last_worker_diagnostic == "worker log"
+    assert settings.status_message == "Rendering audio"
+
+
 def test_event_routing_rejects_an_unknown_operation_id(
     runtime_module: tuple[ModuleType, ModuleType],
 ) -> None:
@@ -1103,6 +1077,30 @@ def test_rejected_worker_exit_preserves_error_on_every_editable_scene(
     assert second_settings.status_message == "terminal contract failure"
 
 
+def test_clean_worker_exit_only_clears_shutdown_owned_status(
+    runtime_module: tuple[ModuleType, ModuleType],
+) -> None:
+    runtime, bpy = runtime_module
+    stopped_scene, stopped_settings = _local_scene(bpy, "Stopped")
+    failed_settings = _Settings()
+    failed_settings.status = "ERROR"
+    failed_settings.status_message = "timeline failure"
+    failed_scene = _Scene("Failed", editable=True, settings=failed_settings)
+    bpy.data.scenes.append(failed_scene)  # type: ignore[attr-defined]
+    controller = runtime.RuntimeController()
+    controller.client._state = runtime.Lifecycle.RUNNING
+    controller.client.begin_shutdown = lambda *, timeout: "shutdown"
+
+    controller.stop(stopped_scene)
+    controller.client.tick = lambda: None
+    controller.client.poll = lambda: [runtime.ProcessExited(0)]
+    controller.poll()
+
+    assert stopped_settings.status == "IDLE"
+    assert failed_settings.status == "ERROR"
+    assert failed_settings.status_message == "timeline failure"
+
+
 def test_cancel_error_terminates_the_matching_stream(
     runtime_module: tuple[ModuleType, ModuleType],
 ) -> None:
@@ -1151,7 +1149,8 @@ def test_late_non_shutdown_response_does_not_replace_stopping_state(
     scene, settings = _local_scene(bpy)
     settings.status = "STOPPING"
     controller = runtime.RuntimeController()
-    controller.client._state = runtime.Lifecycle.STOPPING
+    controller.expected_worker_exit = True
+    controller.client._state = runtime.Lifecycle.STOPPED
     controller.pending["load"] = _model_pending(
         runtime,
         scene.name,
@@ -1166,6 +1165,17 @@ def test_late_non_shutdown_response_does_not_replace_stopping_state(
                 "sample_rate": 16_000,
             },
         }
+    )
+
+    assert settings.status == "STOPPING"
+
+    controller.pending["load-error"] = _model_pending(
+        runtime,
+        scene.name,
+        ("audio2face/model.json", "audio2emotion/model.json"),
+    )
+    controller._handle_error(
+        {"id": "load-error", "error": {"code": "late", "message": "ignored"}}
     )
 
     assert settings.status == "STOPPING"
@@ -1381,6 +1391,16 @@ def test_setting_edit_updates_an_active_stream_without_stalling_audio(
     assert controller.rejected_reason is None
     assert controller.active_stream is stream
 
+    def reject_request(_method: str, _params: dict[str, object]) -> str:
+        raise runtime.SidecarError("worker pipe closed")
+
+    controller.client.request = reject_request
+    controller.refresh_inference_settings(scene)
+
+    assert settings.status == "ERROR"
+    assert "worker pipe closed" in settings.status_message
+    assert controller.active_stream is None
+
 
 def test_stream_start_submits_the_same_complete_inference_settings(
     runtime_module: tuple[ModuleType, ModuleType],
@@ -1434,6 +1454,7 @@ def test_stream_to_selected_waits_for_stream_terminal_then_starts_track(
     controller.model_sample_rate = 16_000
     controller.model_schema = _model_schema()
     controller.loaded_signature = ("face/model.json", "emotion/model.json")
+    settings.status = "STREAMING"
     stream = _activate_stream(runtime, controller, scene)
     monkeypatch.setattr(runtime, "WavStreamSource", _FakeSelectedWavSource)
     requests: list[tuple[str, dict[str, object]]] = []
@@ -1466,6 +1487,29 @@ def test_stream_to_selected_waits_for_stream_terminal_then_starts_track(
         for call in runtime._test_live_controller.stop_calls
     )
     assert scene.frame_set_calls == []
+
+
+def test_input_mode_failure_does_not_claim_stream_cancellation(
+    runtime_module: tuple[ModuleType, ModuleType],
+) -> None:
+    runtime, bpy = runtime_module
+    scene, settings = _local_scene(bpy)
+    settings.input_mode = "SELECTED"
+    settings.status = "STREAMING"
+    controller = runtime.RuntimeController()
+    stream = _activate_stream(runtime, controller, scene)
+
+    def reject_request(_method: str, _params: dict[str, object]) -> str:
+        raise runtime.SidecarError("worker pipe closed")
+
+    controller.client.request = reject_request
+    controller.input_mode_changed(scene)
+
+    assert stream.stop_requested is False
+    assert controller.active_stream is stream
+    assert runtime._test_live_controller.stop_calls == []
+    assert settings.status == "ERROR"
+    assert settings.status_message == "worker pipe closed"
 
 
 def test_selected_to_stream_retains_first_pcm_until_track_terminal(
@@ -1562,6 +1606,8 @@ def test_selected_track_uploads_once_then_starts_one_continuous_render(
             "result": {},
         }
     )
+    settings = bpy.data.scenes[0].audio2face
+    settings.status = "BAKING"
     controller._handle_response(
         {
             "id": "request-3",
@@ -1576,6 +1622,7 @@ def test_selected_track_uploads_once_then_starts_one_continuous_render(
         "track_prepare",
     ]
     assert source.advances == 2
+    assert settings.status == "BAKING"
     assert [
         base64.b64decode(params["audio_f32le_base64"], validate=True)
         for method, params in requests
@@ -1603,6 +1650,84 @@ def test_selected_track_uploads_once_then_starts_one_continuous_render(
     )
     assert track.render_revision == 1
     assert track.stage == runtime.TrackRenderStage(1)
+    assert settings.status == "BAKING"
+
+
+def test_failed_selected_track_does_not_retry_the_same_audio(
+    runtime_module: tuple[ModuleType, ModuleType],
+) -> None:
+    runtime, bpy = runtime_module
+    scene, settings = _local_scene(bpy)
+    settings.audio_path = "/audio/selected.wav"
+    controller = runtime.RuntimeController()
+    track = _activate_track(runtime, controller, scene)
+    controller.pending["chunk"] = _stream_pending(
+        runtime,
+        "track_chunk",
+        scene.name,
+        track.operation_id,
+    )
+    requests: list[tuple[str, dict[str, object]]] = []
+    controller.client.request = lambda method, params: (
+        requests.append((method, params)) or "cancel-track"
+    )
+
+    controller._handle_error(
+        {"id": "chunk", "error": {"code": "failed", "message": "bad audio"}}
+    )
+    controller._handle_response({"id": "cancel-track", "result": {}})
+    controller._handle_event(
+        {
+            "event": "track_ended",
+            "operation_id": track.operation_id,
+            "data": {"reason": "canceled"},
+        }
+    )
+
+    assert requests == [("cancel", {"operation_id": track.operation_id})]
+    assert controller.selected_track is None
+    assert settings.status == "ERROR"
+    assert settings.status_message == "failed: bad audio"
+
+
+@pytest.mark.parametrize("scene_available", [False, True])
+def test_replacement_cancel_race_preserves_a_later_error(
+    runtime_module: tuple[ModuleType, ModuleType],
+    scene_available: bool,
+) -> None:
+    runtime, bpy = runtime_module
+    scene, settings = _local_scene(bpy)
+    settings.audio_path = "/audio/replacement.wav"
+    controller = runtime.RuntimeController()
+    controller.client._state = runtime.Lifecycle.RUNNING
+    track = _activate_track(runtime, controller, scene)
+    controller.client.request = lambda _method, _params: "cancel-track"
+
+    controller.selected_audio_changed(scene)
+    if not scene_available:
+        bpy.data.scenes = _Scenes()  # type: ignore[attr-defined]
+    controller._handle_error(
+        {
+            "id": "cancel-track",
+            "error": {"code": "operation_not_found", "message": "already ended"},
+        }
+    )
+    assert controller.selected_track is track
+
+    settings.status = "ERROR"
+    settings.status_message = "timeline failure"
+    controller._handle_event(
+        {
+            "event": "track_ended",
+            "operation_id": track.operation_id,
+            "data": {"reason": "canceled"},
+        }
+    )
+
+    assert controller.selected_track is None
+    assert controller.rejected_reason is None
+    assert settings.status == "ERROR"
+    assert settings.status_message == "timeline failure"
 
 
 def test_setting_edits_supersede_render_revisions_and_ignore_stale_output(
@@ -1698,6 +1823,39 @@ def test_setting_edits_supersede_render_revisions_and_ignore_stale_output(
     assert controller.selected_track is track
     assert runtime._test_live_controller.stop_calls == []
 
+    controller._handle_error(
+        {
+            "id": "request-2",
+            "error": {"code": "inference_failed", "message": "render failed"},
+        }
+    )
+    assert track.render_error == "inference_failed: render failed"
+    assert settings.status == "ERROR"
+
+    settings.skin_strength = 0.5
+    controller.refresh_inference_settings(scene)
+
+    assert requests[-1][1]["revision"] == 3
+    assert settings.status == "ERROR"
+    assert settings.status_message == "inference_failed: render failed"
+
+    settings.status_message = "timeline failure"
+    assert track.stage is not None
+    track.stage.total_frames = 1
+    track.stage.timestamps.append(0)
+    track.stage.weights.append((0.3,) * len(MODEL_CHANNELS))
+    track.stage.effective_emotions.append(tuple(MODEL_EMOTIONS))
+    controller._handle_response(
+        {
+            "id": "request-3",
+            "result": {"revision": 3, "frame_count": 1, "superseded": False},
+        }
+    )
+
+    assert track.render_error is None
+    assert settings.status == "ERROR"
+    assert settings.status_message == "timeline failure"
+
 
 def test_reverting_to_published_settings_supersedes_inflight_render(
     runtime_module: tuple[ModuleType, ModuleType],
@@ -1734,6 +1892,15 @@ def test_reverting_to_published_settings_supersedes_inflight_render(
     assert track.render_revision == 2
     assert track.render_settings == track.published_settings
     assert track.stage == runtime.TrackRenderStage(2)
+
+    track.stage = None
+    track.render_error = "inference_failed: render failed"
+    settings.status = "ERROR"
+    settings.status_message = track.render_error
+    controller.refresh_inference_settings(scene)
+
+    assert track.render_error is None
+    assert settings.status == "MODEL_READY"
 
 
 def test_native_frame_changes_only_sample_the_published_cache(
@@ -1788,6 +1955,8 @@ def test_bounded_track_frame_batches_publish_atomically_on_render_completion(
     scene, settings = _local_scene(bpy)
     settings.audio_path = "/audio/selected.wav"
     controller = runtime.RuntimeController()
+    settings.status = "MODEL_READY"
+    settings.status_message = "Selected WAV is ready"
     controller.model_sample_rate = 48_000
     controller.model_schema = _model_schema()
     track = _activate_track(runtime, controller, scene, audio_samples=96_001)
@@ -1847,6 +2016,7 @@ def test_bounded_track_frame_batches_publish_atomically_on_render_completion(
     assert track.stage is None
     assert controller.rejected_reason is None
     assert settings.status == "MODEL_READY"
+    assert settings.status_message == "Selected WAV is ready"
 
 
 def test_native_frame_change_does_not_create_a_worker_track(
@@ -2176,6 +2346,8 @@ def test_exact_stream_frame_routes_negative_timestamp_and_arkit52(
     runtime, bpy = runtime_module
     scene, settings = _local_scene(bpy)
     controller = runtime.RuntimeController()
+    settings.status = "STREAMING"
+    settings.status_message = "PCM stream is ready"
     _activate_stream(runtime, controller, scene)
     weights = [0.25] * len(MODEL_CHANNELS)
 
@@ -2195,6 +2367,7 @@ def test_exact_stream_frame_routes_negative_timestamp_and_arkit52(
         ("stream-1", -320, weights, MODEL_EMOTIONS)
     ]
     assert settings.status == "STREAMING"
+    assert settings.status_message == "PCM stream is ready"
 
 
 def test_late_frame_from_a_canceling_stream_is_drained_without_delivery(
@@ -2343,6 +2516,8 @@ def test_stream_tail_keeps_ui_state_until_presentation_stops(
     runtime, bpy = runtime_module
     scene, settings = _local_scene(bpy)
     controller = runtime.RuntimeController()
+    controller.client._state = runtime.Lifecycle.RUNNING
+    settings.status = "STREAMING"
     stream = _activate_stream(
         runtime,
         controller,
@@ -2355,17 +2530,38 @@ def test_stream_tail_keeps_ui_state_until_presentation_stops(
 
     assert controller.active_stream is stream
     assert stream.worker_ended is True
-    assert settings.status == "STREAMING"
+    assert settings.status == "STREAM_ENDING"
     assert "Finishing buffered" in settings.status_message
 
     runtime._test_live_controller.is_active = False
     controller._finish_stream_presentation(
         scene.name,
         "stream-1",
+        None,
     )
 
     assert controller.active_stream is None
     assert settings.status == "MODEL_READY"
+
+
+def test_stream_presentation_failure_becomes_persistent_scene_error(
+    runtime_module: tuple[ModuleType, ModuleType],
+) -> None:
+    runtime, bpy = runtime_module
+    scene, settings = _local_scene(bpy)
+    settings.status = "STREAMING"
+    controller = runtime.RuntimeController()
+    _activate_stream(runtime, controller, scene, worker_ended=True)
+
+    controller._finish_stream_presentation(
+        scene.name,
+        "stream-1",
+        "target Shape Key is unavailable",
+    )
+
+    assert controller.active_stream is None
+    assert settings.status == "ERROR"
+    assert settings.status_message == "target Shape Key is unavailable"
 
 
 def test_stream_request_error_preserves_failure_through_terminal_event(
@@ -2484,6 +2680,8 @@ def test_canceled_stream_ends_local_audio_instead_of_finishing_playback(
     runtime, bpy = runtime_module
     scene, settings = _local_scene(bpy)
     controller = runtime.RuntimeController()
+    controller.client._state = runtime.Lifecycle.RUNNING
+    settings.status = "STREAM_ENDING"
     _activate_stream(
         runtime,
         controller,
@@ -2557,10 +2755,12 @@ def test_malformed_error_event_cleans_its_active_stream(
     ]
 
 
+@pytest.mark.parametrize("prepared", [False, True])
 def test_bake_waits_for_one_continuous_render_without_reuploading_audio(
     runtime_module: tuple[ModuleType, ModuleType],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    prepared: bool,
 ) -> None:
     runtime, bpy = runtime_module
     scene, settings = _local_scene(bpy)
@@ -2572,7 +2772,7 @@ def test_bake_waits_for_one_continuous_render_without_reuploading_audio(
     controller.model_sample_rate = 48_000
     controller.model_schema = _model_schema()
     controller.loaded_signature = ("face/model.json", "emotion/model.json")
-    track = _activate_track(runtime, controller, scene)
+    track = _activate_track(runtime, controller, scene, prepared=prepared)
     plan = object()
     monkeypatch.setattr(controller, "_require_worker_ready", lambda: None)
     monkeypatch.setattr(runtime, "plan_bake_targets", lambda *_args: (plan,))
@@ -2591,18 +2791,23 @@ def test_bake_waits_for_one_continuous_render_without_reuploading_audio(
     assert controller.selected_track is track
     assert controller.active_bake is not None
     assert controller.active_bake.targets == (plan,)
-    assert requests == [
-        (
-            "track_render",
-            {
-                "operation_id": track.operation_id,
-                "revision": 1,
-                "settings": _inference_settings_payload(),
-                "preview_sample": 0,
-            },
-        )
-    ]
-    assert track.stage == runtime.TrackRenderStage(1)
+    assert requests == (
+        [
+            (
+                "track_render",
+                {
+                    "operation_id": track.operation_id,
+                    "revision": 1,
+                    "settings": _inference_settings_payload(),
+                    "preview_sample": 0,
+                },
+            )
+        ]
+        if prepared
+        else []
+    )
+    assert track.stage == (runtime.TrackRenderStage(1) if prepared else None)
+    assert settings.status == "BAKING"
     assert track.wav_source.close_calls == 0
     assert runtime._test_live_controller.stop_calls == []
 
@@ -2650,8 +2855,12 @@ def test_bake_samples_the_exact_published_cache_on_blender_frames(
         requests.append((method, params)) or f"request-{len(requests)}"
     )
     calls: list[tuple[object, ...]] = []
+    intervening_error = False
 
     def build_actions(*args: object) -> tuple[object, ...]:
+        if intervening_error:
+            settings.status = "ERROR"
+            settings.status_message = "timeline failure"
         calls.append(args)
         return (object(),)
 
@@ -2671,6 +2880,37 @@ def test_bake_samples_the_exact_published_cache_on_blender_frames(
     assert scene.frame_set_calls == []
     assert track.wav_source.close_calls == 0
     assert settings.status == "MODEL_READY"
+
+    intervening_error = True
+    _activate_bake(runtime, controller, scene, frame_start=10, frame_end=12)
+    settings.status = "BAKING"
+    controller._finish_bake(scene)
+
+    assert settings.status == "ERROR"
+    assert settings.status_message == "timeline failure"
+
+
+def test_timer_failure_does_not_stop_the_worker(
+    runtime_module: tuple[ModuleType, ModuleType],
+) -> None:
+    runtime, bpy = runtime_module
+    _scene, settings = _local_scene(bpy)
+    controller = runtime.RuntimeController()
+    shutdowns: list[float] = []
+    controller.client.begin_shutdown = lambda *, timeout: shutdowns.append(timeout)
+
+    def fail_poll() -> None:
+        raise RuntimeError("target update failed")
+
+    controller.poll = fail_poll
+    runtime._CONTROLLER = controller
+
+    assert runtime._timer_callback() == runtime.POLL_INTERVAL_SECONDS
+    assert controller.rejected_reason is None
+    assert controller.expected_worker_exit is False
+    assert shutdowns == []
+    assert settings.status == "ERROR"
+    assert settings.status_message == "Blender runtime failure: target update failed"
 
 
 def test_runtime_registration_does_not_access_restricted_blend_data(

@@ -178,6 +178,9 @@ def test_selected_audio_callbacks_manage_source_placement_and_mode(
     monkeypatch.setitem(sys.modules, timeline.__name__, timeline)
     controller = SimpleNamespace(
         selected_audio_changed=lambda scene: calls.append(("source", scene)),
+        selected_audio_failed=lambda scene, message: calls.append(
+            ("failure", scene, message)
+        ),
         request_selected_frame=lambda scene: calls.append(("frame", scene)),
         input_mode_changed=lambda scene: calls.append(("mode", scene)),
     )
@@ -188,6 +191,8 @@ def test_selected_audio_callbacks_manage_source_placement_and_mode(
         input_mode="SELECTED",
         audio_path="first.wav",
         audio_first_frame=12,
+        status="MODEL_READY",
+        status_message="Selected WAV is ready",
     )
     scene = SimpleNamespace(audio2face=settings)
     context = SimpleNamespace(scene=scene)
@@ -214,6 +219,43 @@ def test_selected_audio_callbacks_manage_source_placement_and_mode(
         ("frame", scene),
         ("mode", scene),
         ("remove", scene),
+    ]
+
+    def reject_audio(*_args: object, **_kwargs: object) -> None:
+        raise ValueError("invalid WAV")
+
+    timeline.configure_selected_audio = reject_audio  # type: ignore[attr-defined]
+    settings.audio_path = "broken.wav"
+    properties_module._audio_path_updated(settings, context)
+
+    assert calls[-2:] == [("remove", scene), ("failure", scene, "invalid WAV")]
+
+    def reject_blender_audio(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("Blender could not create the sound strip")
+
+    timeline.configure_selected_audio = reject_blender_audio  # type: ignore[attr-defined]
+    properties_module._audio_path_updated(settings, context)
+
+    assert calls[-2:] == [
+        ("remove", scene),
+        ("failure", scene, "Blender could not create the sound strip"),
+    ]
+
+    def reject_strip_removal(_scene: object) -> None:
+        raise RuntimeError("Blender could not remove the sound strip")
+
+    timeline.remove_selected_audio_strips = reject_strip_removal  # type: ignore[attr-defined]
+    settings.audio_path = ""
+    properties_module._audio_path_updated(settings, context)
+
+    assert calls[-2:] == [
+        ("source", scene),
+        (
+            "failure",
+            scene,
+            "could not remove selected audio strip: "
+            "Blender could not remove the sound strip",
+        ),
     ]
     annotations = properties_module.A2FSceneSettings.__annotations__
     assert "update=_input_mode_updated" in annotations["input_mode"]

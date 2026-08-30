@@ -120,18 +120,26 @@ class SidecarClient:
         process.stdin.reconfigure(newline="\n")
         process.stdout.reconfigure(newline="")
         process.stderr.reconfigure(newline="")
-        self._threads = [
+        pipe_threads = (
             self._thread("a2f-worker-stdin", self._writer_loop, process),
             self._thread("a2f-worker-stdout", self._stdout_loop, process),
             self._thread("a2f-worker-stderr", self._stderr_loop, process),
-            self._thread("a2f-worker-watch", self._watch_loop, process),
+        )
+        self._threads = [
+            *pipe_threads,
+            self._thread(
+                "a2f-worker-watch",
+                self._watch_loop,
+                process,
+                pipe_threads,
+            ),
         ]
+        for thread in self._threads:
+            thread.start()
 
     @staticmethod
-    def _thread(name: str, target: Any, process: subprocess.Popen[str]) -> threading.Thread:
-        thread = threading.Thread(name=name, target=target, args=(process,), daemon=True)
-        thread.start()
-        return thread
+    def _thread(name: str, target: Any, *args: object) -> threading.Thread:
+        return threading.Thread(name=name, target=target, args=args, daemon=True)
 
     @staticmethod
     def _drain_queue(target: queue.Queue[Any]) -> None:
@@ -190,9 +198,15 @@ class SidecarClient:
         except (OSError, ValueError) as exc:
             self._incoming.put(ClientDiagnostic(f"worker stderr failed: {exc}"))
 
-    def _watch_loop(self, process: subprocess.Popen[str]) -> None:
+    def _watch_loop(
+        self,
+        process: subprocess.Popen[str],
+        pipe_threads: tuple[threading.Thread, ...],
+    ) -> None:
         returncode = process.wait()
         self._outgoing.put(None)
+        for thread in pipe_threads:
+            thread.join()
         with self._state_lock:
             if self._process is process:
                 self._state = Lifecycle.STOPPED if returncode == 0 else Lifecycle.FAILED
