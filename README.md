@@ -192,17 +192,19 @@ loop wraps sound and facial values together. The worker has no play, pause,
 loop, or seconds-position state. Frames outside the sound interval are neutral.
 
 Changing model tuning, emotion tuning, Preferred Emotion, or their keyframes
-starts a newer continuous render revision. Blender sends the values evaluated
-at native frames as one sample-based settings timeline. Editing an Action
-invalidates and rebuilds the complete schedule before transport is involved, so
-future FCurve edits are included even when the current value is unchanged. A
-newer revision supersedes older work without canceling the resident track, and
-a completed revision is published atomically; native playback keeps sampling
-the prior complete cache while that work runs. Edits made during playback or a
-bake stay pending until it stops, avoiding a hidden full-timeline seek inside
-native transport. The requested current-frame sample is emitted from the new
-continuous result before its cache batches, so paused preview and bake remain
-identical.
+queues a newer continuous render revision. Operator-backed Graph Editor and
+Dope Sheet transforms finish before Blender scans the values at native frames.
+Numeric edits may overlap a background scan, so temporary frame evaluation
+preserves values waiting to be inserted or updated as keys instead of restoring
+the old FCurve value over them. Editing an Action invalidates the complete
+schedule, so future FCurve edits are included even when the current value is
+unchanged. A newer revision supersedes older work without canceling the resident
+track, and a completed revision is published atomically; native playback keeps
+sampling the prior complete cache while that work runs. Edits made during
+playback or a bake stay pending until it stops, avoiding a hidden full-timeline
+seek inside native transport. The requested current-frame sample is emitted
+from the new continuous result before its cache batches, so paused preview and
+bake remain identical.
 
 **Bake Shape Key Animation** is asynchronous and separate from playback. From
 the native sound-strip start through its inclusive end, it samples the same

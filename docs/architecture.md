@@ -154,8 +154,15 @@ neutral. When an Action used by the scene changes, `depsgraph_update_post`
 queues a complete settings reevaluation on the existing main-thread timer, so
 an edit to a future FCurve cannot remain hidden by an unchanged current-frame
 value. If playback or baking is active, that invalidation remains pending while
-the prior cache continues; the full frame sweep runs after the native operation
-stops. No add-on handler observes or controls native transport.
+the prior cache continues. It also remains pending while a Blender modal
+operator is editing keyframes, so the add-on cannot change the global frame in
+the middle of a Graph Editor or Dope Sheet transform. The next main-loop poll
+runs the full frame sweep after the native operation stops; this is not a timed
+debounce. Before sweeping, the controller snapshots the current authored
+settings; after returning to the original frame, it restores any value which an
+existing FCurve re-evaluated. This keeps a value available for Blender's
+subsequent key insertion or update without altering the FCurve itself. No add-on
+handler observes or controls native transport.
 
 A tuning, emotion, or keyframe edit sends a newer `track_render` revision with
 one sample-based settings timeline evaluated over the native sound span. The

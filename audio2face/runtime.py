@@ -45,7 +45,11 @@ from .model_optimize import (
 from .path_contract import require_unaliased_path
 from .preferences import get_preferences
 from .protocol import WORKER_PROFILE
-from .properties import apply_model_schema, inference_settings
+from .properties import (
+    TIMELINE_SETTING_FIELDS,
+    apply_model_schema,
+    inference_settings,
+)
 from .selected_audio_timeline import (
     configure_selected_audio,
     frame_to_audio_sample,
@@ -293,9 +297,11 @@ MAX_STREAM_CHUNK_BYTES = 256 * 1024
 MAX_PENDING_STREAM_CHUNKS = 64
 
 
-def _native_playback_active() -> bool:
+def _native_frame_scan_blocked() -> bool:
+    """Return whether changing Blender's frame would disrupt a native operation."""
+
     return any(
-        window.screen.is_animation_playing
+        window.screen.is_animation_playing or len(window.modal_operators) > 0
         for manager in bpy.data.window_managers
         for window in manager.windows
     )
@@ -1114,6 +1120,15 @@ class RuntimeController:
         frame_start, frame_end = span
         original_frame = int(scene.frame_current)
         original_subframe = float(scene.frame_subframe)
+        settings = scene.audio2face
+        # Returning to the original frame re-applies its existing FCurves. Keep
+        # any UI value which is still waiting to be inserted as a new key.
+        authored_values = tuple(
+            (name, getattr(settings, name)) for name in TIMELINE_SETTING_FIELDS
+        )
+        preferred_values = tuple(
+            item.value for item in settings.preferred_emotions
+        )
         snapshots: list[tuple[int, dict[str, object]]] = []
         frame_samples: list[int] = []
         self.evaluating_settings_timeline = True
@@ -1137,7 +1152,19 @@ class RuntimeController:
             try:
                 scene.frame_set(original_frame, subframe=original_subframe)
             finally:
-                self.evaluating_settings_timeline = False
+                try:
+                    for name, value in authored_values:
+                        if getattr(settings, name) != value:
+                            setattr(settings, name, value)
+                    for item, value in zip(
+                        settings.preferred_emotions,
+                        preferred_values,
+                        strict=True,
+                    ):
+                        if item.value != value:
+                            item.value = value
+                finally:
+                    self.evaluating_settings_timeline = False
         return _settings_timeline(snapshots), tuple(frame_samples)
 
     def _settings_timeline_matches_current_frame(
@@ -1202,7 +1229,8 @@ class RuntimeController:
         """Apply the prepared row selected by Blender's current native frame."""
 
         if (
-            not scene.is_editable
+            self.evaluating_settings_timeline
+            or not scene.is_editable
             or not hasattr(scene, "audio2face")
             or scene.audio2face.input_mode != "SELECTED"
             or not scene.audio2face.audio_path
@@ -1240,7 +1268,6 @@ class RuntimeController:
                     and scene.audio2face.status_message == render_error
                 ):
                     self._set_status(scene, "MODEL_READY", "Selected WAV is ready")
-            self.request_selected_frame(scene)
             return
         revision = track.render_revision + 1
         previous = (
@@ -1777,21 +1804,14 @@ class RuntimeController:
     def refresh_inference_settings(
         self,
         scene: bpy.types.Scene,
-        *,
-        rebuild_selected: bool = False,
     ) -> None:
-        """Apply settings to the resident source independently of transport."""
+        """Apply Stream settings or invalidate the Selected render cache."""
 
         if (
             self.evaluating_settings_timeline
             or not scene.is_editable
             or self.expected_worker_exit
         ):
-            return
-        if scene.audio2face.input_mode == "SELECTED" and (
-            self.active_bake is not None or _native_playback_active()
-        ):
-            self.invalidate_selected_settings(scene)
             return
         if scene.audio2face.input_mode == "STREAM":
             stream = self.active_stream
@@ -1828,8 +1848,6 @@ class RuntimeController:
             return
         if scene.audio2face.input_mode != "SELECTED":
             return
-        if rebuild_selected and self.invalidated_selected_scene == scene.name:
-            self.invalidated_selected_scene = None
         track = self.selected_track
         if (
             track is None
@@ -1841,24 +1859,22 @@ class RuntimeController:
         try:
             render_timeline = track.render_timeline
             if (
-                not rebuild_selected
-                and render_timeline is not None
-                and self._settings_timeline_matches_current_frame(
-                    scene, track, render_timeline
+                render_timeline is None
+                or not self._settings_timeline_matches_current_frame(
+                    scene,
+                    track,
+                    render_timeline,
                 )
             ):
-                if (
-                    track.render_error is not None
-                    and track.stage is None
-                    and track.published_timeline == render_timeline
-                ):
-                    self._request_track_render(scene, track, render_timeline)
+                self.invalidate_selected_settings(scene)
                 return
-            self._request_track_render(
-                scene,
-                track,
-                self._evaluate_settings_timeline(scene, track)[0],
-            )
+            if (
+                track.render_error is not None
+                and track.stage is None
+                and track.published_timeline == render_timeline
+            ):
+                self._request_track_render(scene, track, render_timeline)
+                self.request_selected_frame(scene)
         except (OSError, RuntimeError, ValueError) as exc:
             track.render_error = str(exc)
             self._set_status(scene, "ERROR", track.render_error)
@@ -1870,21 +1886,10 @@ class RuntimeController:
             span = selected_audio_frame_span(scene)
             if span is None or not span[0] <= int(scene.frame_current) <= span[1]:
                 return
-            if _native_playback_active():
-                track = self.selected_track
-                if (
-                    track is not None
-                    and track.scene_name == scene.name
-                    and not self._settings_timeline_matches_current_frame(
-                        scene, track, track.render_timeline
-                    )
-                ):
-                    self.invalidate_selected_settings(scene)
-                return
         self.refresh_inference_settings(scene)
 
     def invalidate_selected_settings(self, scene: bpy.types.Scene) -> None:
-        """Queue one full settings rescan after Blender edits the scene Action."""
+        """Queue one full settings rescan for the native Action state."""
 
         track = self.selected_track
         if (
@@ -1904,10 +1909,13 @@ class RuntimeController:
         if scene is None:
             self.invalidated_selected_scene = None
             return
+        if not scene.is_editable or self.expected_worker_exit:
+            self.invalidated_selected_scene = None
+            return
         track = self.selected_track
         if (
             self.active_bake is not None
-            or _native_playback_active()
+            or _native_frame_scan_blocked()
             or track is None
             or track.scene_name != scene_name
             or not track.prepared
@@ -1915,7 +1923,15 @@ class RuntimeController:
         ):
             return
         self.invalidated_selected_scene = None
-        self.refresh_inference_settings(scene, rebuild_selected=True)
+        try:
+            self._request_track_render(
+                scene,
+                track,
+                self._evaluate_settings_timeline(scene, track)[0],
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            track.render_error = str(exc)
+            self._set_status(scene, "ERROR", track.render_error)
         self.request_selected_frame(scene)
 
     def _fail_stream(
@@ -2164,9 +2180,12 @@ class RuntimeController:
             track.prepared = True
             try:
                 bake = self.active_bake
-                if bake is None and _native_playback_active():
-                    self.invalidate_selected_settings(scene)
-                    return
+                if bake is None:
+                    if _native_frame_scan_blocked():
+                        self.invalidate_selected_settings(scene)
+                        return
+                    if self.invalidated_selected_scene == scene.name:
+                        self.invalidated_selected_scene = None
                 self._request_track_render(
                     scene,
                     track,

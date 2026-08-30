@@ -181,8 +181,8 @@ def test_selected_audio_callbacks_manage_source_placement_and_mode(
         selected_audio_failed=lambda scene, message: calls.append(
             ("failure", scene, message)
         ),
-        refresh_inference_settings=lambda scene, *, rebuild_selected=False: calls.append(
-            ("refresh", scene, rebuild_selected)
+        invalidate_selected_settings=lambda scene: calls.append(
+            ("invalidate", scene)
         ),
         request_selected_frame=lambda scene: calls.append(("frame", scene)),
         input_mode_changed=lambda scene: calls.append(("mode", scene)),
@@ -214,13 +214,13 @@ def test_selected_audio_callbacks_manage_source_placement_and_mode(
         ("configure", scene, "first.wav", 12),
         ("source", scene),
         ("configure", scene, "first.wav", -3),
-        ("refresh", scene, True),
+        ("invalidate", scene),
         ("frame", scene),
         ("source", scene),
         ("remove", scene),
         ("mode", scene),
         ("configure", scene, "second.wav", -3),
-        ("refresh", scene, True),
+        ("invalidate", scene),
         ("frame", scene),
         ("mode", scene),
         ("remove", scene),
@@ -452,6 +452,12 @@ def test_reset_helpers_only_unset_their_owned_rna_properties(
     properties_module.reset_emotion_settings(settings)
     assert unset == list(properties_module.EMOTION_SETTING_FIELDS)
     assert "a2e_preferred_emotion_strength" not in unset
+    assert properties_module.TIMELINE_SETTING_FIELDS == (
+        *properties_module.AUDIO2FACE_SETTING_FIELDS,
+        *properties_module.EMOTION_SETTING_FIELDS,
+        "a2e_preferred_emotion_strength",
+        "prediction_delay",
+    )
 
 
 def test_schema_materializes_preferred_defaults_and_empty_mixed_output(
