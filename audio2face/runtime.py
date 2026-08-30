@@ -211,8 +211,20 @@ class ActiveBake:
     prediction_delay: float
 
 
+@dataclass(slots=True)
+class _StatusNotice:
+    status: str
+    started_at: float
+    visible: bool = False
+
+
 POLL_INTERVAL_SECONDS = 0.10
 PRESENTATION_INTERVAL_SECONDS = 1.0 / 60.0
+_STATUS_NOTICE_DELAY_SECONDS = 0.25
+_STATUS_NOTICE_QUIET_VALUES = frozenset(
+    {"IDLE", "MODEL_READY", "STREAMING", "STOPPING"}
+)
+_STREAM_ENDING_MESSAGE = "Draining final Audio2Face frames"
 SHUTDOWN_TIMEOUT_SECONDS = 2.0
 HANDSHAKE_TIMEOUT_SECONDS = 15.0
 MAX_STREAM_CHUNK_BYTES = 256 * 1024
@@ -251,6 +263,7 @@ class RuntimeController:
         self.selected_track: SelectedTrack | None = None
         self.active_bake: ActiveBake | None = None
         self.pcm_ingress: PCMIngress | None = None
+        self._status_notices: dict[str, _StatusNotice] = {}
 
     def _scene(self, name: str | None) -> bpy.types.Scene | None:
         return bpy.data.scenes.get(name) if name else None
@@ -310,6 +323,55 @@ class RuntimeController:
         settings.status = status
         settings.status_message = message
         if changed:
+            notice = self._status_notices.get(scene.name)
+            if status == "ERROR" or status in _STATUS_NOTICE_QUIET_VALUES:
+                self._status_notices.pop(scene.name, None)
+            elif notice is None:
+                self._status_notices[scene.name] = _StatusNotice(
+                    status,
+                    time.monotonic(),
+                )
+            else:
+                notice.status = status
+            self._tag_runtime_setup_redraw()
+
+    def status_notice(
+        self,
+        scene: bpy.types.Scene,
+    ) -> tuple[str, str] | None:
+        """Return immediate errors or operational status that persisted."""
+
+        settings = scene.audio2face
+        if settings.status == "ERROR":
+            return settings.status, settings.status_message
+        notice = self._status_notices.get(scene.name)
+        if notice is None or not notice.visible or notice.status != settings.status:
+            return None
+        return settings.status, settings.status_message
+
+    def _poll_status_notices(self) -> None:
+        """Reveal informational status only after one stable delay."""
+
+        if not self._status_notices:
+            return
+        now = time.monotonic()
+        redraw = False
+        for scene_name, notice in tuple(self._status_notices.items()):
+            scene = self._scene(scene_name)
+            if (
+                scene is None
+                or not scene.is_editable
+                or scene.audio2face.status != notice.status
+            ):
+                redraw = redraw or notice.visible
+                del self._status_notices[scene_name]
+            elif (
+                not notice.visible
+                and now - notice.started_at >= _STATUS_NOTICE_DELAY_SECONDS
+            ):
+                notice.visible = True
+                redraw = True
+        if redraw:
             self._tag_runtime_setup_redraw()
 
     @staticmethod
@@ -1454,7 +1516,7 @@ class RuntimeController:
                 self._set_status(
                     scene,
                     "STREAM_ENDING",
-                    "Draining final live audio frames",
+                    _STREAM_ENDING_MESSAGE,
                 )
 
     def _release_active_stream(self, operation_id: str | None = None) -> None:
@@ -1937,7 +1999,7 @@ class RuntimeController:
                     "worker returned an invalid stream-end response",
                 )
             elif settings.status not in {"ERROR", "STOPPING"}:
-                self._set_status(scene, "STREAM_ENDING", "Worker is draining final frames")
+                self._set_status(scene, "STREAM_ENDING", _STREAM_ENDING_MESSAGE)
         elif pending.method == "shutdown":
             if result:
                 self._reject_worker_contract(
@@ -2323,7 +2385,7 @@ class RuntimeController:
                 self._reject_worker_contract(str(exc))
                 return
             if stream.end_sent:
-                settings.status_message = "Draining final Audio2Face frames"
+                self._set_status(scene, "STREAM_ENDING", _STREAM_ENDING_MESSAGE)
             else:
                 self._set_status(
                     scene,
@@ -2450,10 +2512,6 @@ class RuntimeController:
                 self._handle_control(event.envelope)
             elif isinstance(event, ClientDiagnostic):
                 self.last_worker_diagnostic = event.message[-1000:]
-                if self.rejected_reason is None:
-                    scene = self._scene(self.startup_scene)
-                    if scene is not None and scene.is_editable:
-                        scene.audio2face.status_message = event.message
             elif isinstance(event, ProcessExited):
                 expected_exit = self.expected_worker_exit
                 self.negotiated = False
@@ -2498,6 +2556,7 @@ class RuntimeController:
             )
             message = f"Audio2Face worker handshake timed out{detail}"
             self._reject_worker_contract(message)
+        self._poll_status_notices()
 
     def close(self) -> None:
         if self.optimization_cancel is not None:
@@ -2520,6 +2579,7 @@ class RuntimeController:
         self.optimization_cancel = None
         self.optimization_progress = 0.0
         self._release_active_stream()
+        self._status_notices.clear()
         with self.optimization_progress_lock:
             self.optimization_latest_progress = None
 

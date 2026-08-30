@@ -201,6 +201,58 @@ def _stream_pending(
     )
 
 
+def test_status_notice_debounces_one_continuous_busy_period(
+    runtime_module: tuple[ModuleType, ModuleType],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, bpy = runtime_module
+    scene, _settings = _local_scene(bpy)
+    controller = runtime.RuntimeController()
+    now = [10.0]
+    redraws: list[None] = []
+    monkeypatch.setattr(runtime.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(
+        controller,
+        "_tag_runtime_setup_redraw",
+        lambda: redraws.append(None),
+    )
+
+    controller._set_status(scene, "STREAM_STARTING", "Preparing inference")
+    now[0] += runtime._STATUS_NOTICE_DELAY_SECONDS / 2.0
+    controller._set_status(scene, "STREAMING", "PCM stream is ready")
+    now[0] += runtime._STATUS_NOTICE_DELAY_SECONDS
+    controller._poll_status_notices()
+    assert controller.status_notice(scene) is None
+
+    controller._set_status(scene, "ERROR", "Audio device failed")
+    assert controller.status_notice(scene) == ("ERROR", "Audio device failed")
+    controller.startup_scene = scene.name
+    controller.client.poll = lambda: [runtime.ClientDiagnostic("worker log")]
+    controller.poll()
+    assert controller.last_worker_diagnostic == "worker log"
+    assert controller.status_notice(scene) == ("ERROR", "Audio device failed")
+
+    controller._set_status(scene, "MODEL_READY", "Selected WAV is ready")
+    redraws.clear()
+    controller._set_status(scene, "TRACK_UPLOADING", "Uploading audio")
+    assert controller.status_notice(scene) is None
+    now[0] += runtime._STATUS_NOTICE_DELAY_SECONDS / 2.0
+    controller._set_status(scene, "TRACK_PREPARING", "Rendering audio")
+    redraws.clear()
+    now[0] += runtime._STATUS_NOTICE_DELAY_SECONDS / 2.0
+    controller._poll_status_notices()
+
+    assert controller.status_notice(scene) == ("TRACK_PREPARING", "Rendering audio")
+    assert redraws == [None]
+    controller._poll_status_notices()
+    assert redraws == [None]
+    controller._set_status(scene, "BAKING", "Rendering animation")
+    assert controller.status_notice(scene) == ("BAKING", "Rendering animation")
+
+    controller._set_status(scene, "MODEL_READY", "Selected WAV is ready")
+    assert controller.status_notice(scene) is None
+
+
 @pytest.fixture
 def runtime_module(monkeypatch: pytest.MonkeyPatch) -> tuple[ModuleType, ModuleType]:
     bpy = ModuleType("bpy")
@@ -980,7 +1032,7 @@ def test_terminal_contract_rejection_clears_the_active_stream_from_all_scenes(
     second = _Scene("Second", editable=True, settings=second_settings)
     bpy.data.scenes.append(second)  # type: ignore[attr-defined]
     controller = runtime.RuntimeController()
-    stream = _activate_stream(
+    _activate_stream(
         runtime,
         controller,
         second,
@@ -2254,7 +2306,7 @@ def test_malformed_stream_frame_terminates_the_active_stream(
     runtime, bpy = runtime_module
     scene, settings = _local_scene(bpy)
     controller = runtime.RuntimeController()
-    stream = _activate_stream(
+    _activate_stream(
         runtime,
         controller,
         scene,
@@ -2457,7 +2509,7 @@ def test_malformed_stream_ended_still_cleans_the_terminal_stream(
     runtime, bpy = runtime_module
     scene, settings = _local_scene(bpy)
     controller = runtime.RuntimeController()
-    stream = _activate_stream(
+    _activate_stream(
         runtime,
         controller,
         scene,
@@ -2484,7 +2536,7 @@ def test_malformed_error_event_cleans_its_active_stream(
     runtime, bpy = runtime_module
     scene, settings = _local_scene(bpy)
     controller = runtime.RuntimeController()
-    stream = _activate_stream(
+    _activate_stream(
         runtime,
         controller,
         scene,
