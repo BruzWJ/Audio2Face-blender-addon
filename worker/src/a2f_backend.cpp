@@ -849,6 +849,14 @@ class Backend::Impl final {
       auto& stream_geometry = geometry_executor();
       sdk_check(stream_geometry.SetExecutionOption(execution_option),
                 "Enabling streaming skin and eye geometry outputs");
+      const auto applied_execution_option =
+          stream_geometry.GetExecutionOption();
+      if (applied_execution_option != execution_option) {
+        throw WorkerError(
+            "model_invalid", "Unsupported streaming geometry execution option",
+            {{"reported", static_cast<std::uint32_t>(applied_execution_option)},
+             {"expected", static_cast<std::uint32_t>(execution_option)}});
+      }
       if (stream_geometry.GetEyesRotationSize() != kEyesRotationCount) {
         throw WorkerError(
             "model_invalid", "Unsupported streaming eyes rotation size",
@@ -1134,10 +1142,10 @@ class Backend::Impl final {
       throw WorkerError("inference_failed",
                         "Audio2Face produced no track frames");
     }
-    if (request.preview_sample && !preview_emitted) {
+    if (request.preview_sample && !preview_emitted && !superseded()) {
       preview(sample_track_frames(candidate, *request.preview_sample));
-      if (superseded()) return 0;
     }
+    if (superseded()) return 0;
     cache(candidate);
     return superseded() ? 0 : candidate.size();
   }

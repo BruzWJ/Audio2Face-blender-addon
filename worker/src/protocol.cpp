@@ -642,6 +642,7 @@ class Server {
           params.at("settings"),
           {},
       });
+      pending_operation_request_ids_.insert(request_id.get<std::string>());
     }
     operation_condition_.notify_one();
   }
@@ -725,6 +726,7 @@ class Server {
       }
       track_queued_samples_ += command.audio.size();
       track_queue_.push_back(std::move(command));
+      pending_operation_request_ids_.insert(request_id.get<std::string>());
     }
     operation_condition_.notify_one();
   }
@@ -742,6 +744,7 @@ class Server {
       track_queue_.push_back(
           TrackCommand{TrackCommand::Kind::Prepare, request_id, {}, 0, {},
                        std::nullopt});
+      pending_operation_request_ids_.insert(request_id.get<std::string>());
     }
     operation_condition_.notify_one();
   }
@@ -787,9 +790,11 @@ class Server {
         }
         emitter_.response(it->request_id,
                           track_render_response(it->revision, 0, true));
+        retire_operation_request_locked(it->request_id);
         it = track_queue_.erase(it);
       }
       track_queue_.push_back(std::move(command));
+      pending_operation_request_ids_.insert(request_id.get<std::string>());
     }
     operation_condition_.notify_one();
   }
@@ -826,6 +831,14 @@ class Server {
     }
   }
 
+  void retire_operation_request_locked(const json& request_id) {
+    const auto pending = pending_operation_request_ids_.find(
+        request_id.get_ref<const std::string&>());
+    if (pending != pending_operation_request_ids_.end()) {
+      pending_operation_request_ids_.erase(pending);
+    }
+  }
+
   void respond_to_active_track(const std::string& operation_id,
                                const json& request_id,
                                json result) {
@@ -842,6 +855,7 @@ class Server {
     // this point suppresses the stale response; one accepted after it is
     // unambiguously ordered after the response.
     emitter_.response(request_id, std::move(result));
+    retire_operation_request_locked(request_id);
   }
 
   void respond_to_active_stream_settings(const std::string& operation_id,
@@ -857,6 +871,7 @@ class Server {
     }
     for (const json& request_id : request_ids) {
       emitter_.response(request_id, json::object());
+      retire_operation_request_locked(request_id);
     }
   }
 
@@ -881,6 +896,7 @@ class Server {
         track_render_response(revision,
                               superseded ? 0 : frame_count,
                               superseded));
+    retire_operation_request_locked(request_id);
   }
 
   bool emit_active_track_revision_event(const std::string& operation_id,
@@ -1036,6 +1052,7 @@ class Server {
             }
             track_phase_ = TrackPhase::Prepared;
             emitter_.response(command.request_id, json::object());
+            retire_operation_request_locked(command.request_id);
           }
           continue;
         }
@@ -1134,6 +1151,9 @@ class Server {
       } catch (...) {
       }
     }
+    reject_pending_operation_requests(
+        "operation_not_found",
+        "The operation ended before the request was processed");
     emitter_.event("track_ended", {{"reason", "canceled"}}, operation_id);
   }
 
@@ -1150,6 +1170,7 @@ class Server {
       emit_track_ended(operation_id);
       return;
     }
+    reject_pending_operation_requests(code, message);
     emitter_.event("error", {{"code", code}, {"message", message}},
                    operation_id);
   }
@@ -1169,6 +1190,9 @@ class Server {
       } catch (...) {
       }
     }
+    reject_pending_operation_requests(
+        "operation_not_found",
+        "The operation ended before the request was processed");
     emitter_.event("stream_ended", json::object(), operation_id);
   }
 
@@ -1185,6 +1209,7 @@ class Server {
       emit_stream_ended(operation_id);
       return;
     }
+    reject_pending_operation_requests(code, message);
     emitter_.event("error", {{"code", code}, {"message", message}},
                    operation_id);
   }
@@ -1230,7 +1255,19 @@ class Server {
     }
   }
 
-  void finish_active() noexcept {
+  void reject_pending_operation_requests(const std::string& code,
+                                          const std::string& message) {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    for (const std::string& request_id : pending_operation_request_ids_) {
+      emitter_.error(json(request_id), code, message);
+    }
+    pending_operation_request_ids_.clear();
+  }
+
+  void finish_active() {
+    reject_pending_operation_requests(
+        "operation_not_found",
+        "The operation ended before the request was processed");
     std::lock_guard<std::mutex> lock(state_mutex_);
     current_operation_id_.reset();
     operation_kind_ = OperationKind::None;
@@ -1260,6 +1297,7 @@ class Server {
   mutable std::mutex state_mutex_;
   std::condition_variable operation_condition_;
   std::optional<std::string> current_operation_id_;
+  std::multiset<std::string> pending_operation_request_ids_;
   OperationKind operation_kind_{OperationKind::None};
   std::uint32_t stream_sample_rate_{0};
   std::deque<StreamCommand> stream_queue_;

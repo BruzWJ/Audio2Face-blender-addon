@@ -341,6 +341,49 @@ def test_native_track_supersedes_old_renders_and_batches_the_publish() -> None:
     assert batch < render < response
 
 
+def test_native_terminal_cleanup_acknowledges_every_async_operation_request() -> None:
+    def method_source(method: str) -> str:
+        start = WORKER_PROTOCOL_SOURCE.index(f"  void {method}(")
+        end = WORKER_PROTOCOL_SOURCE.index("\n  void ", start + 1)
+        return WORKER_PROTOCOL_SOURCE[start:end]
+
+    registration = "pending_operation_request_ids_.insert("
+    assert all(
+        registration in method_source(method)
+        for method in (
+            "enqueue_stream_settings",
+            "enqueue_track_chunk",
+            "enqueue_track_prepare",
+            "enqueue_track_render",
+        )
+    )
+    assert all(
+        registration not in method_source(method)
+        for method in ("enqueue_stream_chunk", "enqueue_stream_end")
+    )
+
+    for method in (
+        "emit_track_ended",
+        "emit_operation_error",
+        "emit_stream_ended",
+        "emit_stream_error_or_ended",
+    ):
+        source = method_source(method)
+        assert source.index("reject_pending_operation_requests(") < source.index(
+            "emitter_.event("
+        )
+
+    finish = method_source("finish_active")
+    reject = finish.index("reject_pending_operation_requests(")
+    assert reject < finish.index("stream_queue_.clear()")
+    assert reject < finish.index("track_queue_.clear()")
+    assert "pending_operation_request_ids_.clear()" not in finish
+    assert "std::multiset<std::string> pending_operation_request_ids_;" in (
+        WORKER_PROTOCOL_SOURCE
+    )
+    assert WORKER_PROTOCOL_SOURCE.count("retire_operation_request_locked(") == 6
+
+
 def test_native_track_settings_timeline_expands_recursive_patches() -> None:
     start = WORKER_PROTOCOL_SOURCE.index(
         "std::vector<TrackSettingsEntry> parse_settings_timeline("

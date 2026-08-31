@@ -443,6 +443,49 @@ def test_terminal_event_cleans_external_stream_and_holds_final_values(
     assert stopped == [None]
 
 
+@pytest.mark.parametrize(
+    ("prediction_delay", "terminal_elapsed"),
+    ((-0.05, 0.1), (0.05, 0.05)),
+)
+def test_terminal_waits_for_delayed_presentation_without_shortening_positive_delay(
+    live_module: tuple[ModuleType, _Scene, list[AppliedFrame]],
+    monkeypatch: pytest.MonkeyPatch,
+    prediction_delay: float,
+    terminal_elapsed: float,
+) -> None:
+    live, scene, applied = live_module
+    now = [10.0]
+    monkeypatch.setattr(live.time, "monotonic", lambda: now[0])
+    scene.audio2face.prediction_delay = prediction_delay
+    controller = live.LiveStreamController()
+    stopped: list[str | None] = []
+    controller.prepare_external(
+        scene,
+        "stream-1",
+        16_000,
+        tuple(MODEL_CHANNELS),
+        tuple(MODEL_EMOTION_CHANNELS),
+        presentation_stopped=stopped.append,
+    )
+    first = [0.0] * len(MODEL_CHANNELS)
+    final = [1.0] * len(MODEL_CHANNELS)
+    controller.receive("stream-1", 0, first, [1.0, 0.0])
+    controller.receive("stream-1", 1600, final, [0.0, 1.0])
+
+    now[0] += terminal_elapsed
+    controller.mark_terminal("stream-1")
+
+    assert controller.active is True
+    assert stopped == []
+    assert applied[-1] == (tuple(MODEL_CHANNELS), tuple(first))
+
+    now[0] += 0.05
+    assert controller.tick() is False
+    assert controller.active is False
+    assert stopped == [None]
+    assert applied[-1] == (tuple(MODEL_CHANNELS), tuple(final))
+
+
 def test_presentation_failure_is_reported_to_its_runtime_owner(
     live_module: tuple[ModuleType, _Scene, list[AppliedFrame]],
 ) -> None:

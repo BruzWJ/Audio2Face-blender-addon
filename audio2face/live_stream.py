@@ -200,12 +200,17 @@ class LiveStreamController:
             not self._timestamps
             or scene is None
             or not scene.is_editable
-            or self._terminal_reached()
+            or self._terminal_reached(scene)
         ):
             self.stop(reset=False, notify=True)
 
-    def _terminal_reached(self) -> bool:
-        return self._stream_sample_position() >= self._timestamps[-1]
+    def _terminal_reached(self, scene: bpy.types.Scene) -> bool:
+        source_position = self._stream_sample_position()
+        requested_position = self._requested_sample_position(
+            scene,
+            source_position,
+        )
+        return min(source_position, requested_position) >= self._timestamps[-1]
 
     def _stream_sample_position(self) -> float:
         if self._stream_clock_started is None:
@@ -214,11 +219,15 @@ class LiveStreamController:
             time.monotonic() - self._stream_clock_started
         ) * self._sample_rate
 
-    def _requested_sample_position(self, scene: bpy.types.Scene) -> float:
+    def _requested_sample_position(
+        self,
+        scene: bpy.types.Scene,
+        source_position: float,
+    ) -> float:
         delay = float(scene.audio2face.prediction_delay)
         if not math.isfinite(delay):
             raise LiveStreamError("prediction delay must be finite")
-        return self._stream_sample_position() + delay * self._sample_rate
+        return source_position + delay * self._sample_rate
 
     def _drop_old_frames(self, sample_position: float) -> None:
         if len(self._timestamps) < 3:
@@ -270,11 +279,17 @@ class LiveStreamController:
             return True
         try:
             sample_position = self._stream_sample_position()
-            requested_sample = self._requested_sample_position(scene)
+            requested_sample = self._requested_sample_position(
+                scene,
+                sample_position,
+            )
             self._apply_sampled_frame(settings, requested_sample)
             settings.stream_time = max(0.0, sample_position / self._sample_rate)
             self._drop_old_frames(min(sample_position, requested_sample))
-            if self._terminal and self._terminal_reached():
+            if (
+                self._terminal
+                and min(sample_position, requested_sample) >= self._timestamps[-1]
+            ):
                 self.stop(reset=False, notify=True)
                 return False
             return True

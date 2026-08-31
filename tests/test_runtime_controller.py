@@ -2385,7 +2385,7 @@ def test_stream_audio_request_is_exact_base64_f32le(
     )
 
 
-def test_releasing_stream_removes_every_pending_operation_request(
+def test_releasing_operations_retains_pending_requests_for_worker_acknowledgment(
     runtime_module: tuple[ModuleType, ModuleType],
 ) -> None:
     runtime, bpy = runtime_module
@@ -2412,11 +2412,19 @@ def test_releasing_stream_removes_every_pending_operation_request(
     controller._release_active_stream("stream-1")
 
     assert controller.active_stream is None
-    assert controller.pending == {
-        "other": _stream_pending(
-            runtime, "stream_chunk", scene.name, "stream-2"
-        )
-    }
+    assert set(controller.pending) == {"chunk", "end", "cancel", "other"}
+
+    controller.pending.clear()
+    track = _activate_track(runtime, controller, scene)
+    controller.pending["track"] = _stream_pending(
+        runtime, "track_chunk", scene.name, track.operation_id
+    )
+
+    controller._release_selected_track(track.operation_id)
+
+    assert controller.selected_track is None
+    assert track.wav_source.close_calls == 1
+    assert set(controller.pending) == {"track"}
 
 
 @pytest.mark.parametrize(
@@ -2710,8 +2718,10 @@ def test_late_frame_from_a_canceling_stream_is_drained_without_delivery(
     assert controller.active_stream is stream
 
 
-def test_inflight_chunk_error_during_cancel_waits_for_terminal_event(
+@pytest.mark.parametrize("method", ["stream_chunk", "stream_settings"])
+def test_inflight_stream_request_error_during_cancel_waits_for_terminal_event(
     runtime_module: tuple[ModuleType, ModuleType],
+    method: str,
 ) -> None:
     runtime, bpy = runtime_module
     scene, settings = _local_scene(bpy)
@@ -2725,7 +2735,7 @@ def test_inflight_chunk_error_during_cancel_waits_for_terminal_event(
     )
     controller.pending["chunk"] = _stream_pending(
         runtime,
-        "stream_chunk",
+        method,
         scene.name,
         "stream-1",
     )

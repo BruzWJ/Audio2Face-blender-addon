@@ -75,7 +75,7 @@ def test_worker_reports_exact_model_owned_audio2face_defaults() -> None:
         assert re.search(rf"{getter}\(\s*geometry_executor\(\),", defaults)
 
 
-def test_audio2emotion_output_matches_the_effective_emotion_schema() -> None:
+def test_stream_executors_validate_geometry_and_emotion_output_schema() -> None:
     setup = re.search(
         r"  void ensure_stream_executors\(\).*?(?=\n  void require_model_locked\()",
         SOURCE,
@@ -86,6 +86,12 @@ def test_audio2emotion_output_matches_the_effective_emotion_schema() -> None:
     assert "GetNetworkInfo().GetEmotionsCount()" not in setup_source
     assert "emotion_executor_->GetEmotionsSize() !=" in setup_source
     assert "results.emotions.Size() != capture.emotion_count" in SOURCE
+    set_option = setup_source.index("stream_geometry.SetExecutionOption(")
+    get_option = setup_source.index("stream_geometry.GetExecutionOption()")
+    model_invalid = setup_source.index('"model_invalid"', get_option)
+    eyes_size = setup_source.index("stream_geometry.GetEyesRotationSize()")
+    callback = setup_source.index("SetExecutorGeometryResultsCallback(")
+    assert set_option < get_option < model_invalid < eyes_size < callback
 
 
 def test_stream_snapshot_validates_and_applies_exact_skin_eyes_controls() -> None:
@@ -269,7 +275,7 @@ def test_stream_uses_incremental_regular_executors() -> None:
     assert "reset_stream_inference(parse_settings(settings));" in begin_source
 
     chunk = re.search(
-        r"  void stream_chunk\(.*?(?=\n  void stream_end\()",
+        r"  void stream_chunk\(.*?(?=\n  void stream_settings\()",
         SOURCE,
         flags=re.DOTALL,
     )
@@ -348,7 +354,7 @@ def test_track_render_replays_audio_with_sample_scheduled_settings() -> None:
         "frame.timestamp_sample >= *request.preview_sample",
         "preview(sample_track_frames(candidate, *request.preview_sample));",
         "preview_emitted = true;",
-        "if (request.preview_sample && !preview_emitted)",
+        "if (request.preview_sample && !preview_emitted && !superseded())",
         "cache(candidate);",
         "return superseded() ? 0 : candidate.size();",
     ):
@@ -356,6 +362,15 @@ def test_track_render_replays_audio_with_sample_scheduled_settings() -> None:
     assert source.count(
         "preview(sample_track_frames(candidate, *request.preview_sample));"
     ) == 2
+    tail = source[source.rindex("if (request.preview_sample && !preview_emitted") :]
+    guarded_preview = tail.index("!preview_emitted && !superseded()")
+    preview = tail.index(
+        "preview(sample_track_frames(candidate, *request.preview_sample));"
+    )
+    cache_guard = tail.index("if (superseded()) return 0;", preview)
+    cache = tail.index("cache(candidate);", cache_guard)
+    result = tail.index("return superseded() ? 0 : candidate.size();", cache)
+    assert guarded_preview < preview < cache_guard < cache < result
     for obsolete in ("interactive", "ComputeAllFrames", "Interrupt("):
         assert obsolete not in source
 

@@ -206,7 +206,7 @@ class SidecarClient:
         returncode = process.wait()
         self._outgoing.put(None)
         for thread in pipe_threads:
-            thread.join()
+            thread.join(timeout=0.1)
         with self._state_lock:
             if self._process is process:
                 self._state = Lifecycle.STOPPED if returncode == 0 else Lifecycle.FAILED

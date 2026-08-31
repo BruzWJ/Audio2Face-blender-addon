@@ -933,15 +933,6 @@ class RuntimeController:
         track.wav_source.close()
         self.selected_track = None
         self.invalidated_selected_scene = None
-        with self.pending_lock:
-            stale = tuple(
-                request_id
-                for request_id, pending in self.pending.items()
-                if pending.operation_id == track.operation_id
-                and pending.method != "cancel"
-            )
-            for request_id in stale:
-                self.pending.pop(request_id, None)
 
     def _cancel_selected_track(
         self,
@@ -1736,14 +1727,6 @@ class RuntimeController:
             return
         self._clear_pcm_ingress()
         self.active_stream = None
-        with self.pending_lock:
-            stale = tuple(
-                request_id
-                for request_id, pending in self.pending.items()
-                if pending.operation_id == stream.operation_id
-            )
-            for request_id in stale:
-                self.pending.pop(request_id, None)
 
     def pcm_stream_requirements(
         self,
@@ -2435,7 +2418,8 @@ class RuntimeController:
             if (
                 stream.stop_requested
                 and error["code"] == "operation_not_found"
-                and pending.method in {"cancel", "stream_chunk", "stream_end"}
+                and pending.method
+                in {"cancel", "stream_chunk", "stream_settings", "stream_end"}
             ):
                 return
             self._fail_stream(
