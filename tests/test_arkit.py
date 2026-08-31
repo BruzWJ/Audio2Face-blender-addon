@@ -165,16 +165,15 @@ def test_stream_snapshot_validates_and_applies_exact_skin_eyes_controls() -> Non
     assert configure is not None
     configure_source = configure.group(0)
     for expression in (
-        "IFaceExecutorAccessorInputStrength",
-        "IFaceExecutorAccessorSkinParameters",
-        "IFaceExecutorAccessorEyesParameters",
-        "accessor.SetInputStrength(input_strength)",
-        "skin.Set(0, settings.skin)",
-        "eyes.Set(0, settings.eyes)",
+        "static_cast<nva2f::GeometryExecutorBase&>(geometry_executor())",
+        "geometry.SetInputStrength(input_strength)",
+        "geometry.Set(0, settings.skin)",
+        "geometry.Set(0, settings.eyes)",
         "configure_audio2face_input(settings.input_strength);",
         "configure_audio2face_postprocess(settings);",
     ):
         assert expression in configure_source
+    assert "dynamic_cast<" not in SOURCE
     assert "SetExecutorTongueParameters" not in SOURCE
     assert "SetExecutorTeethParameters" not in SOURCE
 
@@ -220,7 +219,7 @@ def test_worker_uses_one_compositional_emotion_driver() -> None:
     assert configure is not None
     configure_source = configure.group(0)
     for expression in (
-        "emotion_postprocess_accessor()",
+        "static_cast<nva2e::EmotionExecutorBase&>(*emotion_executor_)",
         "settings.generated",
         "parameters.emotionStrength",
         "parameters.emotionContrast",
@@ -233,8 +232,8 @@ def test_worker_uses_one_compositional_emotion_driver() -> None:
         "parameters.preferredEmotion =",
         "*settings.preferred",
         "preferred.values.data()",
-        "accessor.Get(0, parameters)",
-        "accessor.Set(0, parameters)",
+        "emotion.Get(0, parameters)",
+        "emotion.Set(0, parameters)",
     ):
         assert expression in configure_source
     assert "value * preferred.strength" in configure_source

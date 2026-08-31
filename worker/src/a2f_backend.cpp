@@ -1469,53 +1469,25 @@ class Backend::Impl final {
             parse_emotion_driver(settings.at("emotion_driver"))};
   }
 
-  template <class Accessor>
-  Accessor& require_geometry_accessor(const char* name) {
-    auto* accessor = dynamic_cast<Accessor*>(&geometry_executor());
-    if (accessor == nullptr) {
-      throw WorkerError("sdk_error",
-                        std::string("Regular Audio2Face executor lacks ") + name);
-    }
-    return *accessor;
-  }
-
-  nva2e::IEmotionExecutorAccessorPostProcessParameters&
-  emotion_postprocess_accessor() {
-    auto* accessor =
-        dynamic_cast<nva2e::IEmotionExecutorAccessorPostProcessParameters*>(
-            emotion_executor_.get());
-    if (accessor == nullptr) {
-      throw WorkerError(
-          "sdk_error",
-          "Regular Audio2Emotion executor lacks post-process access");
-    }
-    return *accessor;
-  }
-
   // SDK 1.0.0's public SetExecutor* helpers reject changes once execution has
-  // started. The pinned regular executors also expose these accessor vtables;
-  // their setters forward to the stateful multitrack animator/postprocessor.
+  // started. The pinned factories return these regular executor bases, whose
+  // setters forward to the stateful multitrack animator/postprocessor.
   // Calls here are serialized between Execute calls or from the synchronous
   // per-frame SDK callbacks, so animated DCC settings preserve temporal state.
   void configure_audio2face_input(float input_strength) {
-    auto& accessor =
-        require_geometry_accessor<nva2f::IFaceExecutorAccessorInputStrength>(
-            "input-strength access");
-    sdk_check(accessor.SetInputStrength(input_strength),
+    auto& geometry =
+        static_cast<nva2f::GeometryExecutorBase&>(geometry_executor());
+    sdk_check(geometry.SetInputStrength(input_strength),
               "Configuring Audio2Face input strength");
   }
 
   void configure_audio2face_postprocess(
       const Audio2FaceSettings& settings) {
-    auto& skin =
-        require_geometry_accessor<nva2f::IFaceExecutorAccessorSkinParameters>(
-            "skin-parameter access");
-    auto& eyes =
-        require_geometry_accessor<nva2f::IFaceExecutorAccessorEyesParameters>(
-            "eye-parameter access");
-    sdk_check(skin.Set(0, settings.skin),
+    auto& geometry =
+        static_cast<nva2f::GeometryExecutorBase&>(geometry_executor());
+    sdk_check(geometry.Set(0, settings.skin),
               "Configuring Audio2Face skin parameters");
-    sdk_check(eyes.Set(0, settings.eyes),
+    sdk_check(geometry.Set(0, settings.eyes),
               "Configuring Audio2Face eyes parameters");
   }
 
@@ -1525,9 +1497,10 @@ class Backend::Impl final {
   }
 
   void configure_stream_emotion(const EmotionDriver& settings) {
-    auto& accessor = emotion_postprocess_accessor();
+    auto& emotion =
+        static_cast<nva2e::EmotionExecutorBase&>(*emotion_executor_);
     nva2e::PostProcessParams parameters;
-    sdk_check(accessor.Get(0, parameters),
+    sdk_check(emotion.Get(0, parameters),
               "Reading Audio2Emotion post-process parameters");
     parameters.emotionStrength = settings.emotion_strength;
 
@@ -1562,7 +1535,7 @@ class Backend::Impl final {
       parameters.preferredEmotion = nva2x::HostTensorFloatConstView(
           preferred_override.data(), preferred_override.size());
     }
-    sdk_check(accessor.Set(0, parameters),
+    sdk_check(emotion.Set(0, parameters),
               "Configuring Audio2Emotion post-processing");
   }
 
