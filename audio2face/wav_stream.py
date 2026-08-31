@@ -311,7 +311,6 @@ class WavStreamSource:
         *,
         output_sample_rate: int,
         chunk_frames: int,
-        start_frame: int = 0,
     ) -> None:
         output_sample_rate = _require_bounded_int(
             output_sample_rate,
@@ -325,10 +324,6 @@ class WavStreamSource:
             minimum=1,
             maximum=MAX_CHUNK_FRAMES,
         )
-        if isinstance(start_frame, bool) or not isinstance(start_frame, int):
-            raise WavStreamError("start_frame must be an integer")
-        if start_frame < 0:
-            raise WavStreamError("start_frame must not be negative")
         source_path = require_unaliased_path(
             path,
             description="WAV path",
@@ -352,13 +347,6 @@ class WavStreamSource:
             raise
 
         self.metadata = parsed.metadata
-        if start_frame >= self.metadata.output_frames:
-            handle.close()
-            self._handle = None
-            raise WavStreamError(
-                "start_frame must be before the end of the selected WAV"
-            )
-        self.start_frame = start_frame
         self._data_offset = parsed.data_offset
         self._block_align = parsed.block_align
         self._is_float = parsed.is_float
@@ -436,8 +424,7 @@ class WavStreamSource:
                             - source_index * output_rate
                         )
                         fraction = fraction_numerator / output_rate
-                        if output_index >= self.start_frame:
-                            pending.append(previous + (current - previous) * fraction)
+                        pending.append(previous + (current - previous) * fraction)
                         output_index += 1
                         if len(pending) == self.chunk_frames:
                             yield _pack_f32le(pending)
@@ -446,8 +433,7 @@ class WavStreamSource:
                     source_index += 1
 
                 while output_index < output_count:
-                    if output_index >= self.start_frame:
-                        pending.append(previous)
+                    pending.append(previous)
                     output_index += 1
                     if len(pending) == self.chunk_frames:
                         yield _pack_f32le(pending)
@@ -458,14 +444,3 @@ class WavStreamSource:
                 self.close()
 
         return chunks()
-
-
-def wav_duration_seconds(path: str | os.PathLike[str]) -> float:
-    """Return validated WAV duration without decoding its samples."""
-
-    with WavStreamSource(
-        path,
-        output_sample_rate=MIN_SAMPLE_RATE,
-        chunk_frames=1,
-    ) as source:
-        return source.metadata.input_frames / source.metadata.source_sample_rate

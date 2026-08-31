@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -43,7 +44,25 @@ struct StreamFrame {
 };
 
 using StreamFrameCallback = std::function<void(const StreamFrame& frame)>;
-using StreamResetCallback = std::function<void()>;
+
+struct TrackRequest {
+  std::uint32_t sample_rate;
+};
+
+struct TrackSettingsEntry {
+  std::uint64_t sample;
+  json settings;
+};
+
+struct TrackRenderRequest {
+  std::uint64_t revision;
+  std::vector<TrackSettingsEntry> settings_timeline;
+  std::optional<std::int64_t> preview_sample;
+};
+
+using TrackPreviewCallback = std::function<void(const StreamFrame& frame)>;
+using TrackCacheCallback =
+    std::function<void(const std::vector<StreamFrame>& frames)>;
 
 class Backend final {
  public:
@@ -59,12 +78,20 @@ class Backend final {
                     std::atomic_bool& canceled,
                     const StreamFrameCallback& frame);
   void stream_settings(const json& settings,
-                       std::atomic_bool& canceled,
-                       const StreamResetCallback& reset,
-                       const StreamFrameCallback& frame);
+                       std::atomic_bool& canceled);
   void stream_end(std::atomic_bool& canceled,
                   const StreamFrameCallback& frame);
-  void stream_abort() noexcept;
+  void track_start(const TrackRequest& request);
+  void track_chunk(const std::vector<float>& audio,
+                   std::atomic_bool& canceled);
+  void track_prepare(std::atomic_bool& canceled);
+  std::size_t track_render(
+      const TrackRenderRequest& request,
+      std::atomic_bool& canceled,
+      const std::atomic<std::uint64_t>& latest_revision,
+      const TrackPreviewCallback& preview,
+      const TrackCacheCallback& cache);
+  void abort_operation() noexcept;
 
  private:
   class Impl;

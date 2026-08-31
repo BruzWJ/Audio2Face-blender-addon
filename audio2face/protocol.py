@@ -10,8 +10,8 @@ from typing import Any
 from .strict_json import duplicate_key_hook, invalid_constant_hook
 
 
-PROTOCOL_VERSION = "audio2face/9"
-WORKER_PROFILE = "nvidia-a2f3-a2e3-gpu-arkit52/9"
+PROTOCOL_VERSION = "audio2face/13"
+WORKER_PROFILE = "nvidia-a2f3-a2e3-gpu-arkit52/13"
 MAX_CONTROL_LINE_BYTES = 1_048_576
 _CONTROL_TYPES = frozenset({"request", "response", "error", "event"})
 _REQUEST_METHODS = frozenset(
@@ -22,12 +22,24 @@ _REQUEST_METHODS = frozenset(
         "stream_chunk",
         "stream_settings",
         "stream_end",
+        "track_start",
+        "track_chunk",
+        "track_prepare",
+        "track_render",
         "cancel",
         "shutdown",
     }
 )
 _EVENT_NAMES = frozenset(
-    {"stream_credit", "stream_frame", "stream_reset", "stream_ended", "error"}
+    {
+        "stream_credit",
+        "stream_frame",
+        "stream_ended",
+        "track_preview",
+        "track_frame_batch",
+        "track_ended",
+        "error",
+    }
 )
 _NAME_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
 

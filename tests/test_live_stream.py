@@ -18,11 +18,8 @@ AppliedFrame = tuple[tuple[str, ...], tuple[float, ...]]
 class _Settings:
     stream_time: float = 7.0
     prediction_delay: float = 0.0
-    playback_state: str = "IDLE"
     status: str = "MODEL_READY"
     status_message: str = ""
-    custom_properties: dict[str, object] = field(default_factory=dict)
-    custom_property_ui: dict[str, dict[str, object]] = field(default_factory=dict)
     preferred_emotions: tuple[SimpleNamespace, ...] = field(
         default_factory=lambda: (
             SimpleNamespace(name="Neutral", value=0.1),
@@ -36,31 +33,13 @@ class _Settings:
         )
     )
 
-    def __contains__(self, key: str) -> bool:
-        return key in self.custom_properties
-
-    def __getitem__(self, key: str) -> object:
-        return self.custom_properties[key]
-
-    def __setitem__(self, key: str, value: object) -> None:
-        self.custom_properties[key] = value
-
-    def __delitem__(self, key: str) -> None:
-        del self.custom_properties[key]
-
-    def id_properties_ui(self, key: str) -> object:
-        metadata = self.custom_property_ui.setdefault(key, {})
-        return SimpleNamespace(
-            update=lambda **values: metadata.update(values),
-            as_dict=lambda: metadata.copy(),
-        )
-
 
 @dataclass
 class _Scene:
     name: str
     audio2face: _Settings
     is_editable: bool = True
+    frame_current: int = 1
 
 
 class _Scenes(list[_Scene]):
@@ -125,16 +104,77 @@ def live_module(
 
 
 def _prepare_external(controller: object, scene: _Scene, channels: list[str]) -> None:
-    controller.prepare(  # type: ignore[attr-defined]
+    controller.prepare_external(  # type: ignore[attr-defined]
         scene,
         "stream-1",
         16_000,
         tuple(channels),
         tuple(MODEL_EMOTION_CHANNELS),
-        audio_path=None,
-        playback_started=None,
-        playback_stopped=None,
+        presentation_stopped=lambda _error: None,
     )
+
+
+def test_apply_model_frame_applies_validated_updates_at_the_same_blender_frame(
+    live_module: tuple[ModuleType, _Scene, list[AppliedFrame]],
+) -> None:
+    live, scene, applied = live_module
+    scene.frame_current = 42
+    first = (0.0,) * len(MODEL_CHANNELS)
+    second = (0.5,) * len(MODEL_CHANNELS)
+
+    live.apply_model_frame(
+        scene.audio2face,
+        tuple(MODEL_CHANNELS),
+        tuple(MODEL_EMOTION_CHANNELS),
+        first,
+        (1.0, 0.0),
+    )
+    live.apply_model_frame(
+        scene.audio2face,
+        tuple(MODEL_CHANNELS),
+        tuple(MODEL_EMOTION_CHANNELS),
+        second,
+        (0.25, 0.75),
+    )
+
+    assert scene.frame_current == 42
+    assert applied == [
+        (tuple(MODEL_CHANNELS), tuple(first)),
+        (tuple(MODEL_CHANNELS), tuple(second)),
+    ]
+    assert [item.value for item in scene.audio2face.mixed_emotions] == [0.25, 0.75]
+
+
+@pytest.mark.parametrize(
+    ("weights", "effective_emotions"),
+    (
+        ([0.0] * (len(MODEL_CHANNELS) - 1), MODEL_EMOTIONS.copy()),
+        ([0.0] * len(MODEL_CHANNELS), [0.0]),
+        (
+            [0.0] * (len(MODEL_CHANNELS) - 1) + [float("nan")],
+            MODEL_EMOTIONS.copy(),
+        ),
+        ([0.0] * len(MODEL_CHANNELS), [0.0, float("inf")]),
+    ),
+)
+def test_validate_stream_frame_rejects_invalid_worker_values(
+    live_module: tuple[ModuleType, _Scene, list[AppliedFrame]],
+    weights: list[float],
+    effective_emotions: list[float],
+) -> None:
+    live, scene, applied = live_module
+
+    with pytest.raises(live.LiveStreamError):
+        live.validate_stream_frame(
+            tuple(MODEL_CHANNELS),
+            tuple(MODEL_EMOTION_CHANNELS),
+            0,
+            weights,
+            effective_emotions,
+        )
+
+    assert applied == []
+    assert [item.value for item in scene.audio2face.mixed_emotions] == [0.0, 0.0]
 
 
 def test_source_free_stream_applies_negative_timestamp_frame_immediately(
@@ -151,29 +191,7 @@ def test_source_free_stream_applies_negative_timestamp_frame_immediately(
     assert applied == [(tuple(MODEL_CHANNELS), tuple(weights))]
     assert scene.audio2face.stream_time == 0.0
     assert controller.active is True
-    assert controller.operation_id == "stream-1"
 
-
-def test_prepare_allows_targets_to_be_added_after_stream_start(
-    live_module: tuple[ModuleType, _Scene, list[AppliedFrame]],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    live, scene, _applied = live_module
-    monkeypatch.setattr(live, "resolve_target_objects", lambda _settings: ())
-    controller = live.LiveStreamController()
-
-    controller.prepare(
-        scene,
-        "stream-1",
-        16_000,
-        tuple(MODEL_CHANNELS),
-        tuple(MODEL_EMOTION_CHANNELS),
-        audio_path=None,
-        playback_started=None,
-        playback_stopped=None,
-    )
-
-    assert controller.active is True
 
 def test_source_free_stream_interpolates_bursted_frames_on_a_monotonic_clock(
     live_module: tuple[ModuleType, _Scene, list[AppliedFrame]],
@@ -202,6 +220,33 @@ def test_source_free_stream_interpolates_bursted_frames_on_a_monotonic_clock(
         [0.5, 0.5]
     )
     assert scene.audio2face.stream_time == pytest.approx(0.05)
+
+
+def test_external_pcm_buffer_remains_bounded(
+    live_module: tuple[ModuleType, _Scene, list[AppliedFrame]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    live, scene, _applied = live_module
+    now = [10.0]
+    monkeypatch.setattr(live.time, "monotonic", lambda: now[0])
+    external = live.LiveStreamController()
+    external.prepare_external(
+        scene,
+        "external",
+        16_000,
+        tuple(MODEL_CHANNELS),
+        tuple(MODEL_EMOTION_CHANNELS),
+        presentation_stopped=lambda _error: None,
+    )
+    weights = [0.0] * len(MODEL_CHANNELS)
+    for timestamp in range(0, 160_001, 16_000):
+        external.receive("external", timestamp, weights.copy(), MODEL_EMOTIONS.copy())
+    now[0] += 10.0
+    external.tick()
+
+    assert external._timestamps[-1] == 160_000
+    assert external._timestamps[0] > 0
+    assert len(external._timestamps) < 11
 
 
 def test_live_frames_resolve_the_current_object_targets(
@@ -247,59 +292,6 @@ def test_live_frames_resolve_the_current_object_targets(
         (),
         (first_target,),
     ]
-
-
-def test_selected_audio_updates_mixed_emotions_without_mutating_preferred(
-    live_module: tuple[ModuleType, _Scene, list[AppliedFrame]],
-    tmp_path: Path,
-) -> None:
-    live, scene, _applied = live_module
-    audio_path = tmp_path / "voice.wav"
-    audio_path.write_bytes(b"RIFF")
-    controller = live.LiveStreamController()
-    controller.prepare(
-        scene,
-        "stream-1",
-        16_000,
-        tuple(MODEL_CHANNELS),
-        tuple(MODEL_EMOTION_CHANNELS),
-        audio_path=audio_path,
-        playback_started=None,
-        playback_stopped=None,
-    )
-    controller._handle = SimpleNamespace(status=True, position=0.0)
-    controller._duration = 2.0
-    live.configure_playback_position(scene.audio2face, 0.0, 2.0)
-    controller._published_position = 0.0
-    scene.audio2face.playback_state = "PAUSED"
-    controller.receive(
-        "stream-1",
-        0,
-        [0.25] * len(MODEL_CHANNELS),
-        MODEL_EMOTIONS.copy(),
-    )
-    assert [item.value for item in scene.audio2face.mixed_emotions] == pytest.approx(
-        MODEL_EMOTIONS
-    )
-
-    assert [item.value for item in scene.audio2face.preferred_emotions] == [0.1, 0.9]
-
-
-def test_frame_reset_starts_a_new_timestamp_epoch_without_stopping_stream(
-    live_module: tuple[ModuleType, _Scene, list[AppliedFrame]],
-) -> None:
-    live, scene, _applied = live_module
-    controller = live.LiveStreamController()
-    _prepare_external(controller, scene, MODEL_CHANNELS)
-    weights = [0.25] * len(MODEL_CHANNELS)
-    controller.receive("stream-1", 100, weights, MODEL_EMOTIONS.copy())
-
-    controller.reset_frames("stream-1")
-    assert [item.value for item in scene.audio2face.mixed_emotions] == [0.0, 0.0]
-    controller.receive("stream-1", -50, weights, MODEL_EMOTIONS.copy())
-
-    assert controller.active is True
-    assert controller.operation_id == "stream-1"
 
 
 def test_live_stream_requires_strictly_increasing_signed_64_bit_timestamps(
@@ -431,18 +423,14 @@ def test_terminal_event_cleans_external_stream_and_holds_final_values(
 ) -> None:
     live, scene, applied = live_module
     controller = live.LiveStreamController()
-    stopped: list[str] = []
-    controller.prepare(
+    stopped: list[str | None] = []
+    controller.prepare_external(
         scene,
         "stream-1",
         16_000,
         tuple(MODEL_CHANNELS),
         tuple(MODEL_EMOTION_CHANNELS),
-        audio_path=None,
-        playback_started=None,
-        playback_stopped=lambda natural: stopped.append(
-            f"stream-1:{natural}"
-        ),
+        presentation_stopped=stopped.append,
     )
     weights = [0.5] * len(MODEL_CHANNELS)
     controller.receive("stream-1", 1600, weights, MODEL_EMOTIONS.copy())
@@ -451,204 +439,76 @@ def test_terminal_event_cleans_external_stream_and_holds_final_values(
 
     assert applied == [(tuple(MODEL_CHANNELS), tuple(weights))]
     assert controller.active is False
-    assert controller.operation_id is None
     assert scene.audio2face.stream_time == 0.0
-    assert stopped == ["stream-1:True"]
+    assert stopped == [None]
 
 
-def test_selected_audio_waits_for_worker_terminal_after_device_stops(
+@pytest.mark.parametrize(
+    ("prediction_delay", "terminal_elapsed"),
+    ((-0.05, 0.1), (0.05, 0.05)),
+)
+def test_terminal_waits_for_delayed_presentation_without_shortening_positive_delay(
     live_module: tuple[ModuleType, _Scene, list[AppliedFrame]],
-    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prediction_delay: float,
+    terminal_elapsed: float,
 ) -> None:
-    live, scene, _applied = live_module
-    audio_path = tmp_path / "voice.wav"
-    audio_path.write_bytes(b"RIFF")
-    stopped: list[bool] = []
+    live, scene, applied = live_module
+    now = [10.0]
+    monkeypatch.setattr(live.time, "monotonic", lambda: now[0])
+    scene.audio2face.prediction_delay = prediction_delay
     controller = live.LiveStreamController()
-    controller.prepare(
+    stopped: list[str | None] = []
+    controller.prepare_external(
         scene,
         "stream-1",
         16_000,
         tuple(MODEL_CHANNELS),
         tuple(MODEL_EMOTION_CHANNELS),
-        audio_path=audio_path,
-        playback_started=None,
-        playback_stopped=stopped.append,
+        presentation_stopped=stopped.append,
     )
+    first = [0.0] * len(MODEL_CHANNELS)
+    final = [1.0] * len(MODEL_CHANNELS)
+    controller.receive("stream-1", 0, first, [1.0, 0.0])
+    controller.receive("stream-1", 1600, final, [0.0, 1.0])
 
-    class Handle:
-        status = False
-        position = 2.0
-        stop_calls = 0
-
-        def stop(self) -> None:
-            self.stop_calls += 1
-
-    handle = Handle()
-    controller._handle = handle
-    controller._duration = 2.0
-    live.configure_playback_position(scene.audio2face, 0.0, 2.0)
-
-    assert controller.tick() is True
-    assert controller.active is True
-    assert live.playback_position(scene.audio2face) == pytest.approx(2.0)
-    assert stopped == []
-
+    now[0] += terminal_elapsed
     controller.mark_terminal("stream-1")
 
     assert controller.active is True
+    assert stopped == []
+    assert applied[-1] == (tuple(MODEL_CHANNELS), tuple(first))
+
+    now[0] += 0.05
     assert controller.tick() is False
     assert controller.active is False
-    assert handle.stop_calls == 1
-    assert stopped == [True]
-    assert live.playback_position(scene.audio2face) == pytest.approx(2.0)
-    assert live.playback_position_maximum(scene.audio2face) == pytest.approx(2.0)
+    assert stopped == [None]
+    assert applied[-1] == (tuple(MODEL_CHANNELS), tuple(final))
 
 
-def test_boolean_handle_status_does_not_overwrite_paused_state(
+def test_presentation_failure_is_reported_to_its_runtime_owner(
     live_module: tuple[ModuleType, _Scene, list[AppliedFrame]],
-    tmp_path: Path,
 ) -> None:
     live, scene, _applied = live_module
-    audio_path = tmp_path / "voice.wav"
-    audio_path.write_bytes(b"RIFF")
+    scene.audio2face.prediction_delay = float("nan")
     controller = live.LiveStreamController()
-    controller.prepare(
+    stopped: list[str | None] = []
+    controller.prepare_external(
         scene,
         "stream-1",
         16_000,
         tuple(MODEL_CHANNELS),
         tuple(MODEL_EMOTION_CHANNELS),
-        audio_path=audio_path,
-        playback_started=None,
-        playback_stopped=None,
+        presentation_stopped=stopped.append,
     )
-    controller._handle = SimpleNamespace(status=True, position=0.5)
-    controller._duration = 2.0
-    live.configure_playback_position(scene.audio2face, 0.5, 2.0)
-    controller._published_position = 0.5
-    scene.audio2face.playback_state = "PAUSED"
 
-    assert controller.tick() is True
-
-    assert scene.audio2face.playback_state == "PAUSED"
-
-
-def test_position_slider_coalesces_edits_without_snapping_back(
-    live_module: tuple[ModuleType, _Scene, list[AppliedFrame]],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    live, scene, _applied = live_module
-    now = [10.0]
-    monkeypatch.setattr(live.time, "monotonic", lambda: now[0])
-    audio_path = tmp_path / "voice.wav"
-    audio_path.write_bytes(b"RIFF")
-    seeks: list[tuple[float, bool]] = []
-    controller = live.LiveStreamController()
-    controller.prepare(
-        scene,
+    controller.receive(
         "stream-1",
-        16_000,
-        tuple(MODEL_CHANNELS),
-        tuple(MODEL_EMOTION_CHANNELS),
-        audio_path=audio_path,
-        playback_started=None,
-        playback_seeked=lambda position, paused: seeks.append((position, paused)),
-        playback_stopped=None,
+        0,
+        [0.0] * len(MODEL_CHANNELS),
+        MODEL_EMOTIONS.copy(),
     )
-    controller._handle = SimpleNamespace(status=True, position=0.25)
-    controller._duration = 2.0
-    live.configure_playback_position(scene.audio2face, 0.25, 2.0)
-    controller._published_position = 0.25
-    scene.audio2face.playback_state = "PAUSED"
-    scene.audio2face[live.PLAYBACK_POSITION_KEY] = 1.0
-
-    assert controller.tick() is True
-    assert seeks == []
-    assert live.playback_position(scene.audio2face) == 1.0
-
-    scene.audio2face[live.PLAYBACK_POSITION_KEY] = 1.5
-    now[0] += 0.10
-    assert controller.tick() is True
-    assert seeks == []
-    assert live.playback_position(scene.audio2face) == 1.5
-
-    now[0] += live.SEEK_SETTLE_SECONDS
-    assert controller.tick() is True
-
-    assert seeks == [(1.5, True)]
-    assert live.playback_position(scene.audio2face) == 1.5
-
-
-def test_seek_stop_preserves_requested_playback_presentation(
-    live_module: tuple[ModuleType, _Scene, list[AppliedFrame]],
-    tmp_path: Path,
-) -> None:
-    live, scene, _applied = live_module
-    audio_path = tmp_path / "voice.wav"
-    audio_path.write_bytes(b"RIFF")
-    controller = live.LiveStreamController()
-    controller.prepare(
-        scene,
-        "stream-1",
-        16_000,
-        tuple(MODEL_CHANNELS),
-        tuple(MODEL_EMOTION_CHANNELS),
-        audio_path=audio_path,
-        playback_started=None,
-        playback_stopped=None,
-    )
-
-    class Handle:
-        status = True
-
-        def stop(self) -> None:
-            pass
-
-    controller._handle = Handle()
-    controller._duration = 2.0
-    live.configure_playback_position(scene.audio2face, 0.0, 2.0)
-
-    controller.stop_for_seek(1.25, paused=True)
 
     assert controller.active is False
-    assert scene.audio2face.playback_state == "PAUSED"
-    assert live.playback_position(scene.audio2face) == 1.25
-    assert scene.audio2face.custom_property_ui[live.PLAYBACK_POSITION_KEY] == {
-        "min": 0.0,
-        "max": 2.0,
-        "soft_min": 0.0,
-        "soft_max": 2.0,
-        "subtype": "TIME",
-        "description": "Seek within the selected audio playback",
-    }
-
-
-def test_selected_audio_seek_endpoint_resolves_to_final_model_sample(
-    live_module: tuple[ModuleType, _Scene, list[AppliedFrame]],
-    tmp_path: Path,
-) -> None:
-    live, scene, _applied = live_module
-    audio_path = tmp_path / "voice.wav"
-    audio_path.write_bytes(b"RIFF")
-    seeks: list[tuple[float, bool]] = []
-    controller = live.LiveStreamController()
-    controller.prepare(
-        scene,
-        "stream-1",
-        16_000,
-        tuple(MODEL_CHANNELS),
-        tuple(MODEL_EMOTION_CHANNELS),
-        audio_path=audio_path,
-        playback_started=None,
-        playback_seeked=lambda position, paused: seeks.append((position, paused)),
-        playback_stopped=None,
-    )
-    controller._handle = SimpleNamespace()
-    controller._duration = 2.0
-    scene.audio2face.playback_state = "PAUSED"
-
-    controller.request_seek(2.0)
-
-    assert seeks == [(pytest.approx(2.0 - (1.0 / 16_000)), True)]
+    assert scene.audio2face.status == "MODEL_READY"
+    assert stopped == ["prediction delay must be finite"]

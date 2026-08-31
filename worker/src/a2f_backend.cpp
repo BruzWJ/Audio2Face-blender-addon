@@ -3,15 +3,21 @@
 #include "path_contract.h"
 
 #include <audio2emotion/audio2emotion.h>
+#include <audio2emotion/internal/executor.h>
 #include <audio2face/audio2face.h>
+#include <audio2face/internal/executor.h>
+#include <audio2x/audio_accumulator.h>
+#include <audio2x/cuda_stream.h>
 #include <audio2x/cuda_utils.h>
+#include <audio2x/emotion_accumulator.h>
+#include <audio2x/error.h>
 #include <audio2x/executor.h>
 #include <audio2x/tensor_float.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <deque>
+#include <exception>
 #include <initializer_list>
 #include <limits>
 #include <map>
@@ -65,6 +71,11 @@ struct Audio2FaceSettings {
   float input_strength{0.0F};
   nva2f::AnimatorSkinParams skin{};
   nva2f::AnimatorEyesParams eyes{};
+};
+
+struct InferenceSettings {
+  Audio2FaceSettings audio2face;
+  EmotionDriver emotion_driver;
 };
 
 template <class T>
@@ -347,13 +358,27 @@ class Backend::Impl final {
       require_canonical_regular_file(
           request.audio2emotion_model_path, "model_not_found",
           "audio2emotion_model_path");
+      audio2face_model_path_ = request.audio2face_model_path;
       sdk_check(nva2x::SetCudaDeviceIfNeeded(0), "Selecting CUDA device",
                 "gpu_error");
-      const auto geometry_info = require_sdk_ptr(
-          nva2f::ReadDiffusionModelInfo(
-              request.audio2face_model_path.c_str()),
-          "Reading diffusion model", "model_invalid");
-      const auto& network = geometry_info->GetNetworkInfo();
+      const auto execution_option =
+          nva2f::IGeometryExecutor::ExecutionOption::Skin |
+          nva2f::IGeometryExecutor::ExecutionOption::Eyes;
+      nva2f::IDiffusionModel::IGeometryModelInfo* geometry_model_info = nullptr;
+      nva2f::IDiffusionModel::IBlendshapeSolveModelInfo*
+          blendshape_model_info = nullptr;
+      bundle_.reset(nva2f::ReadDiffusionBlendshapeSolveExecutorBundle(
+          1, request.audio2face_model_path.c_str(), execution_option, true,
+          kDefaultIdentityIndex, true, &geometry_model_info,
+          &blendshape_model_info));
+      geometry_model_info_.reset(geometry_model_info);
+      blendshape_model_info_.reset(blendshape_model_info);
+      if (bundle_ == nullptr || geometry_model_info_ == nullptr ||
+          blendshape_model_info_ == nullptr) {
+        throw WorkerError("gpu_error",
+                          "Creating diffusion GPU blendshape executor returned null");
+      }
+      const auto& network = geometry_model_info_->GetNetworkInfo();
       const auto& audio2face_network = network.GetNetworkInfo();
       const std::size_t audio2face_input_window_samples =
           audio2face_network.bufferLength;
@@ -363,8 +388,16 @@ class Backend::Impl final {
             "model_invalid",
             "Audio2Face reported invalid audio window metadata",
             {{"buffer_samples", audio2face_input_window_samples},
-             {"sample_rate", audio2face_network.bufferSamplerate}});
+                         {"sample_rate", audio2face_network.bufferSamplerate}});
       }
+      if (audio2face_network.bufferSamplerate > kMaximumSupportedSampleRate) {
+        throw WorkerError("model_invalid", "SDK reported an invalid sample rate",
+                          {{"sample_rate",
+                            audio2face_network.bufferSamplerate}});
+      }
+      sample_rate_ =
+          static_cast<std::uint32_t>(audio2face_network.bufferSamplerate);
+      prebuffer_samples_ = audio2face_input_window_samples;
       if (network.GetIdentityLength() == 0) {
         throw WorkerError("model_invalid",
                           "Audio2Face model has no identity");
@@ -372,151 +405,33 @@ class Backend::Impl final {
       json emotion_channels =
           load_emotion_channels(network, network.GetDefaultEmotion());
 
-      const auto blendshape_info = require_sdk_ptr(
-          nva2f::ReadDiffusionBlendshapeSolveModelInfo(
-              request.audio2face_model_path.c_str()),
-          "Reading diffusion blendshape solver", "model_invalid");
-      const auto execution_option =
-          nva2f::IGeometryExecutor::ExecutionOption::Skin |
-          nva2f::IGeometryExecutor::ExecutionOption::Eyes;
       const auto blendshape_parameters =
-          blendshape_info->GetExecutorCreationParameters(
+          blendshape_model_info_->GetExecutorCreationParameters(
               execution_option, kDefaultIdentityIndex);
       std::vector<std::string> output_channels =
           skin_pose_names(blendshape_parameters.initializationSkinParams);
       validate_arkit52_channels(output_channels);
       eye_look_indices_ = resolve_arkit_eye_look_indices(output_channels);
 
-      bundle_ = require_sdk_ptr(
-          nva2f::ReadDiffusionBlendshapeSolveExecutorBundle(
-              1, request.audio2face_model_path.c_str(),
-              execution_option, true, kDefaultIdentityIndex, true, nullptr,
-              nullptr),
-          "Creating diffusion GPU blendshape executor", "gpu_error");
-      auto& executor = bundle_->GetExecutor();
-      if (executor.GetResultType() !=
-          nva2f::IBlendshapeExecutor::ResultsType::DEVICE) {
-        throw WorkerError("gpu_error",
-                          "Audio2Face did not create a device blendshape solver");
-      }
-      if (executor.GetNbTracks() != 1 ||
-          executor.GetWeightCount() != output_channels.size()) {
-        throw WorkerError(
-            "model_invalid", "SDK blendshape layout does not match model metadata",
-            {{"tracks", executor.GetNbTracks()},
-             {"reported_weights", executor.GetWeightCount()},
-             {"expected_weights", output_channels.size()}});
-      }
-      auto& geometry = geometry_executor();
-      // BlendshapeSolveExecutor::Init() in SDK 1.0.0 reapplies an execution
-      // option derived only from its skin/tongue solvers. Restore the eye
-      // output requested above before installing the callbacks.
-      sdk_check(geometry.SetExecutionOption(execution_option),
-                "Enabling skin and eye geometry outputs");
-      if (geometry.GetExecutionOption() != execution_option) {
-        throw WorkerError(
-            "sdk_error", "Geometry executor did not enable skin and eye outputs");
-      }
-      if (geometry.GetEyesRotationSize() != kEyesRotationCount) {
-        throw WorkerError("model_invalid", "Unsupported SDK eyes rotation size",
-                          {{"reported", geometry.GetEyesRotationSize()},
-                           {"expected", kEyesRotationCount}});
-      }
-      sdk_check(nva2f::SetExecutorGeometryResultsCallback(
-                    executor, &Impl::geometry_callback, this),
-                "Installing geometry callback");
-      sdk_check(executor.SetEmotionsCallback(
-                    &Impl::effective_emotions_callback, this),
-                "Installing effective emotion callback");
-      sdk_check(executor.SetResultsCallback(&Impl::weights_callback, this),
-                "Installing device blendshape callback");
+      emotion_model_info_ = require_sdk_ptr(
+          nva2e::ReadClassifierModelInfo(
+              request.audio2emotion_model_path.c_str()),
+          "Reading Audio2Emotion classifier model", "model_invalid");
+      ensure_stream_executors();
 
       Audio2FaceSettings audio2face_defaults;
       sdk_check(nva2f::GetExecutorInputStrength(
-                    geometry, audio2face_defaults.input_strength),
+                    geometry_executor(), audio2face_defaults.input_strength),
                 "Reading Audio2Face input strength");
       sdk_check(nva2f::GetExecutorSkinParameters(
-                    geometry, 0, audio2face_defaults.skin),
+                    geometry_executor(), 0, audio2face_defaults.skin),
                 "Reading Audio2Face skin parameters");
       sdk_check(nva2f::GetExecutorEyesParameters(
-                    geometry, 0, audio2face_defaults.eyes),
+                    geometry_executor(), 0, audio2face_defaults.eyes),
                 "Reading Audio2Face eyes parameters");
       validate_audio2face_settings(audio2face_defaults, "model_invalid",
                                    "Audio2Face model tuning default ");
       audio2face_defaults_ = audio2face_defaults;
-
-      const std::size_t sample_rate = executor.GetSamplingRate();
-      if (sample_rate == 0 || sample_rate > kMaximumSupportedSampleRate) {
-        throw WorkerError("model_invalid", "SDK reported an invalid sample rate",
-                          {{"sample_rate", sample_rate}});
-      }
-      sample_rate_ = static_cast<std::uint32_t>(sample_rate);
-      if (audio2face_network.bufferSamplerate != sample_rate_) {
-        throw WorkerError(
-            "model_invalid",
-            "Audio2Face model and executor sample rates do not match",
-            {{"model_sample_rate", audio2face_network.bufferSamplerate},
-             {"executor_sample_rate", sample_rate_}});
-      }
-
-      const auto emotion_model_info = require_sdk_ptr(
-          nva2e::ReadClassifierModelInfo(
-              request.audio2emotion_model_path.c_str()),
-          "Reading Audio2Emotion classifier model", "model_invalid");
-      std::size_t frame_rate_numerator = 0;
-      std::size_t frame_rate_denominator = 0;
-      executor.GetFrameRate(frame_rate_numerator, frame_rate_denominator);
-      if (frame_rate_numerator == 0 || frame_rate_denominator == 0) {
-        throw WorkerError("model_invalid",
-                          "Audio2Face reported an invalid frame rate");
-      }
-      nva2e::EmotionExecutorCreationParameters emotion_parameters;
-      emotion_parameters.cudaStream = bundle_->GetCudaStream().Data();
-      emotion_parameters.nbTracks = 1;
-      const nva2x::IAudioAccumulator* shared_audio_accumulator =
-          &bundle_->GetAudioAccumulator(0);
-      emotion_parameters.sharedAudioAccumulators = &shared_audio_accumulator;
-      const auto classifier_parameters =
-          emotion_model_info->GetExecutorCreationParameters(
-              kAudio2EmotionInputWindowSamples, frame_rate_numerator,
-              frame_rate_denominator, kAudio2EmotionInferencesToSkip);
-      const std::size_t audio2emotion_input_window_samples =
-          classifier_parameters.networkInfo.bufferLength;
-      if (audio2emotion_input_window_samples == 0 ||
-          classifier_parameters.networkInfo.bufferSamplerate != sample_rate_) {
-        throw WorkerError(
-            "model_invalid",
-            "Audio2Emotion reported invalid audio window metadata",
-            {{"buffer_samples", audio2emotion_input_window_samples},
-             {"audio2emotion_sample_rate",
-              classifier_parameters.networkInfo.bufferSamplerate},
-             {"audio2face_sample_rate", sample_rate_}});
-      }
-      prebuffer_samples_ = std::max(audio2face_input_window_samples,
-                                    audio2emotion_input_window_samples);
-      emotion_executor_ = require_sdk_ptr(
-          nva2e::CreateClassifierEmotionExecutor(emotion_parameters,
-                                                 classifier_parameters),
-          "Creating Audio2Emotion GPU executor", "gpu_error");
-      // SDK 1.0.0 exposes the post-processed vector width, but not names for
-      // those output positions. Require the selected v3.0 model pair to expose
-      // the same ordered emotion-vector width before creating the integration.
-      if (emotion_executor_->GetNbTracks() != 1 ||
-          emotion_executor_->GetSamplingRate() != sample_rate_ ||
-          emotion_executor_->GetEmotionsSize() != emotion_channels_.size()) {
-        throw WorkerError(
-            "model_invalid",
-            "Audio2Emotion output is incompatible with Audio2Face",
-            {{"audio2face_sample_rate", sample_rate_},
-             {"audio2emotion_sample_rate",
-              emotion_executor_->GetSamplingRate()},
-             {"audio2face_emotion_count", emotion_channels_.size()},
-             {"audio2emotion_output_count",
-              emotion_executor_->GetEmotionsSize()}});
-      }
-      sdk_check(emotion_executor_->SetResultsCallback(
-                    &Impl::generated_emotion_callback, this),
-                "Installing Audio2Emotion callback");
 
       json model_schema = {{"channels", std::move(output_channels)},
                            {"emotion_channels", std::move(emotion_channels)},
@@ -549,32 +464,18 @@ class Backend::Impl final {
       throw WorkerError("canceled", "Stream was stopped");
     }
     accumulate_audio(audio.data(), audio.size());
-    retain_audio(audio);
+    sdk_check(bundle_->GetCudaStream().Synchronize(),
+              "Synchronizing streaming audio upload", "gpu_error");
     drain_ready(canceled, frame);
   }
 
   void stream_settings(const json& settings,
-                       std::atomic_bool& canceled,
-                       const StreamResetCallback& reset,
-                       const StreamFrameCallback& frame) {
+                       std::atomic_bool& canceled) {
     require_active_stream();
-    if (canceled.load(std::memory_order_acquire)) {
-      throw WorkerError("canceled", "Stream was stopped");
-    }
-    reset_inference(settings);
-    timestamp_offset_ =
-        total_audio_samples_ - static_cast<std::int64_t>(retained_audio_.size());
-    previous_timestamp_.reset();
-    reset();
-    if (canceled.load(std::memory_order_acquire)) {
-      throw WorkerError("canceled", "Stream was stopped");
-    }
-    if (!retained_audio_.empty()) {
-      const std::vector<float> replay(retained_audio_.begin(),
-                                      retained_audio_.end());
-      accumulate_audio(replay.data(), replay.size());
-      drain_ready(canceled, frame);
-    }
+    require_not_canceled(canceled);
+    InferenceSettings parsed = parse_settings(settings);
+    configure_audio2face(parsed.audio2face);
+    configure_stream_emotion(parsed.emotion_driver);
   }
 
   void stream_end(std::atomic_bool& canceled,
@@ -584,7 +485,86 @@ class Backend::Impl final {
     close_audio_and_drain(canceled, frame);
   }
 
-  void stream_abort() noexcept { finish_operation(); }
+  void track_start(const TrackRequest& request) {
+    std::lock_guard<std::mutex> lock(resource_mutex_);
+    require_model_locked();
+    if (request.sample_rate != sample_rate_) {
+      throw WorkerError("sample_rate_mismatch",
+                        "Track PCM must use the model sample rate",
+                        {{"expected", sample_rate_},
+                         {"received", request.sample_rate}});
+    }
+    if (operation_active_.exchange(true, std::memory_order_acq_rel)) {
+      throw WorkerError("busy", "An Audio2Face operation is already active");
+    }
+    try {
+      ensure_stream_executors();
+      operation_kind_ = OperationKind::Track;
+      track_audio_.clear();
+      track_audio_samples_ = 0;
+    } catch (...) {
+      operation_active_.store(false, std::memory_order_release);
+      throw;
+    }
+  }
+
+  void track_chunk(const std::vector<float>& audio,
+                   std::atomic_bool& canceled) {
+    if (canceled.load(std::memory_order_acquire)) {
+      throw WorkerError("canceled", "Track was stopped");
+    }
+    if (audio.size() > static_cast<std::uint64_t>(
+                           std::numeric_limits<std::int64_t>::max()) -
+                           track_audio_.size()) {
+      throw WorkerError("invalid_state", "Track sample timeline is too long");
+    }
+    track_audio_.insert(track_audio_.end(), audio.begin(), audio.end());
+  }
+
+  void track_prepare(std::atomic_bool& canceled) {
+    if (track_audio_.empty()) {
+      throw WorkerError("invalid_state", "Track audio is empty");
+    }
+    if (canceled.load(std::memory_order_acquire)) {
+      throw WorkerError("canceled", "Track was stopped");
+    }
+    track_audio_samples_ = track_audio_.size();
+  }
+
+  std::size_t track_render(
+      const TrackRenderRequest& request,
+      std::atomic_bool& canceled,
+      const std::atomic<std::uint64_t>& latest_revision,
+      const TrackPreviewCallback& preview,
+      const TrackCacheCallback& cache) {
+    if (track_audio_samples_ == 0 ||
+        track_audio_samples_ != track_audio_.size()) {
+      throw WorkerError("invalid_state", "Track audio is not prepared");
+    }
+    for (std::size_t index = 0; index < request.settings_timeline.size();
+         ++index) {
+      const std::uint64_t sample = request.settings_timeline[index].sample;
+      if (sample >= track_audio_samples_) {
+        throw WorkerError(
+            "invalid_params", "settings_timeline sample is outside the track audio",
+            {{"index", index},
+             {"sample", sample},
+             {"audio_samples", track_audio_samples_}});
+      }
+    }
+    if (request.preview_sample &&
+        static_cast<std::uint64_t>(*request.preview_sample) >=
+            track_audio_samples_) {
+      throw WorkerError(
+          "invalid_params", "preview_sample is outside the track audio",
+          {{"preview_sample", *request.preview_sample},
+           {"audio_samples", track_audio_samples_}});
+    }
+    return compute_track_render(request, canceled, latest_revision, preview,
+                                cache);
+  }
+
+  void abort_operation() noexcept { finish_operation(); }
 
  private:
   class OperationReset final {
@@ -598,6 +578,20 @@ class Backend::Impl final {
     Impl& owner_;
   };
 
+  enum class OperationKind { None, Stream, Track };
+
+  struct ParsedTrackSettingsEntry {
+    std::uint64_t sample;
+    InferenceSettings settings;
+  };
+
+  struct TrackSettingsSchedule {
+    const std::vector<ParsedTrackSettingsEntry>* entries{nullptr};
+    std::size_t face_input_index{0};
+    std::size_t face_postprocess_index{0};
+    std::size_t emotion_postprocess_index{0};
+  };
+
   struct PendingFrame {
     std::int64_t next_timestamp{0};
     SdkPtr<nva2x::IHostTensorFloat> weights;
@@ -609,7 +603,9 @@ class Backend::Impl final {
     std::atomic_bool* canceled{nullptr};
     std::size_t weight_count{0};
     std::size_t emotion_count{0};
+    TrackSettingsSchedule* settings_schedule{nullptr};
     std::map<std::int64_t, PendingFrame> frames;
+    std::exception_ptr callback_error;
     const char* failure{nullptr};
   };
 
@@ -617,7 +613,10 @@ class Backend::Impl final {
     std::atomic_bool* canceled{nullptr};
     nva2x::IEmotionAccumulator* accumulator{nullptr};
     std::size_t emotion_count{0};
+    std::size_t frame_count{0};
+    TrackSettingsSchedule* settings_schedule{nullptr};
     std::error_code accumulation_error;
+    std::exception_ptr callback_error;
     const char* failure{nullptr};
   };
 
@@ -642,7 +641,8 @@ class Backend::Impl final {
       return false;
     }
     if (results.emotions.Size() != capture.emotion_count) {
-      capture.failure = "Audio2Emotion callback returned an unexpected value count";
+      capture.failure =
+          "Audio2Emotion callback returned an unexpected value count";
       return false;
     }
     const std::error_code error = capture.accumulator->Accumulate(
@@ -650,6 +650,17 @@ class Backend::Impl final {
     if (error) {
       capture.accumulation_error = error;
       capture.failure = "Accumulating generated emotion failed";
+      return false;
+    }
+    ++capture.frame_count;
+    try {
+      if (capture.settings_schedule != nullptr) {
+        owner.advance_emotion_postprocess_settings(
+            *capture.settings_schedule, results.timeStampNextFrame);
+      }
+    } catch (...) {
+      capture.callback_error = std::current_exception();
+      capture.failure = "Applying animated Audio2Emotion settings failed";
       return false;
     }
     return true;
@@ -668,9 +679,8 @@ class Backend::Impl final {
         return;
       }
       if (results.emotions.Size() != capture.emotion_count) {
-        fail_capture(
-            capture,
-            "Face emotion callback returned an unexpected value count");
+        fail_capture(capture,
+                     "Face emotion callback returned an unexpected value count");
         return;
       }
       auto& frame = capture.frames[results.timeStampCurrentFrame];
@@ -730,8 +740,13 @@ class Backend::Impl final {
         fail_capture(capture, "Copying eye rotations failed");
         return false;
       }
+      if (capture.settings_schedule != nullptr) {
+        owner.advance_face_postprocess_settings(
+            *capture.settings_schedule, results.timeStampNextFrame);
+      }
       return true;
     } catch (...) {
+      capture.callback_error = std::current_exception();
       fail_capture(capture, "Geometry callback failed");
       return false;
     }
@@ -792,95 +807,347 @@ class Backend::Impl final {
     return *geometry;
   }
 
-  void require_model_locked() const {
-    if (bundle_ == nullptr) {
+  void clear_stream_executors() noexcept {
+    if (bundle_ != nullptr) {
+      (void)bundle_->GetExecutor().Wait(0);
+      (void)bundle_->GetCudaStream().Synchronize();
+    }
+    active_capture_ = nullptr;
+    active_generated_emotion_capture_ = nullptr;
+    emotion_executor_.reset();
+    bundle_.reset();
+  }
+
+  void ensure_stream_executors() {
+    if (bundle_ != nullptr && emotion_executor_ != nullptr) return;
+    if (geometry_model_info_ == nullptr || emotion_model_info_ == nullptr ||
+        audio2face_model_path_.empty()) {
       throw WorkerError("model_not_loaded", "Load a model before inference");
     }
-  }
-
-  void reset_inference(const json& settings) {
-    sdk_check(executor().Wait(0), "Waiting for prior blendshape work",
-              "gpu_error");
-    sdk_check(bundle_->GetCudaStream().Synchronize(),
-              "Synchronizing CUDA stream", "gpu_error");
-    sdk_check(executor().Reset(0), "Resetting blendshape executor");
-    sdk_check(bundle_->GetAudioAccumulator(0).Reset(),
-              "Resetting audio accumulator");
-    sdk_check(bundle_->GetEmotionAccumulator(0).Reset(),
-              "Resetting emotion accumulator");
-    sdk_check(emotion_executor_->Reset(0),
-              "Resetting Audio2Emotion executor");
-    apply_settings(settings);
-    if (emotion_driver_.generated) {
-      configure_generated_emotion(emotion_driver_);
-    } else {
-      std::vector<float> emotion_input(emotion_channels_.size(), 0.0F);
-      if (emotion_driver_.preferred) {
-        const PreferredEmotionSettings& preferred =
-            *emotion_driver_.preferred;
-        const float scale =
-            emotion_driver_.emotion_strength * preferred.strength;
-        std::transform(preferred.values.begin(), preferred.values.end(),
-                       emotion_input.begin(),
-                       [scale](float value) { return scale * value; });
-      }
-      sdk_check(bundle_->GetEmotionAccumulator(0).Accumulate(
-                    0,
-                    nva2x::HostTensorFloatConstView(
-                        emotion_input.data(), emotion_input.size()),
-                    bundle_->GetCudaStream().Data()),
-                "Accumulating constant effective emotions");
-      sdk_check(bundle_->GetEmotionAccumulator(0).Close(),
-                "Closing constant effective emotions");
-    }
-  }
-
-  void begin_operation(std::uint32_t sample_rate, const json& settings) {
-    std::lock_guard<std::mutex> lock(resource_mutex_);
-    require_model_locked();
-    if (sample_rate != sample_rate_) {
-      throw WorkerError("sample_rate_mismatch",
-                        "Streaming PCM must use the model sample rate",
-                        {{"expected", sample_rate_},
-                         {"received", sample_rate}});
-    }
-    if (operation_active_.exchange(true, std::memory_order_acq_rel)) {
-      throw WorkerError("busy", "An Audio2Face operation is already active");
-    }
     try {
-      if (prebuffer_samples_ >
-              std::numeric_limits<std::size_t>::max() - sample_rate_ ||
-          prebuffer_samples_ >
-              static_cast<std::size_t>(
-                  std::numeric_limits<std::int64_t>::max()) - sample_rate_) {
-        throw WorkerError("model_invalid",
-                          "Model replay context length is out of range");
+      const auto execution_option =
+          nva2f::IGeometryExecutor::ExecutionOption::Skin |
+          nva2f::IGeometryExecutor::ExecutionOption::Eyes;
+      if (bundle_ == nullptr) {
+        bundle_ = require_sdk_ptr(
+            nva2f::ReadDiffusionBlendshapeSolveExecutorBundle(
+                1, audio2face_model_path_.c_str(), execution_option, true,
+                kDefaultIdentityIndex, true, nullptr, nullptr),
+            "Creating diffusion GPU blendshape executor", "gpu_error");
       }
-      retained_audio_capacity_ = prebuffer_samples_ + sample_rate_;
-      retained_audio_.clear();
-      total_audio_samples_ = 0;
-      timestamp_offset_ = 0;
-      previous_timestamp_.reset();
-      reset_inference(settings);
+      auto& stream_executor = executor();
+      if (stream_executor.GetResultType() !=
+              nva2f::IBlendshapeExecutor::ResultsType::DEVICE ||
+          stream_executor.GetNbTracks() != 1 ||
+          stream_executor.GetWeightCount() != kArkit52ChannelCount) {
+        throw WorkerError(
+            "model_invalid", "Streaming blendshape output is incompatible",
+            {{"tracks", stream_executor.GetNbTracks()},
+             {"reported_weights", stream_executor.GetWeightCount()},
+             {"expected_weights", kArkit52ChannelCount}});
+      }
+      auto& stream_geometry = geometry_executor();
+      sdk_check(stream_geometry.SetExecutionOption(execution_option),
+                "Enabling streaming skin and eye geometry outputs");
+      const auto applied_execution_option =
+          stream_geometry.GetExecutionOption();
+      if (applied_execution_option != execution_option) {
+        throw WorkerError(
+            "model_invalid", "Unsupported streaming geometry execution option",
+            {{"reported", static_cast<std::uint32_t>(applied_execution_option)},
+             {"expected", static_cast<std::uint32_t>(execution_option)}});
+      }
+      if (stream_geometry.GetEyesRotationSize() != kEyesRotationCount) {
+        throw WorkerError(
+            "model_invalid", "Unsupported streaming eyes rotation size",
+            {{"reported", stream_geometry.GetEyesRotationSize()},
+             {"expected", kEyesRotationCount}});
+      }
+      sdk_check(nva2f::SetExecutorGeometryResultsCallback(
+                    stream_executor, &Impl::geometry_callback, this),
+                "Installing streaming geometry callback");
+      sdk_check(stream_executor.SetEmotionsCallback(
+                    &Impl::effective_emotions_callback, this),
+                "Installing streaming effective emotion callback");
+      sdk_check(stream_executor.SetResultsCallback(
+                    &Impl::weights_callback, this),
+                "Installing streaming blendshape callback");
+
+      const std::size_t executor_sample_rate =
+          stream_executor.GetSamplingRate();
+      if (executor_sample_rate != sample_rate_) {
+        throw WorkerError(
+            "model_invalid",
+            "Audio2Face model and executor sample rates do not match",
+            {{"model_sample_rate", sample_rate_},
+             {"executor_sample_rate", executor_sample_rate}});
+      }
+      std::size_t frame_rate_numerator = 0;
+      std::size_t frame_rate_denominator = 0;
+      stream_executor.GetFrameRate(frame_rate_numerator,
+                                   frame_rate_denominator);
+      if (frame_rate_numerator == 0 || frame_rate_denominator == 0) {
+        throw WorkerError("model_invalid",
+                          "Audio2Face reported an invalid frame rate");
+      }
+
+      nva2e::EmotionExecutorCreationParameters emotion_parameters;
+      emotion_parameters.cudaStream = bundle_->GetCudaStream().Data();
+      emotion_parameters.nbTracks = 1;
+      const nva2x::IAudioAccumulator* shared_audio_accumulator =
+          &bundle_->GetAudioAccumulator(0);
+      emotion_parameters.sharedAudioAccumulators = &shared_audio_accumulator;
+      const auto classifier_parameters =
+          emotion_model_info_->GetExecutorCreationParameters(
+              kAudio2EmotionInputWindowSamples, frame_rate_numerator,
+              frame_rate_denominator, kAudio2EmotionInferencesToSkip);
+      const std::size_t audio2emotion_input_window_samples =
+          classifier_parameters.networkInfo.bufferLength;
+      if (audio2emotion_input_window_samples == 0 ||
+          classifier_parameters.networkInfo.bufferSamplerate != sample_rate_) {
+        throw WorkerError(
+            "model_invalid", "Audio2Emotion reported invalid audio window metadata",
+            {{"buffer_samples", audio2emotion_input_window_samples},
+             {"audio2emotion_sample_rate",
+              classifier_parameters.networkInfo.bufferSamplerate},
+             {"audio2face_sample_rate", sample_rate_}});
+      }
+      prebuffer_samples_ =
+          std::max(prebuffer_samples_, audio2emotion_input_window_samples);
+      emotion_executor_ = require_sdk_ptr(
+          nva2e::CreateClassifierEmotionExecutor(emotion_parameters,
+                                                 classifier_parameters),
+          "Creating Audio2Emotion GPU executor", "gpu_error");
+      if (emotion_executor_->GetNbTracks() != 1 ||
+          emotion_executor_->GetSamplingRate() != sample_rate_ ||
+          emotion_executor_->GetEmotionsSize() != emotion_channels_.size()) {
+        throw WorkerError(
+            "model_invalid",
+            "Audio2Emotion output is incompatible with Audio2Face");
+      }
+      sdk_check(emotion_executor_->SetResultsCallback(
+                    &Impl::generated_emotion_callback, this),
+                "Installing Audio2Emotion callback");
     } catch (...) {
-      operation_active_.store(false, std::memory_order_release);
+      clear_stream_executors();
       throw;
     }
   }
 
-  void finish_operation() noexcept {
-    retained_audio_.clear();
-    retained_audio_capacity_ = 0;
-    total_audio_samples_ = 0;
-    timestamp_offset_ = 0;
-    previous_timestamp_.reset();
-    operation_active_.store(false, std::memory_order_release);
+  void require_model_locked() const {
+    if (geometry_model_info_ == nullptr || blendshape_model_info_ == nullptr ||
+        emotion_model_info_ == nullptr || audio2face_model_path_.empty()) {
+      throw WorkerError("model_not_loaded", "Load a model before inference");
+    }
   }
 
-  void require_active_stream() const {
-    if (!operation_active_.load(std::memory_order_acquire)) {
-      throw WorkerError("operation_not_found", "No stream is active");
+  static bool render_is_superseded(
+      std::uint64_t revision,
+      const std::atomic<std::uint64_t>& latest_revision) noexcept {
+    return latest_revision.load(std::memory_order_acquire) != revision;
+  }
+
+  static void require_not_canceled(std::atomic_bool& canceled) {
+    if (canceled.load(std::memory_order_acquire)) {
+      throw WorkerError("canceled", "Operation was stopped");
     }
+  }
+
+  static std::vector<float> copy_finite_values(
+      const nva2x::IHostTensorFloat& tensor, std::int64_t timestamp,
+      const char* label) {
+    std::vector<float> values;
+    values.reserve(tensor.Size());
+    for (std::size_t index = 0; index < tensor.Size(); ++index) {
+      const float value = tensor.Data()[index];
+      if (!std::isfinite(value)) {
+        throw WorkerError("inference_failed",
+                          std::string("SDK produced a non-finite ") + label,
+                          {{"timestamp", timestamp}, {"channel", index}});
+      }
+      values.push_back(value);
+    }
+    return values;
+  }
+
+  StreamFrame make_stream_frame(std::int64_t timestamp,
+                                const PendingFrame& pending,
+                                std::vector<float> effective_emotions) const {
+    if (!pending.weights || !pending.eyes) {
+      throw WorkerError("inference_failed",
+                        "SDK callbacks returned an incomplete frame",
+                        {{"timestamp", timestamp}});
+    }
+    std::vector<float> arkit = copy_finite_values(
+        *pending.weights, timestamp, "blendshape weight");
+    for (std::size_t index = 0; index < pending.eyes->Size(); ++index) {
+      if (!std::isfinite(pending.eyes->Data()[index])) {
+        throw WorkerError("inference_failed",
+                          "SDK produced a non-finite eye rotation",
+                          {{"timestamp", timestamp}, {"component", index}});
+      }
+    }
+    for (std::size_t index = 0; index < effective_emotions.size(); ++index) {
+      if (!std::isfinite(effective_emotions[index])) {
+        throw WorkerError("inference_failed",
+                          "SDK produced a non-finite emotion",
+                          {{"timestamp", timestamp}, {"channel", index}});
+      }
+    }
+    resolve_arkit_eye_look(arkit, pending.eyes->Data(), eye_look_indices_);
+    for (float& value : arkit) value = std::clamp(value, 0.0F, 1.0F);
+    return {timestamp, std::move(arkit), std::move(effective_emotions)};
+  }
+
+  static std::vector<float> interpolate_values(
+      const std::vector<float>& before, const std::vector<float>& after,
+      double factor) {
+    if (before.size() != after.size()) {
+      throw WorkerError("inference_failed", "Frame widths do not match");
+    }
+    std::vector<float> result;
+    result.reserve(before.size());
+    for (std::size_t index = 0; index < before.size(); ++index) {
+      const double value = static_cast<double>(before[index]) +
+                           (static_cast<double>(after[index]) - before[index]) *
+                               factor;
+      if (!std::isfinite(value)) {
+        throw WorkerError("inference_failed",
+                          "Frame interpolation produced a non-finite value");
+      }
+      result.push_back(static_cast<float>(value));
+    }
+    return result;
+  }
+
+  static StreamFrame sample_track_frames(
+      const std::vector<StreamFrame>& frames, std::int64_t target_sample) {
+    const auto after = std::lower_bound(
+        frames.begin(), frames.end(), target_sample,
+        [](const StreamFrame& frame, std::int64_t sample) {
+          return frame.timestamp_sample < sample;
+        });
+    if (after == frames.begin()) {
+      return {target_sample, after->weights, after->effective_emotions};
+    }
+    if (after == frames.end()) {
+      const StreamFrame& last = frames.back();
+      return {target_sample, last.weights, last.effective_emotions};
+    }
+    if (after->timestamp_sample == target_sample) {
+      return {target_sample, after->weights, after->effective_emotions};
+    }
+    const auto before = std::prev(after);
+    const double factor =
+        static_cast<double>(target_sample - before->timestamp_sample) /
+        static_cast<double>(after->timestamp_sample - before->timestamp_sample);
+    return {target_sample,
+            interpolate_values(before->weights, after->weights, factor),
+            interpolate_values(before->effective_emotions,
+                               after->effective_emotions, factor)};
+  }
+
+  std::size_t compute_track_render(
+      const TrackRenderRequest& request,
+      std::atomic_bool& canceled,
+      const std::atomic<std::uint64_t>& latest_revision,
+      const TrackPreviewCallback& preview,
+      const TrackCacheCallback& cache) {
+    std::vector<ParsedTrackSettingsEntry> settings_timeline;
+    settings_timeline.reserve(request.settings_timeline.size());
+    for (const TrackSettingsEntry& entry : request.settings_timeline) {
+      settings_timeline.push_back(
+          {entry.sample, parse_settings(entry.settings)});
+    }
+
+    const auto superseded = [&] {
+      return render_is_superseded(request.revision, latest_revision);
+    };
+    require_not_canceled(canceled);
+    if (superseded()) return 0;
+
+    reset_stream_inference(settings_timeline.front().settings);
+    TrackSettingsSchedule settings_schedule;
+    settings_schedule.entries = &settings_timeline;
+
+    accumulate_audio(track_audio_.data(), track_audio_.size());
+    sdk_check(bundle_->GetCudaStream().Synchronize(),
+              "Synchronizing track audio upload", "gpu_error");
+    sdk_check(bundle_->GetAudioAccumulator(0).Close(),
+              "Closing track audio accumulator");
+
+    std::vector<StreamFrame> candidate;
+    bool preview_emitted = false;
+    const auto collect_frame = [&](const StreamFrame& frame) {
+      candidate.push_back(frame);
+      if (!preview_emitted && request.preview_sample &&
+          frame.timestamp_sample >= *request.preview_sample &&
+          !superseded()) {
+        require_not_canceled(canceled);
+        preview(sample_track_frames(candidate, *request.preview_sample));
+        preview_emitted = true;
+      }
+    };
+    std::size_t face_frame_count = 0;
+    std::size_t emotion_frame_count = 0;
+
+    const auto execute_face = [&] {
+      const std::int64_t timestamp =
+          executor().GetFrameTimestamp(face_frame_count);
+      advance_face_input_settings(settings_schedule, timestamp);
+      advance_face_postprocess_settings(settings_schedule, timestamp);
+      face_frame_count += execute_face_once(
+          canceled, collect_frame, &settings_schedule);
+    };
+    const auto execute_emotion = [&] {
+      const std::int64_t timestamp =
+          emotion_executor_->GetFrameTimestamp(emotion_frame_count);
+      advance_emotion_postprocess_settings(settings_schedule, timestamp);
+      emotion_frame_count +=
+          execute_generated_emotion_once(canceled, &settings_schedule);
+    };
+    const auto drain_ready_track = [&] {
+      while (true) {
+        require_not_canceled(canceled);
+        if (superseded()) return false;
+        if (nva2x::GetNbReadyTracks(executor()) > 0) {
+          execute_face();
+          continue;
+        }
+        if (nva2x::GetNbReadyTracks(*emotion_executor_) > 0) {
+          execute_emotion();
+          continue;
+        }
+        return true;
+      }
+    };
+
+    if (!drain_ready_track()) return 0;
+    if (emotion_executor_->GetNbAvailableExecutions(0) != 0) {
+      throw WorkerError(
+          "inference_failed",
+          "Audio2Emotion did not consume all available track audio");
+    }
+    sdk_check(bundle_->GetEmotionAccumulator(0).Close(),
+              "Closing track emotion accumulator");
+    if (!drain_ready_track()) return 0;
+    sdk_check(executor().Wait(0), "Waiting for track blendshape results",
+              "gpu_error");
+    sdk_check(bundle_->GetCudaStream().Synchronize(),
+              "Synchronizing track CUDA stream", "gpu_error");
+
+    require_not_canceled(canceled);
+    if (superseded()) return 0;
+    if (candidate.empty()) {
+      throw WorkerError("inference_failed",
+                        "Audio2Face produced no track frames");
+    }
+    if (request.preview_sample && !preview_emitted && !superseded()) {
+      preview(sample_track_frames(candidate, *request.preview_sample));
+    }
+    if (superseded()) return 0;
+    cache(candidate);
+    return superseded() ? 0 : candidate.size();
   }
 
   void accumulate_audio(const float* audio, std::size_t count) {
@@ -890,34 +1157,19 @@ class Backend::Impl final {
               "Accumulating audio");
   }
 
-  void retain_audio(const std::vector<float>& audio) {
-    if (audio.size() >
-        static_cast<std::uint64_t>(
-            std::numeric_limits<std::int64_t>::max() - total_audio_samples_)) {
-      throw WorkerError("invalid_state", "Stream sample timeline is too long");
-    }
-    retained_audio_.insert(retained_audio_.end(), audio.begin(), audio.end());
-    total_audio_samples_ += static_cast<std::int64_t>(audio.size());
-    while (retained_audio_.size() > retained_audio_capacity_) {
-      retained_audio_.pop_front();
-    }
-  }
-
   void close_audio_and_drain(std::atomic_bool& canceled,
                              const StreamFrameCallback& frame) {
     sdk_check(bundle_->GetAudioAccumulator(0).Close(),
               "Closing audio accumulator");
     drain_interleaved_ready(canceled, frame);
-    if (emotion_driver_.generated) {
-      if (emotion_executor_->GetNbAvailableExecutions(0) != 0) {
-        throw WorkerError(
-            "inference_failed",
-            "Audio2Emotion did not consume all available audio");
-      }
-      sdk_check(bundle_->GetEmotionAccumulator(0).Close(),
-                "Closing generated emotion stream");
-      drain_interleaved_ready(canceled, frame);
+    if (emotion_executor_->GetNbAvailableExecutions(0) != 0) {
+      throw WorkerError(
+          "inference_failed",
+          "Audio2Emotion did not consume all available audio");
     }
+    sdk_check(bundle_->GetEmotionAccumulator(0).Close(),
+              "Closing generated emotion stream");
+    drain_interleaved_ready(canceled, frame);
     sdk_check(executor().Wait(0), "Waiting for blendshape results",
               "gpu_error");
     sdk_check(bundle_->GetCudaStream().Synchronize(),
@@ -941,8 +1193,7 @@ class Backend::Impl final {
         execute_face_once(canceled, frame_callback);
         continue;
       }
-      if (emotion_driver_.generated &&
-          nva2x::GetNbReadyTracks(*emotion_executor_) > 0) {
+      if (nva2x::GetNbReadyTracks(*emotion_executor_) > 0) {
         execute_generated_emotion_once(canceled);
         continue;
       }
@@ -950,7 +1201,9 @@ class Backend::Impl final {
     }
   }
 
-  void execute_generated_emotion_once(std::atomic_bool& canceled) {
+  std::size_t execute_generated_emotion_once(
+      std::atomic_bool& canceled,
+      TrackSettingsSchedule* settings_schedule = nullptr) {
     if (canceled.load(std::memory_order_acquire)) {
       throw WorkerError("canceled", "Operation was stopped");
     }
@@ -958,6 +1211,7 @@ class Backend::Impl final {
     capture.canceled = &canceled;
     capture.accumulator = &bundle_->GetEmotionAccumulator(0);
     capture.emotion_count = emotion_channels_.size();
+    capture.settings_schedule = settings_schedule;
     active_generated_emotion_capture_ = &capture;
     std::error_code execute_error;
     try {
@@ -970,6 +1224,9 @@ class Backend::Impl final {
     if (canceled.load(std::memory_order_acquire)) {
       throw WorkerError("canceled", "Operation was stopped");
     }
+    if (capture.callback_error) {
+      std::rethrow_exception(capture.callback_error);
+    }
     if (capture.failure != nullptr) {
       json details = json::object();
       if (capture.accumulation_error) {
@@ -980,19 +1237,13 @@ class Backend::Impl final {
                         std::move(details));
     }
     sdk_check(execute_error, "Executing Audio2Emotion", "inference_failed");
+    return capture.frame_count;
   }
 
-  std::int64_t absolute_timestamp(std::int64_t local_timestamp) const {
-    if (local_timestamp >
-        std::numeric_limits<std::int64_t>::max() - timestamp_offset_) {
-      throw WorkerError("inference_failed",
-                        "SDK frame timestamp exceeds the stream timeline");
-    }
-    return timestamp_offset_ + local_timestamp;
-  }
-
-  void execute_face_once(std::atomic_bool& canceled,
-                         const StreamFrameCallback& frame_callback) {
+  std::size_t execute_face_once(
+      std::atomic_bool& canceled,
+      const StreamFrameCallback& frame_callback,
+      TrackSettingsSchedule* settings_schedule = nullptr) {
     if (canceled.load(std::memory_order_acquire)) {
       throw WorkerError("canceled", "Operation was stopped");
     }
@@ -1000,6 +1251,7 @@ class Backend::Impl final {
     capture.canceled = &canceled;
     capture.weight_count = executor().GetWeightCount();
     capture.emotion_count = emotion_channels_.size();
+    capture.settings_schedule = settings_schedule;
     active_capture_ = &capture;
     std::error_code execute_error;
     try {
@@ -1014,90 +1266,41 @@ class Backend::Impl final {
     if (canceled.load(std::memory_order_acquire)) {
       throw WorkerError("canceled", "Operation was stopped");
     }
+    if (capture.callback_error) {
+      std::rethrow_exception(capture.callback_error);
+    }
     if (capture.failure != nullptr) {
       throw WorkerError("inference_failed", capture.failure);
     }
     sdk_check(execute_error, "Executing Audio2Face", "inference_failed");
 
     for (const auto& [timestamp, pending] : capture.frames) {
-      const std::int64_t stream_timestamp = absolute_timestamp(timestamp);
       if (!pending.weights || !pending.eyes || !pending.effective_emotions) {
         throw WorkerError("inference_failed",
                           "SDK callbacks returned an incomplete frame",
-                          {{"timestamp", stream_timestamp}});
+                          {{"timestamp", timestamp}});
       }
-      if (previous_timestamp_.has_value() &&
-          stream_timestamp <= *previous_timestamp_) {
-        throw WorkerError("inference_failed",
-                          "SDK frame timestamps are not strictly increasing",
-                          {{"timestamp", stream_timestamp},
-                           {"previous", *previous_timestamp_}});
-      }
-      std::vector<float> arkit;
-      arkit.reserve(pending.weights->Size());
-      for (std::size_t channel = 0; channel < pending.weights->Size(); ++channel) {
-        const float value = pending.weights->Data()[channel];
-        if (!std::isfinite(value)) {
-          throw WorkerError(
-              "inference_failed",
-              "SDK produced a non-finite blendshape weight",
-              {{"timestamp", stream_timestamp}, {"channel", channel}});
-        }
-        arkit.push_back(value);
-      }
-      for (std::size_t index = 0; index < pending.eyes->Size(); ++index) {
-        if (!std::isfinite(pending.eyes->Data()[index])) {
-          throw WorkerError("inference_failed",
-                            "SDK produced a non-finite eye rotation",
-                            {{"timestamp", stream_timestamp},
-                             {"component", index}});
-        }
-      }
-      std::vector<float> effective_emotions;
-      effective_emotions.reserve(pending.effective_emotions->Size());
-      for (std::size_t index = 0;
-           index < pending.effective_emotions->Size(); ++index) {
-        const float value = pending.effective_emotions->Data()[index];
-        if (!std::isfinite(value)) {
-          throw WorkerError(
-              "inference_failed",
-              "SDK produced a non-finite emotion",
-              {{"timestamp", stream_timestamp}, {"channel", index},
-               {"value", value}});
-        }
-        effective_emotions.push_back(value);
-      }
-      resolve_arkit_eye_look(arkit, pending.eyes->Data(), eye_look_indices_);
-      for (float& value : arkit) {
-        if (!std::isfinite(value)) {
-          throw WorkerError("inference_failed",
-                            "ARKit resolver produced a non-finite weight",
-                            {{"timestamp", stream_timestamp}});
-        }
-        value = std::clamp(value, 0.0F, 1.0F);
-      }
+      std::vector<float> effective_emotions = copy_finite_values(
+          *pending.effective_emotions, timestamp, "emotion");
       if (canceled.load(std::memory_order_acquire)) {
         throw WorkerError("canceled", "Operation was stopped");
       }
-      previous_timestamp_ = stream_timestamp;
-      frame_callback(StreamFrame{stream_timestamp, std::move(arkit),
-                                 std::move(effective_emotions)});
+      frame_callback(make_stream_frame(
+          timestamp, pending, std::move(effective_emotions)));
     }
+    return capture.frames.size();
   }
 
   void drop_consumed_inputs() {
-    std::size_t next_audio_sample = executor().GetNextAudioSampleToRead(0);
-    if (emotion_driver_.generated) {
-      next_audio_sample = std::min(
-          next_audio_sample, emotion_executor_->GetNextAudioSampleToRead(0));
-    }
+    const std::size_t next_audio_sample =
+        std::min(executor().GetNextAudioSampleToRead(0),
+                 emotion_executor_->GetNextAudioSampleToRead(0));
     sdk_check(bundle_->GetAudioAccumulator(0).DropSamplesBefore(
                   next_audio_sample),
               "Dropping processed audio samples");
 
     auto& emotion_accumulator = bundle_->GetEmotionAccumulator(0);
-    if (emotion_driver_.generated &&
-        !emotion_accumulator.IsEmpty()) {
+    if (!emotion_accumulator.IsEmpty()) {
       const auto next_emotion_timestamp =
           executor().GetNextEmotionTimestampToRead(0);
       const auto last_emotion_timestamp =
@@ -1105,6 +1308,43 @@ class Backend::Impl final {
       sdk_check(emotion_accumulator.DropEmotionsBefore(
                     std::min(next_emotion_timestamp, last_emotion_timestamp)),
                 "Dropping processed emotions");
+    }
+  }
+
+  void begin_operation(std::uint32_t sample_rate, const json& settings) {
+    std::lock_guard<std::mutex> lock(resource_mutex_);
+    require_model_locked();
+    ensure_stream_executors();
+    if (sample_rate != sample_rate_) {
+      throw WorkerError("sample_rate_mismatch",
+                        "Streaming PCM must use the model sample rate",
+                        {{"expected", sample_rate_},
+                         {"received", sample_rate}});
+    }
+    if (operation_active_.exchange(true, std::memory_order_acq_rel)) {
+      throw WorkerError("busy", "An Audio2Face operation is already active");
+    }
+    try {
+      operation_kind_ = OperationKind::Stream;
+      reset_stream_inference(parse_settings(settings));
+    } catch (...) {
+      operation_kind_ = OperationKind::None;
+      operation_active_.store(false, std::memory_order_release);
+      throw;
+    }
+  }
+
+  void finish_operation() noexcept {
+    std::vector<float>().swap(track_audio_);
+    track_audio_samples_ = 0;
+    operation_kind_ = OperationKind::None;
+    operation_active_.store(false, std::memory_order_release);
+  }
+
+  void require_active_stream() const {
+    if (!operation_active_.load(std::memory_order_acquire) ||
+        operation_kind_ != OperationKind::Stream) {
+      throw WorkerError("operation_not_found", "No stream is active");
     }
   }
 
@@ -1155,17 +1395,6 @@ class Backend::Impl final {
     validate_audio2face_settings(parsed, "invalid_params",
                                  "settings.audio2face.");
     return parsed;
-  }
-
-  void configure_audio2face(const Audio2FaceSettings& settings) {
-    auto& geometry = geometry_executor();
-    sdk_check(nva2f::SetExecutorInputStrength(geometry,
-                                              settings.input_strength),
-              "Configuring Audio2Face input strength");
-    sdk_check(nva2f::SetExecutorSkinParameters(geometry, 0, settings.skin),
-              "Configuring Audio2Face skin parameters");
-    sdk_check(nva2f::SetExecutorEyesParameters(geometry, 0, settings.eyes),
-              "Configuring Audio2Face eyes parameters");
   }
 
   EmotionDriver parse_emotion_driver(const json& value) const {
@@ -1230,45 +1459,169 @@ class Backend::Impl final {
     return parsed;
   }
 
-  void apply_settings(const json& settings) {
+  InferenceSettings parse_settings(const json& settings) const {
     if (!settings.is_object()) {
       throw WorkerError("invalid_params", "settings must be an object");
     }
     require_exact_keys(settings, {"audio2face", "emotion_driver"},
                        "settings");
-    const Audio2FaceSettings audio2face =
-        parse_audio2face_settings(settings.at("audio2face"));
-    EmotionDriver emotion_driver =
-        parse_emotion_driver(settings.at("emotion_driver"));
-
-    configure_audio2face(audio2face);
-    emotion_driver_ = std::move(emotion_driver);
+    return {parse_audio2face_settings(settings.at("audio2face")),
+            parse_emotion_driver(settings.at("emotion_driver"))};
   }
 
-  void configure_generated_emotion(const EmotionDriver& settings) {
-    const GeneratedEmotionSettings& generated = settings.generated.value();
+  template <class Accessor>
+  Accessor& require_geometry_accessor(const char* name) {
+    auto* accessor = dynamic_cast<Accessor*>(&geometry_executor());
+    if (accessor == nullptr) {
+      throw WorkerError("sdk_error",
+                        std::string("Regular Audio2Face executor lacks ") + name);
+    }
+    return *accessor;
+  }
+
+  nva2e::IEmotionExecutorAccessorPostProcessParameters&
+  emotion_postprocess_accessor() {
+    auto* accessor =
+        dynamic_cast<nva2e::IEmotionExecutorAccessorPostProcessParameters*>(
+            emotion_executor_.get());
+    if (accessor == nullptr) {
+      throw WorkerError(
+          "sdk_error",
+          "Regular Audio2Emotion executor lacks post-process access");
+    }
+    return *accessor;
+  }
+
+  // SDK 1.0.0's public SetExecutor* helpers reject changes once execution has
+  // started. The pinned regular executors also expose these accessor vtables;
+  // their setters forward to the stateful multitrack animator/postprocessor.
+  // Calls here are serialized between Execute calls or from the synchronous
+  // per-frame SDK callbacks, so animated DCC settings preserve temporal state.
+  void configure_audio2face_input(float input_strength) {
+    auto& accessor =
+        require_geometry_accessor<nva2f::IFaceExecutorAccessorInputStrength>(
+            "input-strength access");
+    sdk_check(accessor.SetInputStrength(input_strength),
+              "Configuring Audio2Face input strength");
+  }
+
+  void configure_audio2face_postprocess(
+      const Audio2FaceSettings& settings) {
+    auto& skin =
+        require_geometry_accessor<nva2f::IFaceExecutorAccessorSkinParameters>(
+            "skin-parameter access");
+    auto& eyes =
+        require_geometry_accessor<nva2f::IFaceExecutorAccessorEyesParameters>(
+            "eye-parameter access");
+    sdk_check(skin.Set(0, settings.skin),
+              "Configuring Audio2Face skin parameters");
+    sdk_check(eyes.Set(0, settings.eyes),
+              "Configuring Audio2Face eyes parameters");
+  }
+
+  void configure_audio2face(const Audio2FaceSettings& settings) {
+    configure_audio2face_input(settings.input_strength);
+    configure_audio2face_postprocess(settings);
+  }
+
+  void configure_stream_emotion(const EmotionDriver& settings) {
+    auto& accessor = emotion_postprocess_accessor();
     nva2e::PostProcessParams parameters;
-    sdk_check(nva2e::GetExecutorPostProcessParameters(
-                  *emotion_executor_, 0, parameters),
+    sdk_check(accessor.Get(0, parameters),
               "Reading Audio2Emotion post-process parameters");
     parameters.emotionStrength = settings.emotion_strength;
-    parameters.emotionContrast = generated.emotion_contrast;
-    parameters.maxEmotions = generated.max_emotions;
-    parameters.liveBlendCoef = generated.live_blend_coefficient;
-    parameters.liveTransitionTime = generated.transition_smoothing;
-    parameters.enablePreferredEmotion = settings.preferred.has_value();
-    if (settings.preferred) {
-      const PreferredEmotionSettings& preferred =
-          *settings.preferred;
-      parameters.preferredEmotionStrength = preferred.strength;
-      parameters.preferredEmotion = nva2x::HostTensorFloatConstView(
-          preferred.values.data(), preferred.values.size());
+
+    std::vector<float> preferred_override;
+    if (settings.generated) {
+      const GeneratedEmotionSettings& generated = *settings.generated;
+      parameters.emotionContrast = generated.emotion_contrast;
+      parameters.maxEmotions = generated.max_emotions;
+      parameters.liveBlendCoef = generated.live_blend_coefficient;
+      parameters.liveTransitionTime = generated.transition_smoothing;
+      parameters.enablePreferredEmotion = settings.preferred.has_value();
+      if (settings.preferred) {
+        const PreferredEmotionSettings& preferred = *settings.preferred;
+        parameters.preferredEmotionStrength = preferred.strength;
+        parameters.preferredEmotion = nva2x::HostTensorFloatConstView(
+            preferred.values.data(), preferred.values.size());
+      } else {
+        parameters.preferredEmotionStrength = 0.0F;
+      }
     } else {
-      parameters.preferredEmotionStrength = 0.0F;
+      preferred_override.assign(emotion_channels_.size(), 0.0F);
+      if (settings.preferred) {
+        const PreferredEmotionSettings& preferred = *settings.preferred;
+        std::transform(preferred.values.begin(), preferred.values.end(),
+                       preferred_override.begin(),
+                       [&preferred](float value) {
+                         return value * preferred.strength;
+                       });
+      }
+      parameters.enablePreferredEmotion = true;
+      parameters.preferredEmotionStrength = 1.0F;
+      parameters.preferredEmotion = nva2x::HostTensorFloatConstView(
+          preferred_override.data(), preferred_override.size());
     }
-    sdk_check(nva2e::SetExecutorPostProcessParameters(
-                  *emotion_executor_, 0, parameters),
+    sdk_check(accessor.Set(0, parameters),
               "Configuring Audio2Emotion post-processing");
+  }
+
+  static std::size_t settings_index_at(
+      const std::vector<ParsedTrackSettingsEntry>& entries,
+      std::size_t current_index, std::int64_t timestamp) {
+    const std::uint64_t sample =
+        timestamp <= 0 ? 0 : static_cast<std::uint64_t>(timestamp);
+    while (current_index + 1 < entries.size() &&
+           entries[current_index + 1].sample <= sample) {
+      ++current_index;
+    }
+    return current_index;
+  }
+
+  void advance_face_input_settings(TrackSettingsSchedule& schedule,
+                                   std::int64_t timestamp) {
+    const auto& entries = *schedule.entries;
+    const std::size_t next =
+        settings_index_at(entries, schedule.face_input_index, timestamp);
+    if (next == schedule.face_input_index) return;
+    configure_audio2face_input(entries[next].settings.audio2face.input_strength);
+    schedule.face_input_index = next;
+  }
+
+  void advance_face_postprocess_settings(TrackSettingsSchedule& schedule,
+                                         std::int64_t timestamp) {
+    const auto& entries = *schedule.entries;
+    const std::size_t next = settings_index_at(
+        entries, schedule.face_postprocess_index, timestamp);
+    if (next == schedule.face_postprocess_index) return;
+    configure_audio2face_postprocess(entries[next].settings.audio2face);
+    schedule.face_postprocess_index = next;
+  }
+
+  void advance_emotion_postprocess_settings(TrackSettingsSchedule& schedule,
+                                            std::int64_t timestamp) {
+    const auto& entries = *schedule.entries;
+    const std::size_t next = settings_index_at(
+        entries, schedule.emotion_postprocess_index, timestamp);
+    if (next == schedule.emotion_postprocess_index) return;
+    configure_stream_emotion(entries[next].settings.emotion_driver);
+    schedule.emotion_postprocess_index = next;
+  }
+
+  void reset_stream_inference(const InferenceSettings& settings) {
+    sdk_check(executor().Wait(0), "Waiting for prior blendshape work",
+              "gpu_error");
+    sdk_check(bundle_->GetCudaStream().Synchronize(),
+              "Synchronizing streaming CUDA stream", "gpu_error");
+    sdk_check(executor().Reset(0), "Resetting blendshape executor");
+    sdk_check(bundle_->GetAudioAccumulator(0).Reset(),
+              "Resetting audio accumulator");
+    sdk_check(bundle_->GetEmotionAccumulator(0).Reset(),
+              "Resetting emotion accumulator");
+    sdk_check(emotion_executor_->Reset(0),
+              "Resetting Audio2Emotion executor");
+    configure_audio2face(settings.audio2face);
+    configure_stream_emotion(settings.emotion_driver);
   }
 
   std::vector<float> parse_emotion_snapshot(const json& value,
@@ -1339,18 +1692,14 @@ class Backend::Impl final {
   }
 
   void clear_locked() noexcept {
-    if (bundle_ != nullptr) {
-      (void)bundle_->GetExecutor().Wait(0);
-      (void)bundle_->GetCudaStream().Synchronize();
-    }
-    active_capture_ = nullptr;
-    active_generated_emotion_capture_ = nullptr;
-    emotion_executor_.reset();
-    bundle_.reset();
+    clear_stream_executors();
+    emotion_model_info_.reset();
+    blendshape_model_info_.reset();
+    geometry_model_info_.reset();
+    audio2face_model_path_.clear();
     eye_look_indices_ = {};
     audio2face_defaults_ = {};
     emotion_channels_.clear();
-    emotion_driver_ = {};
     finish_operation();
     sample_rate_ = 0;
     prebuffer_samples_ = 0;
@@ -1358,19 +1707,21 @@ class Backend::Impl final {
 
   std::mutex resource_mutex_;
   std::atomic_bool operation_active_{false};
+  OperationKind operation_kind_{OperationKind::None};
   SdkPtr<nva2f::IBlendshapeExecutorBundle> bundle_;
   SdkPtr<nva2e::IEmotionExecutor> emotion_executor_;
+  SdkPtr<nva2f::IDiffusionModel::IGeometryModelInfo> geometry_model_info_;
+  SdkPtr<nva2f::IDiffusionModel::IBlendshapeSolveModelInfo>
+      blendshape_model_info_;
+  SdkPtr<nva2e::IClassifierModel::IEmotionModelInfo> emotion_model_info_;
+  std::string audio2face_model_path_;
   Capture* active_capture_{nullptr};
   GeneratedEmotionCapture* active_generated_emotion_capture_{nullptr};
   ArkitEyeLookIndices eye_look_indices_{};
   Audio2FaceSettings audio2face_defaults_;
   std::vector<std::string> emotion_channels_;
-  EmotionDriver emotion_driver_;
-  std::deque<float> retained_audio_;
-  std::size_t retained_audio_capacity_{0};
-  std::int64_t total_audio_samples_{0};
-  std::int64_t timestamp_offset_{0};
-  std::optional<std::int64_t> previous_timestamp_;
+  std::vector<float> track_audio_;
+  std::size_t track_audio_samples_{0};
   std::uint32_t sample_rate_{0};
   std::size_t prebuffer_samples_{0};
 };
@@ -1393,10 +1744,8 @@ void Backend::stream_chunk(const std::vector<float>& audio,
 }
 
 void Backend::stream_settings(const json& settings,
-                              std::atomic_bool& canceled,
-                              const StreamResetCallback& reset,
-                              const StreamFrameCallback& frame) {
-  impl_->stream_settings(settings, canceled, reset, frame);
+                              std::atomic_bool& canceled) {
+  impl_->stream_settings(settings, canceled);
 }
 
 void Backend::stream_end(std::atomic_bool& canceled,
@@ -1404,6 +1753,29 @@ void Backend::stream_end(std::atomic_bool& canceled,
   impl_->stream_end(canceled, frame);
 }
 
-void Backend::stream_abort() noexcept { impl_->stream_abort(); }
+void Backend::track_start(const TrackRequest& request) {
+  impl_->track_start(request);
+}
+
+void Backend::track_chunk(const std::vector<float>& audio,
+                          std::atomic_bool& canceled) {
+  impl_->track_chunk(audio, canceled);
+}
+
+void Backend::track_prepare(std::atomic_bool& canceled) {
+  impl_->track_prepare(canceled);
+}
+
+std::size_t Backend::track_render(
+    const TrackRenderRequest& request,
+    std::atomic_bool& canceled,
+    const std::atomic<std::uint64_t>& latest_revision,
+    const TrackPreviewCallback& preview,
+    const TrackCacheCallback& cache) {
+  return impl_->track_render(request, canceled, latest_revision, preview,
+                             cache);
+}
+
+void Backend::abort_operation() noexcept { impl_->abort_operation(); }
 
 }  // namespace a2f_worker

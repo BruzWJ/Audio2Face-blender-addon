@@ -35,6 +35,9 @@ STATUS_ITEMS = (
     ("STREAM_STARTING", "Starting Stream", "Preparing incremental PCM inference"),
     ("STREAMING", "Streaming", "Incremental PCM is driving model channel values"),
     ("STREAM_ENDING", "Ending Stream", "Draining the stream's final model frames"),
+    ("TRACK_UPLOADING", "Uploading Audio", "Uploading the selected WAV"),
+    ("TRACK_PREPARING", "Preparing Audio", "Rendering continuous inference"),
+    ("BAKING", "Baking", "Generating Blender-timeline Shape Key frames"),
     ("STOPPING", "Stopping", "Worker is shutting down"),
     ("ERROR", "Error", "The last operation failed"),
 )
@@ -88,6 +91,12 @@ EMOTION_SETTING_FIELDS = (
     "a2e_live_blend_coef",
     "a2e_transition_smoothing",
 )
+INFERENCE_SETTING_FIELDS = (
+    *AUDIO2FACE_SETTING_FIELDS,
+    *EMOTION_SETTING_FIELDS,
+    "a2e_preferred_emotion_strength",
+)
+TIMELINE_SETTING_FIELDS = (*INFERENCE_SETTING_FIELDS, "prediction_delay")
 
 _AUDIO2FACE_FLOAT_RANGES = {
     "input_strength": (0.0, 3.0),
@@ -151,36 +160,142 @@ def _preferred_emotion_updated(
     _emotion: bpy.types.PropertyGroup,
     context: bpy.types.Context,
 ) -> None:
-    """Refresh only when the authored values currently drive inference."""
+    """Refresh inference immediately after an authored value changes."""
 
     if _internal_emotion_write_depth:
         return
     scene = _update_scene(context)
     if scene is None:
         return
-    settings = scene.audio2face
-    if not settings.preferred_emotion_active:
-        return
     _refresh_inference(scene)
+
+
+def _configure_selected_audio_timeline(
+    settings: bpy.types.PropertyGroup,
+    scene: bpy.types.Scene,
+) -> tuple[int, int] | None:
+    from .runtime import get_controller
+    from .selected_audio_timeline import (
+        configure_selected_audio,
+        remove_selected_audio_strips,
+    )
+
+    if not settings.audio_path:
+        return None
+    audio_path = bpy.path.abspath(settings.audio_path)
+    try:
+        frame_span = configure_selected_audio(
+            scene,
+            audio_path,
+            first_frame=settings.audio_first_frame,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        message = str(exc)
+        try:
+            remove_selected_audio_strips(scene)
+        except (OSError, RuntimeError, ValueError) as cleanup_exc:
+            message = f"{message}; could not remove selected audio strip: {cleanup_exc}"
+        get_controller().selected_audio_failed(scene, message)
+        return None
+    return frame_span
 
 
 def _audio_path_updated(
     settings: bpy.types.PropertyGroup,
-    _context: bpy.types.Context,
+    context: bpy.types.Context,
 ) -> None:
-    """Make the selected WAV own its persistent seek slider."""
+    """Replace the Selected WAV source and its native sound strip."""
 
-    from .live_stream import clear_playback_position, configure_playback_position
-    from .wav_stream import WavStreamError, wav_duration_seconds
+    from .runtime import get_controller
+    from .selected_audio_timeline import remove_selected_audio_strips
 
-    clear_playback_position(settings)
+    scene = _update_scene(context)
+    if scene is None:
+        return
+    controller = get_controller()
     if not settings.audio_path:
+        message: str | None = None
+        try:
+            controller.selected_audio_changed(scene)
+        except (OSError, RuntimeError, ValueError) as exc:
+            message = str(exc)
+        try:
+            remove_selected_audio_strips(scene)
+        except (OSError, RuntimeError, ValueError) as cleanup_exc:
+            cleanup_message = f"could not remove selected audio strip: {cleanup_exc}"
+            message = (
+                cleanup_message if message is None else f"{message}; {cleanup_message}"
+            )
+        if message is not None:
+            controller.selected_audio_failed(scene, message)
+        return
+    if _configure_selected_audio_timeline(settings, scene) is None:
         return
     try:
-        duration = wav_duration_seconds(settings.audio_path)
-    except (OSError, WavStreamError):
+        controller.selected_audio_changed(scene)
+    except (OSError, RuntimeError, ValueError) as exc:
+        controller.selected_audio_failed(scene, str(exc))
+
+
+def _audio_first_frame_updated(
+    settings: bpy.types.PropertyGroup,
+    context: bpy.types.Context,
+) -> None:
+    """Move the Selected WAV and recompute the current Blender frame."""
+
+    from .runtime import get_controller
+
+    scene = _update_scene(context)
+    if scene is None:
         return
-    configure_playback_position(settings, 0.0, duration)
+    if _configure_selected_audio_timeline(settings, scene) is None:
+        return
+    controller = get_controller()
+    controller.invalidate_selected_settings(scene)
+    controller.request_selected_frame(scene)
+
+
+def _selected_frame_mapping_updated(
+    _settings: bpy.types.PropertyGroup,
+    context: bpy.types.Context,
+) -> None:
+    """Recompute the paused Selected preview after its sample mapping changes."""
+
+    from .runtime import get_controller
+
+    scene = _update_scene(context)
+    if scene is None:
+        return
+    get_controller().request_selected_frame(scene)
+
+
+def _input_mode_updated(
+    settings: bpy.types.PropertyGroup,
+    context: bpy.types.Context,
+) -> None:
+    """Enter or leave Selected WAV ownership explicitly."""
+
+    from .runtime import get_controller
+    from .selected_audio_timeline import remove_selected_audio_strips
+
+    scene = _update_scene(context)
+    if scene is None:
+        return
+    controller = get_controller()
+    controller.input_mode_changed(scene)
+    if settings.input_mode == "SELECTED":
+        _audio_first_frame_updated(settings, context)
+        return
+    try:
+        remove_selected_audio_strips(scene)
+    except (OSError, RuntimeError, ValueError) as cleanup_exc:
+        cleanup_message = f"could not remove selected audio strip: {cleanup_exc}"
+        message = (
+            f"{settings.status_message}; {cleanup_message}"
+            if settings.status == "ERROR"
+            else cleanup_message
+        )
+        controller.selected_audio_failed(scene, message)
 
 
 def _target_object_poll(
@@ -240,18 +355,25 @@ class A2FMixedEmotionItem(bpy.types.PropertyGroup):
 class A2FSceneSettings(bpy.types.PropertyGroup):
     input_mode: EnumProperty(
         name="Input Mode",
-        description="Play a selected WAV or receive incremental PCM",
+        description="Play and bake a selected WAV or receive incremental PCM",
         items=(
-            ("SELECTED", "Selected WAV", "Play and infer from a selected WAV file"),
+            ("SELECTED", "Selected WAV", "Play or bake a selected WAV file"),
             ("STREAM", "Stream", "Drive Shape Keys from incremental mono float PCM"),
         ),
         default="SELECTED",
+        update=_input_mode_updated,
     )
     audio_path: StringProperty(
         name="Speech WAV",
-        description="WAV played and inferred in Selected mode",
+        description="WAV played or baked in Selected mode",
         subtype="FILE_PATH",
         update=_audio_path_updated,
+    )
+    audio_first_frame: IntProperty(
+        name="First Frame",
+        description="Blender timeline frame where the selected WAV begins",
+        default=1,
+        update=_audio_first_frame_updated,
     )
     input_strength: FloatProperty(
         name="Input Strength",
@@ -408,10 +530,6 @@ class A2FSceneSettings(bpy.types.PropertyGroup):
         type=A2FPreferredEmotionItem,
         options={"HIDDEN"},
     )
-    preferred_emotion_active: BoolProperty(
-        default=False,
-        options={"HIDDEN"},
-    )
     mixed_emotions: CollectionProperty(
         type=A2FMixedEmotionItem,
         options={"HIDDEN", "SKIP_SAVE"},
@@ -465,7 +583,7 @@ class A2FSceneSettings(bpy.types.PropertyGroup):
     a2e_preferred_emotion_strength: FloatProperty(
         name="Preferred Emotion Strength",
         description=(
-            "Strength of the loaded preferred emotion relative to generated emotion"
+            "Strength of nonzero preferred emotion values relative to generated emotion"
         ),
         default=0.5,
         min=0.0,
@@ -478,11 +596,6 @@ class A2FSceneSettings(bpy.types.PropertyGroup):
     target_objects: CollectionProperty(type=A2FTargetObjectItem)
     target_object_index: IntProperty(default=0, min=0)
 
-    playback_loop: BoolProperty(
-        name="Loop",
-        description="Loop selected audio and its model-provided channel stream",
-        default=False,
-    )
     prediction_delay: FloatProperty(
         name="Prediction Delay",
         description="Adjust synchronization of mouth motion to audio in seconds",
@@ -490,15 +603,7 @@ class A2FSceneSettings(bpy.types.PropertyGroup):
         min=-1.0,
         max=1.0,
         unit="TIME",
-    )
-    playback_state: EnumProperty(
-        items=(
-            ("IDLE", "Idle", "Selected audio is stopped"),
-            ("PLAYING", "Playing", "Selected audio and Shape Keys are playing"),
-            ("PAUSED", "Paused", "Selected audio is paused on its current values"),
-        ),
-        default="IDLE",
-        options={"HIDDEN", "SKIP_SAVE"},
+        update=_selected_frame_mapping_updated,
     )
     stream_time: FloatProperty(
         name="Stream Time", default=0.0, min=0.0, unit="TIME", options={"SKIP_SAVE"}
@@ -698,31 +803,14 @@ def reset_emotion_settings(settings: A2FSceneSettings) -> None:
         settings.property_unset(name)
 
 
-def toggle_preferred_emotion(settings: A2FSceneSettings) -> None:
-    """Activate authored preferred values or deactivate them without mutation."""
-
-    if settings.preferred_emotion_active:
-        settings.preferred_emotion_active = False
-        return
-    if not _emotion_values(
-        settings.preferred_emotions,
-        label="preferred emotion",
-    ):
-        raise ValueError("load the Audio2Face model before loading preferred emotion")
-    settings.preferred_emotion_active = True
-
-
 def inference_settings(settings: A2FSceneSettings) -> dict[str, object]:
-    """Freeze the independent generated and preferred emotion drivers."""
+    """Freeze generated emotion and the current value-driven Preferred source."""
 
     preferred_emotions = _emotion_values(
         settings.preferred_emotions,
         label="preferred emotion",
     )
-    if settings.preferred_emotion_active and not preferred_emotions:
-        raise ValueError(
-            "active preferred emotion requires the loaded model channels"
-        )
+    preferred_active = any(value != 0.0 for value in preferred_emotions.values())
     emotion_driver: dict[str, object] = {
         "emotion_strength": settings.a2e_emotion_strength,
         "generated": (
@@ -740,7 +828,7 @@ def inference_settings(settings: A2FSceneSettings) -> dict[str, object]:
                 "values": preferred_emotions,
                 "strength": settings.a2e_preferred_emotion_strength,
             }
-            if settings.preferred_emotion_active
+            if preferred_active
             else None
         ),
     }
@@ -787,7 +875,6 @@ def apply_model_schema(
         for name, default in audio2face_defaults.items():
             setattr(settings, name, default)
     if not preserve_preferred:
-        settings.preferred_emotion_active = False
         _replace_emotion_values(settings.preferred_emotions, default_emotions)
     _replace_emotion_values(settings.mixed_emotions, empty_mixed_emotions)
 

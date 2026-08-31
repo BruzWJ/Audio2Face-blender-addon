@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import math
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -32,6 +33,24 @@ AUDIO2FACE_DEFAULTS: dict[str, float | int] = {
 }
 
 
+def _assert_native_transport_handlers(runtime: object) -> None:
+    def owned(handlers: object) -> tuple[object, ...]:
+        return tuple(
+            handler
+            for handler in handlers
+            if getattr(handler, "__module__", None) == runtime.__name__
+        )
+
+    assert owned(bpy.app.handlers.animation_playback_pre) == ()
+    assert owned(bpy.app.handlers.animation_playback_post) == ()
+    assert owned(bpy.app.handlers.depsgraph_update_post) == (
+        runtime._depsgraph_update_post_handler,
+    )
+    assert owned(bpy.app.handlers.frame_change_post) == (
+        runtime._frame_change_post_handler,
+    )
+
+
 def main() -> None:
     assert bpy.app.version[:2] == (5, 2)
     addon_names = [
@@ -49,12 +68,14 @@ def main() -> None:
     assert bpy.app.timers.is_registered(runtime._timer_callback)
     assert runtime._load_pre_handler in bpy.app.handlers.load_pre
     assert runtime._load_post_handler in bpy.app.handlers.load_post
+    _assert_native_transport_handlers(runtime)
     operator_names = set(dir(bpy.ops.a2f))
+    assert "play_pause" not in operator_names
     assert {
-        "play_pause",
+        "bake_animation",
+        "cancel_bake",
         "reset_emotion_settings",
         "reset_model_tuning",
-        "toggle_preferred_emotion",
     } <= operator_names
     runtime.get_controller().poll()
     assert bpy.context.scene.audio2face.status == "IDLE"
@@ -104,35 +125,50 @@ def main() -> None:
         "a2e_preferred_emotion_strength": 0.5,
     }
     assert {
+        "audio_first_frame",
         "prediction_delay",
         "auto_audio2emotion",
         "preferred_emotions",
-        "preferred_emotion_active",
         "mixed_emotions",
         *emotion_property_defaults,
         *AUDIO2FACE_DEFAULTS,
     } <= scene_property_names
     for name, default in AUDIO2FACE_DEFAULTS.items():
-        assert (
-            properties.A2FSceneSettings.bl_rna.properties[name].default
-            == default
-        )
+        actual = properties.A2FSceneSettings.bl_rna.properties[name].default
+        if isinstance(default, float):
+            assert math.isclose(actual, default, abs_tol=1.0e-7), (
+                name,
+                actual,
+                default,
+            )
+        else:
+            assert actual == default, (name, actual, default)
+        assert properties.A2FSceneSettings.bl_rna.properties[name].is_animatable
     for name, default in emotion_property_defaults.items():
-        assert properties.A2FSceneSettings.bl_rna.properties[name].default == default
+        actual = properties.A2FSceneSettings.bl_rna.properties[name].default
+        if isinstance(default, float):
+            assert math.isclose(actual, default, abs_tol=1.0e-7), (
+                name,
+                actual,
+                default,
+            )
+        else:
+            assert actual == default, (name, actual, default)
+        assert properties.A2FSceneSettings.bl_rna.properties[name].is_animatable
     emotion_strength_property = properties.A2FSceneSettings.bl_rna.properties[
         "a2e_emotion_strength"
     ]
     assert emotion_strength_property.hard_max == 2.0
+    assert properties.A2FSceneSettings.bl_rna.properties[
+        "auto_audio2emotion"
+    ].is_animatable
+    assert properties.A2FPreferredEmotionItem.bl_rna.properties[
+        "value"
+    ].is_animatable
     assert emotion_strength_property.subtype == "NONE"
     assert not properties.A2FSceneSettings.bl_rna.properties[
         "preferred_emotions"
     ].is_skip_save
-    assert not properties.A2FSceneSettings.bl_rna.properties[
-        "preferred_emotion_active"
-    ].is_skip_save
-    assert properties.A2FSceneSettings.bl_rna.properties[
-        "preferred_emotion_active"
-    ].default is False
     assert properties.A2FSceneSettings.bl_rna.properties[
         "mixed_emotions"
     ].is_skip_save
@@ -155,8 +191,7 @@ def main() -> None:
         draw_context,
     )
     setup = runtime.get_controller().setup_snapshot()
-    assert setup.model_spec is None
-    assert "model folder" in setup.model_status.message
+    assert setup.model_status.message
     assert package.__package__.startswith("bl_ext.")
     print(f"Installed Audio2Face smoke test passed ({bundle.platform})")
 

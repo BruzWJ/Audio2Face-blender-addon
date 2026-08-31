@@ -155,18 +155,22 @@ external model root or its generated engine.
 ## Runtime contract
 
 The process is silent until `hello {}` and communicates only through strict
-`audio2face/9` UTF-8 JSON Lines on stdin/stdout. It reports worker profile
-`nvidia-a2f3-a2e3-gpu-arkit52/9`.
+`audio2face/13` UTF-8 JSON Lines on stdin/stdout. It reports worker profile
+`nvidia-a2f3-a2e3-gpu-arkit52/13`.
 
-One non-interactive diffusion/device-blendshape executor and one Audio2Emotion
-executor serve both input modes on CUDA device 0. The worker reports the
-model-owned channel, emotion, and Audio2Face defaults; accepts ordered streaming
-audio and complete settings snapshots; and emits incremental frames containing
-aligned ARKit weights and effective post-processed emotion values. It opens no
-socket, and an idle loaded model does not run inference.
+Model loading creates regular Audio2Emotion and Audio2Face/device-blendshape
+executors on CUDA device 0. Live PCM is accumulated once and drained with the
+SDK's readiness APIs, so stream timestamps progress with the incoming audio
+instead of recomputing a rolling whole-track window.
 
-The exact transport, settings, model schema, streaming, cancellation, and
-shutdown contracts are in [`docs/protocol.md`](../docs/protocol.md). Process
-ownership, package-local runtime validation, target delivery, and
-audio-clocked playback are in
-[`docs/architecture.md`](../docs/architecture.md).
+A Selected track retains its complete PCM independently of Blender transport.
+Each render resets the regular executor family, replays that retained PCM once,
+and applies the expanded sample-based settings timeline between sequential SDK
+executions. Preview is emitted once its sample is bracketed; bake and the
+completed cache use the same continuous result. Newer revisions and
+cancellation stop cooperatively between executions; the track uses no
+interactive executor or cross-thread `Interrupt()`.
+
+The worker opens no socket and an idle loaded model does not run inference. See
+the exact [protocol](../docs/protocol.md) and the Blender-side
+[architecture](../docs/architecture.md).

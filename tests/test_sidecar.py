@@ -138,6 +138,7 @@ def test_sidecar_exchanges_jsonl_and_shuts_down_cleanly(tmp_path: Path) -> None:
             event for event in shutdown_events if isinstance(event, ProcessExited)
         )
         assert exit_event.returncode == 0
+        assert shutdown_events[-1] is exit_event
         assert client.state is Lifecycle.STOPPED
     finally:
         client.close(timeout=1.0)
@@ -164,3 +165,32 @@ def test_sidecar_terminates_worker_that_emits_invalid_utf8(tmp_path: Path) -> No
         assert client.state is Lifecycle.FAILED
     finally:
         client.close(timeout=1.0)
+
+
+def test_process_exit_is_published_when_inherited_pipes_remain_open() -> None:
+    client = SidecarClient()
+
+    class _ExitedProcess:
+        @staticmethod
+        def wait() -> int:
+            return 7
+
+    class _InheritedPipeThread:
+        def __init__(self) -> None:
+            self.timeouts: list[float | None] = []
+
+        def join(self, timeout: float | None = None) -> None:
+            self.timeouts.append(timeout)
+            if timeout is None:
+                raise AssertionError("inherited pipe join was not bounded")
+
+    process = _ExitedProcess()
+    pipe_threads = tuple(_InheritedPipeThread() for _ in range(3))
+    client._process = process  # type: ignore[assignment]
+    client._state = Lifecycle.RUNNING
+
+    client._watch_loop(process, pipe_threads)  # type: ignore[arg-type]
+
+    assert [thread.timeouts for thread in pipe_threads] == [[0.1]] * 3
+    assert client.state is Lifecycle.FAILED
+    assert client.poll() == [ProcessExited(7)]

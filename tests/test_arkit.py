@@ -72,21 +72,32 @@ def test_worker_reports_exact_model_owned_audio2face_defaults() -> None:
         "GetExecutorSkinParameters",
         "GetExecutorEyesParameters",
     ):
-        assert re.search(rf"{getter}\(\s*geometry,", defaults)
+        assert re.search(rf"{getter}\(\s*geometry_executor\(\),", defaults)
 
 
-def test_audio2emotion_output_matches_the_effective_emotion_schema() -> None:
-    setup = SOURCE[SOURCE.index("const auto emotion_model_info") :]
-    setup = setup[: setup.index("Installing Audio2Emotion callback")]
-    assert "GetNetworkInfo().GetEmotionsCount()" not in setup
-    assert "emotion_executor_->GetEmotionsSize() != emotion_channels_.size()" in setup
+def test_stream_executors_validate_geometry_and_emotion_output_schema() -> None:
+    setup = re.search(
+        r"  void ensure_stream_executors\(\).*?(?=\n  void require_model_locked\()",
+        SOURCE,
+        flags=re.DOTALL,
+    )
+    assert setup is not None
+    setup_source = setup.group(0)
+    assert "GetNetworkInfo().GetEmotionsCount()" not in setup_source
+    assert "emotion_executor_->GetEmotionsSize() !=" in setup_source
     assert "results.emotions.Size() != capture.emotion_count" in SOURCE
+    set_option = setup_source.index("stream_geometry.SetExecutionOption(")
+    get_option = setup_source.index("stream_geometry.GetExecutionOption()")
+    model_invalid = setup_source.index('"model_invalid"', get_option)
+    eyes_size = setup_source.index("stream_geometry.GetEyesRotationSize()")
+    callback = setup_source.index("SetExecutorGeometryResultsCallback(")
+    assert set_option < get_option < model_invalid < eyes_size < callback
 
 
 def test_stream_snapshot_validates_and_applies_exact_skin_eyes_controls() -> None:
     parser = re.search(
         r"  Audio2FaceSettings parse_audio2face_settings\(.*?"
-        r"(?=\n  void configure_audio2face\()",
+        r"(?=\n  EmotionDriver parse_emotion_driver\()",
         SOURCE,
         flags=re.DOTALL,
     )
@@ -148,36 +159,29 @@ def test_stream_snapshot_validates_and_applies_exact_skin_eyes_controls() -> Non
     assert found_ranges == expected_ranges
 
     configure = re.search(
-        r"  void configure_audio2face\(.*?(?=\n  void apply_settings\()",
-        SOURCE,
-        flags=re.DOTALL,
+        r"  void configure_audio2face_input\(.*?"
+        r"(?=\n  void configure_stream_emotion\()", SOURCE, flags=re.DOTALL
     )
     assert configure is not None
-    for setter in (
-        "nva2f::SetExecutorInputStrength(",
-        "nva2f::SetExecutorSkinParameters(",
-        "nva2f::SetExecutorEyesParameters(",
+    configure_source = configure.group(0)
+    for expression in (
+        "IFaceExecutorAccessorInputStrength",
+        "IFaceExecutorAccessorSkinParameters",
+        "IFaceExecutorAccessorEyesParameters",
+        "accessor.SetInputStrength(input_strength)",
+        "skin.Set(0, settings.skin)",
+        "eyes.Set(0, settings.eyes)",
+        "configure_audio2face_input(settings.input_strength);",
+        "configure_audio2face_postprocess(settings);",
     ):
-        assert setter in configure.group(0)
-    assert "auto& geometry = geometry_executor();" in configure.group(0)
-    assert not re.search(r"SetExecutor\w+Parameters\(executor\(\)", configure.group(0))
+        assert expression in configure_source
     assert "SetExecutorTongueParameters" not in SOURCE
     assert "SetExecutorTeethParameters" not in SOURCE
 
-    reset = re.search(
-        r"  void reset_inference\(.*?(?=\n  void begin_operation\()",
-        SOURCE,
-        flags=re.DOTALL,
-    )
-    assert reset is not None
-    assert reset.group(0).index("executor().Reset(0)") < reset.group(0).index(
-        "apply_settings(settings)"
-    )
-
 
 def test_output_keeps_model_order_and_named_eye_resolution() -> None:
-    assert "executor.GetWeightCount() != output_channels.size()" in SOURCE
-    assert "pending.weights->Data()[channel]" in SOURCE
+    assert "stream_executor.GetWeightCount() != kArkit52ChannelCount" in SOURCE
+    assert "copy_finite_values(\n        *pending.weights" in SOURCE
     assert not re.search(r"weights\[\d+\]\s*=", SOURCE)
     resolver = re.search(
         r"ArkitEyeLookIndices resolve_arkit_eye_look_indices\(.*?\n\}",
@@ -192,34 +196,8 @@ def test_stream_frames_carry_the_model_channel_order() -> None:
     assert '{"channels", std::move(output_channels)}' in SOURCE
     assert "capture.weight_count = executor().GetWeightCount()" in SOURCE
     assert "capture.emotion_count = emotion_channels_.size()" in SOURCE
-    assert "pending.weights->Data()[channel]" in SOURCE
-    assert "pending.effective_emotions->Data()[index]" in SOURCE
-    assert (
-        "frame_callback(StreamFrame{stream_timestamp, std::move(arkit)," in SOURCE
-    )
-    assert "std::move(effective_emotions)})" in SOURCE
-
-
-def test_arkit_solve_uses_the_model_owned_default_identity() -> None:
-    assert "constexpr std::size_t kDefaultIdentityIndex = 0" in SOURCE
-    assert "ReadDiffusionBlendshapeSolveModelInfo(" in SOURCE
-    assert "blendshape_parameters.initializationSkinParams" in SOURCE
-    assert "ReadDiffusionBlendshapeSolveExecutorBundle(" in SOURCE
-    assert "kDefaultIdentityIndex, true" in SOURCE
-
-
-def test_callbacks_follow_the_sdk_result_stream_contract() -> None:
-    restore = SOURCE.index("geometry.SetExecutionOption(execution_option)")
-    geometry_callback = SOURCE.index("SetExecutorGeometryResultsCallback(")
-    emotions_callback = SOURCE.index("executor.SetEmotionsCallback(")
-    weights_callback = SOURCE.index("executor.SetResultsCallback(")
-    assert restore < geometry_callback < emotions_callback < weights_callback
-    assert "results.eyesRotation, results.eyesCudaStream" in SOURCE
-    assert "results.emotions, results.cudaStream" in SOURCE
-    assert "results.weights, results.cudaStream" in SOURCE
-    assert "results.eyesCudaStream !=" not in SOURCE
-    assert "results.emotions.Size() != capture.emotion_count" in SOURCE
-    assert "results.cudaStream !=" not in SOURCE
+    assert "copy_finite_values(\n        *pending.weights" in SOURCE
+    assert "frame_callback(make_stream_frame(" in SOURCE
 
 
 def test_worker_uses_one_compositional_emotion_driver() -> None:
@@ -233,27 +211,17 @@ def test_worker_uses_one_compositional_emotion_driver() -> None:
     assert "#include <variant>" not in SOURCE
     assert not re.search(r"(?:Manual|Automatic)EmotionDriver", SOURCE)
 
-    reset_source = SOURCE[SOURCE.index("  void reset_inference(") :]
-    reset_source = reset_source[: reset_source.index("  void begin_operation(")]
-    assert reset_source.index("emotion_executor_->Reset(0)") < reset_source.index(
-        "configure_generated_emotion(emotion_driver_);"
-    )
-    assert "if (emotion_driver_.generated)" in reset_source
-    assert "emotion_input(emotion_channels_.size(), 0.0F)" in reset_source
-    assert "emotion_driver_.emotion_strength * preferred.strength" in reset_source
-    assert "[scale](float value) { return scale * value; }" in reset_source
-
     configure = re.search(
-        r"  void configure_generated_emotion\(.*?"
-        r"(?=\n  std::vector<float> parse_emotion_snapshot\()",
+        r"  void configure_stream_emotion\(.*?"
+        r"(?=\n  static std::size_t settings_index_at\()",
         SOURCE,
         flags=re.DOTALL,
     )
     assert configure is not None
     configure_source = configure.group(0)
     for expression in (
-        "nva2e::GetExecutorPostProcessParameters",
-        "settings.generated.value()",
+        "emotion_postprocess_accessor()",
+        "settings.generated",
         "parameters.emotionStrength",
         "parameters.emotionContrast",
         "parameters.maxEmotions",
@@ -265,9 +233,11 @@ def test_worker_uses_one_compositional_emotion_driver() -> None:
         "parameters.preferredEmotion =",
         "*settings.preferred",
         "preferred.values.data()",
-        "nva2e::SetExecutorPostProcessParameters",
+        "accessor.Get(0, parameters)",
+        "accessor.Set(0, parameters)",
     ):
         assert expression in configure_source
+    assert "value * preferred.strength" in configure_source
 
     assert '{"audio2face", "emotion_driver"}' in SOURCE
     assert '{"emotion_strength", "generated", "preferred"}' in SOURCE
@@ -285,7 +255,7 @@ def test_worker_uses_one_compositional_emotion_driver() -> None:
     assert "amount < 0.0F || amount > 1.0F" in SOURCE
 
 
-def test_active_settings_replay_bounded_pcm_on_one_absolute_timeline() -> None:
+def test_stream_uses_incremental_regular_executors() -> None:
     start = re.search(
         r"  json stream_start\(.*?(?=\n  void stream_chunk\()",
         SOURCE,
@@ -301,8 +271,32 @@ def test_active_settings_replay_bounded_pcm_on_one_absolute_timeline() -> None:
     )
     assert begin is not None
     begin_source = begin.group(0)
-    assert "retained_audio_capacity_ = prebuffer_samples_ + sample_rate_;" in begin_source
+    assert "ensure_stream_executors();" in begin_source
+    assert "reset_stream_inference(parse_settings(settings));" in begin_source
 
+    chunk = re.search(
+        r"  void stream_chunk\(.*?(?=\n  void stream_settings\()",
+        SOURCE,
+        flags=re.DOTALL,
+    )
+    assert chunk is not None
+    chunk_source = chunk.group(0)
+    assert "accumulate_audio(audio.data(), audio.size());" in chunk_source
+    assert "drain_ready(canceled, frame);" in chunk_source
+    assert "interactive" not in chunk_source
+    drain = re.search(
+        r"  void drain_interleaved_ready\(.*?"
+        r"(?=\n  std::size_t execute_generated_emotion_once\()",
+        SOURCE,
+        flags=re.DOTALL,
+    )
+    assert drain is not None
+    assert "GetNbReadyTracks(executor())" in drain.group(0)
+    assert "GetNbReadyTracks(*emotion_executor_)" in drain.group(0)
+    assert "evaluate_interactive_stream" not in SOURCE
+
+
+def test_stream_settings_update_executors_without_reset_or_audio_replay() -> None:
     update = re.search(
         r"  void stream_settings\(.*?(?=\n  void stream_end\()",
         SOURCE,
@@ -310,20 +304,100 @@ def test_active_settings_replay_bounded_pcm_on_one_absolute_timeline() -> None:
     )
     assert update is not None
     update_source = update.group(0)
-    for earlier, later in (
-        ("reset_inference(settings);", "previous_timestamp_.reset();"),
-        ("previous_timestamp_.reset();", "reset();"),
-        ("reset();", "const std::vector<float> replay"),
-        ("accumulate_audio(replay.data(), replay.size());", "drain_ready"),
-    ):
-        assert update_source.index(earlier) < update_source.index(later)
-    assert re.search(
-        r"timestamp_offset_ =\s*total_audio_samples_ -\s*"
-        r"static_cast<std::int64_t>\(retained_audio_\.size\(\)\);",
-        update_source,
-    )
+    assert "InferenceSettings parsed = parse_settings(settings);" in update_source
+    assert "configure_audio2face(parsed.audio2face);" in update_source
+    assert "configure_stream_emotion(parsed.emotion_driver);" in update_source
+    for removed in ("Reset(", "reset_stream_inference", "accumulate_audio", "retain_audio"):
+        assert removed not in update_source
 
-    assert "retain_audio(audio);" in SOURCE
-    assert "while (retained_audio_.size() > retained_audio_capacity_)" in SOURCE
-    assert "return timestamp_offset_ + local_timestamp;" in SOURCE
-    assert "previous_timestamp_ = stream_timestamp;" in SOURCE
+
+def test_track_reuses_regular_executors_and_retains_uploaded_audio() -> None:
+    track_start = SOURCE[SOURCE.index("  void track_start(") :]
+    track_start = track_start[: track_start.index("  void track_chunk(")]
+    assert "ensure_stream_executors();" in track_start
+
+    track_chunk = SOURCE[SOURCE.index("  void track_chunk(") :]
+    track_chunk = track_chunk[: track_chunk.index("  void track_prepare(")]
+    assert "track_audio_.insert(" in track_chunk
+
+    track_prepare = SOURCE[SOURCE.index("  void track_prepare(") :]
+    track_prepare = track_prepare[: track_prepare.index("  std::size_t track_render(")]
+    assert "track_audio_samples_ = track_audio_.size();" in track_prepare
+    for obsolete in (
+        "clear_stream_executors",
+        "interactive",
+        "accumulate_audio",
+        "ComputeAllFrames",
+    ):
+        assert obsolete not in track_start + track_prepare
+
+
+def test_track_render_replays_audio_with_sample_scheduled_settings() -> None:
+    render = re.search(
+        r"  std::size_t compute_track_render\(.*?(?=\n  void accumulate_audio\()",
+        SOURCE,
+        flags=re.DOTALL,
+    )
+    assert render is not None
+    source = render.group(0)
+    for expression in (
+        "for (const TrackSettingsEntry& entry : request.settings_timeline)",
+        "reset_stream_inference(settings_timeline.front().settings);",
+        "accumulate_audio(track_audio_.data(), track_audio_.size());",
+        "bundle_->GetAudioAccumulator(0).Close()",
+        "advance_face_input_settings(settings_schedule, timestamp);",
+        "advance_face_postprocess_settings(settings_schedule, timestamp);",
+        "advance_emotion_postprocess_settings(settings_schedule, timestamp);",
+        "nva2x::GetNbReadyTracks(executor())",
+        "nva2x::GetNbReadyTracks(*emotion_executor_)",
+        "bool preview_emitted = false;",
+        "frame.timestamp_sample >= *request.preview_sample",
+        "preview(sample_track_frames(candidate, *request.preview_sample));",
+        "preview_emitted = true;",
+        "if (request.preview_sample && !preview_emitted && !superseded())",
+        "cache(candidate);",
+        "return superseded() ? 0 : candidate.size();",
+    ):
+        assert expression in source
+    assert source.count(
+        "preview(sample_track_frames(candidate, *request.preview_sample));"
+    ) == 2
+    tail = source[source.rindex("if (request.preview_sample && !preview_emitted") :]
+    guarded_preview = tail.index("!preview_emitted && !superseded()")
+    preview = tail.index(
+        "preview(sample_track_frames(candidate, *request.preview_sample));"
+    )
+    cache_guard = tail.index("if (superseded()) return 0;", preview)
+    cache = tail.index("cache(candidate);", cache_guard)
+    result = tail.index("return superseded() ? 0 : candidate.size();", cache)
+    assert guarded_preview < preview < cache_guard < cache < result
+    for obsolete in ("interactive", "ComputeAllFrames", "Interrupt("):
+        assert obsolete not in source
+
+
+def test_animated_postprocessing_advances_at_sdk_frame_callbacks() -> None:
+    geometry = re.search(
+        r"  static bool geometry_callback\(.*?(?=\n  static bool weights_callback\()",
+        SOURCE,
+        flags=re.DOTALL,
+    )
+    emotion = re.search(
+        r"  static bool generated_emotion_callback\(.*?"
+        r"(?=\n  static void effective_emotions_callback\()",
+        SOURCE,
+        flags=re.DOTALL,
+    )
+    assert geometry is not None
+    assert emotion is not None
+    assert (
+        "advance_face_postprocess_settings(\n"
+        "            *capture.settings_schedule, results.timeStampNextFrame);"
+        in geometry.group(0)
+    )
+    assert (
+        "advance_emotion_postprocess_settings(\n"
+        "            *capture.settings_schedule, results.timeStampNextFrame);"
+        in emotion.group(0)
+    )
+    assert "capture.callback_error = std::current_exception();" in geometry.group(0)
+    assert "capture.callback_error = std::current_exception();" in emotion.group(0)

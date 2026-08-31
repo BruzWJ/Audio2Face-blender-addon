@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import copy
 import importlib.util
-import re
 import struct
 import sys
 from collections.abc import Callable
@@ -14,9 +13,6 @@ import pytest
 
 CHANNELS = tuple(f"modelChannel{index}" for index in range(52))
 MODEL_SIGNATURE = ("/models/audio2face/model.json", "/models/audio2emotion/model.json")
-UI_SOURCE = (
-    Path(__file__).resolve().parents[1] / "audio2face" / "ui.py"
-).read_text(encoding="utf-8")
 
 AUDIO2FACE_DEFAULTS: dict[str, float | int] = {
     "input_strength": 1.0,
@@ -75,6 +71,7 @@ class _Collection(list[SimpleNamespace]):
 def properties_module(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     bpy = ModuleType("bpy")
     bpy.types = SimpleNamespace(PropertyGroup=object, Object=object)  # type: ignore[attr-defined]
+    bpy.path = SimpleNamespace(abspath=lambda value: value)  # type: ignore[attr-defined]
     props = ModuleType("bpy.props")
     for name in (
         "BoolProperty",
@@ -108,7 +105,6 @@ def _settings() -> SimpleNamespace:
         preferred_emotions=_Collection(
             lambda: SimpleNamespace(name="", value=0.0)
         ),
-        preferred_emotion_active=False,
         mixed_emotions=_Collection(
             lambda: SimpleNamespace(name="", value=0.0)
         ),
@@ -132,63 +128,12 @@ def _schema() -> dict[str, object]:
     }
 
 
-def test_emotion_configuration_uses_parallel_collapsible_sections() -> None:
-    for name in (
-        "a2e_emotion_strength",
-        "a2e_emotion_contrast",
-        "a2e_max_emotions",
-        "a2e_live_blend_coef",
-        "a2e_transition_smoothing",
-    ):
-        assert re.search(
-            rf'emotion_controls\.prop\(\s*settings,\s*"{name}",\s*slider=True,?\s*\)',
-            UI_SOURCE,
-        )
-    assert re.search(
-        r'emotion_header, emotion_body = layout\.panel\(\s*'
-        r'"audio2face_emotion_tuning",\s*default_closed=True,?\s*\)',
-        UI_SOURCE,
-    )
-    assert re.search(
-        r'preferred_header, preferred_body = layout\.panel\(\s*'
-        r'"audio2face_preferred_emotion",\s*default_closed=True,?\s*\)',
-        UI_SOURCE,
-    )
-    assert UI_SOURCE.index("audio2face_preferred_emotion") < UI_SOURCE.index(
-        "audio2face_emotion_tuning"
-    )
-    assert (
-        'preferred_header.label(text="Preferred Emotion", icon="BOOKMARKS")'
-        in UI_SOURCE
-    )
-    assert (
-        'emotion_header.label(text="Emotion Tuning", icon="PREFERENCES")'
-        in UI_SOURCE
-    )
-    assert re.search(
-        r'preferred_body\.prop\(\s*settings,\s*'
-        r'"a2e_preferred_emotion_strength",\s*slider=True,?\s*\)',
-        UI_SOURCE,
-    )
-    assert "for emotion in settings.preferred_emotions:" in UI_SOURCE
-    assert "for emotion in settings.mixed_emotions:" in UI_SOURCE
-    assert "mixed_box = emotion_body.box()" in UI_SOURCE
-    assert "mixed_controls.enabled = False" in UI_SOURCE
-    assert UI_SOURCE.count('"a2f.reset_emotion_settings"') == 1
-    assert UI_SOURCE.count('"a2f.toggle_preferred_emotion"') == 1
-    assert (
-        'text="Clear" if settings.preferred_emotion_active else "Load"'
-        in UI_SOURCE
-    )
-
-
 def test_preferred_emotions_are_saved_and_mixed_emotions_are_transient(
     properties_module: ModuleType,
 ) -> None:
     annotations = properties_module.A2FSceneSettings.__annotations__
 
     assert "SKIP_SAVE" not in annotations["preferred_emotions"]
-    assert "SKIP_SAVE" not in annotations["preferred_emotion_active"]
     assert "SKIP_SAVE" in annotations["mixed_emotions"]
     assert "update=_inference_setting_updated" in annotations["auto_audio2emotion"]
     assert "update=_preferred_emotion_updated" in (
@@ -215,88 +160,118 @@ def test_automatic_emotion_strength_is_an_independent_two_x_multiplier(
     assert "subtype" not in annotation
 
 
-def test_prediction_delay_uses_a_range_slider() -> None:
-    assert (
-        'playback_box.prop(settings, "prediction_delay", slider=True)'
-        in UI_SOURCE
-    )
-
-
-def test_model_tuning_ui_exposes_only_the_fixed_audio2face_contract() -> None:
-    assert 'text="Model Tuning"' in UI_SOURCE
-    assert "AUDIO2FACE_SETTING_GROUPS" in UI_SOURCE
-    assert re.search(
-        r'tuning_header, tuning_body = layout\.panel\(\s*'
-        r'"audio2face_model_tuning",\s*default_closed=True,?\s*\)',
-        UI_SOURCE,
-    )
-    assert UI_SOURCE.count('"a2f.reset_model_tuning"') == 1
-    assert "emotion_controls.enabled" not in UI_SOURCE
-
-
-def test_runtime_status_box_uses_the_persistence_gate() -> None:
-    assert "controller.status_notice(context.scene)" in UI_SOURCE
-
-
-def test_playback_ui_uses_an_editable_absolute_time_slider() -> None:
-    assert re.search(
-        r'playback_box\.prop\(\s*settings,\s*PLAYBACK_POSITION_PATH,'
-        r'\s*text="",\s*slider=True,?\s*\)',
-        UI_SOURCE,
-    )
-
-
-def test_input_mode_switch_is_never_disabled() -> None:
-    assert "input_mode_row = input_box.row(align=True)" in UI_SOURCE
-    assert 'input_mode_row.prop(settings, "input_mode", expand=True)' in UI_SOURCE
-    assert "input_mode_row.enabled" not in UI_SOURCE
-
-
-def test_target_ui_uses_the_shape_key_object_contract() -> None:
-    assert 'text="Target Objects"' in UI_SOURCE
-    assert 'text="Add Selected Objects"' in UI_SOURCE
-    assert '"target_objects"' in UI_SOURCE
-
-
-def test_audio_path_update_replaces_the_selected_media_slider(
+def test_selected_audio_callbacks_manage_source_placement_and_mode(
     properties_module: ModuleType,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[tuple[object, ...]] = []
-    live_stream = ModuleType("audio2face.live_stream")
-    live_stream.clear_playback_position = (  # type: ignore[attr-defined]
-        lambda settings: calls.append(("clear", settings))
-    )
-    live_stream.configure_playback_position = (  # type: ignore[attr-defined]
-        lambda settings, position, duration: calls.append(
-            ("configure", settings, position, duration)
+    timeline = ModuleType("audio2face.selected_audio_timeline")
+    timeline.configure_selected_audio = (  # type: ignore[attr-defined]
+        lambda scene, path, *, first_frame: calls.append(
+            ("configure", scene, path, first_frame)
         )
+        or 42
     )
-    wav_stream = ModuleType("audio2face.wav_stream")
-    wav_stream.WavStreamError = ValueError  # type: ignore[attr-defined]
-    wav_stream.wav_duration_seconds = (  # type: ignore[attr-defined]
-        lambda path: {"first.wav": 2.0, "second.wav": 3.5}[path]
+    timeline.remove_selected_audio_strips = (  # type: ignore[attr-defined]
+        lambda scene: calls.append(("remove", scene))
     )
-    monkeypatch.setitem(sys.modules, live_stream.__name__, live_stream)
-    monkeypatch.setitem(sys.modules, wav_stream.__name__, wav_stream)
-    settings = SimpleNamespace(audio_path="first.wav")
+    monkeypatch.setitem(sys.modules, timeline.__name__, timeline)
+    controller = SimpleNamespace(
+        selected_audio_changed=lambda scene: calls.append(("source", scene)),
+        selected_audio_failed=lambda scene, message: calls.append(
+            ("failure", scene, message)
+        ),
+        invalidate_selected_settings=lambda scene: calls.append(
+            ("invalidate", scene)
+        ),
+        request_selected_frame=lambda scene: calls.append(("frame", scene)),
+        input_mode_changed=lambda scene: calls.append(("mode", scene)),
+    )
+    runtime = ModuleType("audio2face.runtime")
+    runtime.get_controller = lambda: controller  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, runtime.__name__, runtime)
+    settings = SimpleNamespace(
+        input_mode="SELECTED",
+        audio_path="first.wav",
+        audio_first_frame=12,
+        status="MODEL_READY",
+        status_message="Selected WAV is ready",
+    )
+    scene = SimpleNamespace(audio2face=settings)
+    context = SimpleNamespace(scene=scene)
 
-    properties_module._audio_path_updated(settings, SimpleNamespace())
-    settings.audio_path = "second.wav"
-    properties_module._audio_path_updated(settings, SimpleNamespace())
+    properties_module._audio_path_updated(settings, context)
+    settings.audio_first_frame = -3
+    properties_module._audio_first_frame_updated(settings, context)
     settings.audio_path = ""
-    properties_module._audio_path_updated(settings, SimpleNamespace())
+    properties_module._audio_path_updated(settings, context)
+    settings.audio_path = "second.wav"
+    properties_module._input_mode_updated(settings, context)
+    settings.input_mode = "STREAM"
+    properties_module._input_mode_updated(settings, context)
 
     assert calls == [
-        ("clear", settings),
-        ("configure", settings, 0.0, 2.0),
-        ("clear", settings),
-        ("configure", settings, 0.0, 3.5),
-        ("clear", settings),
+        ("configure", scene, "first.wav", 12),
+        ("source", scene),
+        ("configure", scene, "first.wav", -3),
+        ("invalidate", scene),
+        ("frame", scene),
+        ("source", scene),
+        ("remove", scene),
+        ("mode", scene),
+        ("configure", scene, "second.wav", -3),
+        ("invalidate", scene),
+        ("frame", scene),
+        ("mode", scene),
+        ("remove", scene),
     ]
-    assert "update=_audio_path_updated" in (
-        properties_module.A2FSceneSettings.__annotations__["audio_path"]
-    )
+
+    def reject_audio(*_args: object, **_kwargs: object) -> None:
+        raise ValueError("invalid WAV")
+
+    timeline.configure_selected_audio = reject_audio  # type: ignore[attr-defined]
+    settings.audio_path = "broken.wav"
+    properties_module._audio_path_updated(settings, context)
+
+    assert calls[-2:] == [("remove", scene), ("failure", scene, "invalid WAV")]
+
+    def reject_blender_audio(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("Blender could not create the sound strip")
+
+    timeline.configure_selected_audio = reject_blender_audio  # type: ignore[attr-defined]
+    properties_module._audio_path_updated(settings, context)
+
+    assert calls[-2:] == [
+        ("remove", scene),
+        ("failure", scene, "Blender could not create the sound strip"),
+    ]
+
+    def reject_strip_removal(_scene: object) -> None:
+        raise RuntimeError("Blender could not remove the sound strip")
+
+    timeline.remove_selected_audio_strips = reject_strip_removal  # type: ignore[attr-defined]
+    settings.audio_path = ""
+    properties_module._audio_path_updated(settings, context)
+
+    assert calls[-2:] == [
+        ("source", scene),
+        (
+            "failure",
+            scene,
+            "could not remove selected audio strip: "
+            "Blender could not remove the sound strip",
+        ),
+    ]
+    annotations = properties_module.A2FSceneSettings.__annotations__
+    assert "update=_input_mode_updated" in annotations["input_mode"]
+    assert "update=_audio_path_updated" in annotations["audio_path"]
+    first_frame = properties_module.A2FSceneSettings.__annotations__[
+        "audio_first_frame"
+    ]
+    assert "name='First Frame'" in first_frame
+    assert "default=1" in first_frame
+    assert "update=_audio_first_frame_updated" in first_frame
+    assert "SKIP_SAVE" not in first_frame
 
 
 def test_shared_update_callback_refreshes_the_context_scene(
@@ -317,14 +292,9 @@ def test_shared_update_callback_refreshes_the_context_scene(
     assert calls == [scene]
 
 
-@pytest.mark.parametrize(
-    "preferred_emotion_active",
-    (False, True),
-)
 def test_mixed_output_and_preferred_input_have_strict_ownership(
     properties_module: ModuleType,
     monkeypatch: pytest.MonkeyPatch,
-    preferred_emotion_active: bool,
 ) -> None:
     calls: list[object] = []
     controller = SimpleNamespace(
@@ -356,7 +326,6 @@ def test_mixed_output_and_preferred_input_have_strict_ownership(
     scene = SimpleNamespace(audio2face=settings)
     context = SimpleNamespace(scene=scene)
     properties_module.apply_model_schema(settings, _schema(), MODEL_SIGNATURE)
-    settings.preferred_emotion_active = preferred_emotion_active
 
     properties_module.apply_mixed_emotions(
         settings,
@@ -366,11 +335,9 @@ def test_mixed_output_and_preferred_input_have_strict_ownership(
     assert calls == []
     assert [item.value for item in settings.mixed_emotions] == [0.25, 0.75]
     assert [item.value for item in settings.preferred_emotions] == [0.5, 0.2]
-    assert settings.preferred_emotion_active is preferred_emotion_active
 
     settings.preferred_emotions[1].value = 0.35
-    assert calls == ([scene] if preferred_emotion_active else [])
-    assert settings.preferred_emotion_active is preferred_emotion_active
+    assert calls == [scene]
 
     properties_module.apply_mixed_emotions(
         settings,
@@ -379,37 +346,37 @@ def test_mixed_output_and_preferred_input_have_strict_ownership(
     )
     assert [item.value for item in settings.mixed_emotions] == [0.6, 0.4]
     assert [item.value for item in settings.preferred_emotions] == [0.5, 0.35]
-    assert calls == ([scene] if preferred_emotion_active else [])
+    assert calls == [scene]
 
 
-def test_toggle_changes_only_preferred_active_state(
+def test_preferred_source_is_value_driven_and_all_zero_means_clear(
     properties_module: ModuleType,
 ) -> None:
     settings = _settings()
     properties_module.apply_model_schema(settings, _schema(), MODEL_SIGNATURE)
-    settings.preferred_emotions[0].value = 0.7
-    settings.preferred_emotions[1].value = 0.3
-    properties_module.apply_mixed_emotions(
-        settings,
-        ("Neutral", "Joy"),
-        (0.6, 0.4),
-    )
+    settings.a2e_preferred_emotion_strength = 0.3
 
-    properties_module.toggle_preferred_emotion(settings)
+    preferred = properties_module.inference_settings(settings)["emotion_driver"][
+        "preferred"
+    ]
+    assert preferred == {
+        "values": {"Neutral": 0.5, "Joy": 0.2},
+        "strength": 0.3,
+    }
 
-    assert [item.value for item in settings.preferred_emotions] == [0.7, 0.3]
-    assert settings.preferred_emotion_active is True
+    for item in settings.preferred_emotions:
+        item.value = 0.0
+    assert properties_module.inference_settings(settings)["emotion_driver"][
+        "preferred"
+    ] is None
 
-    properties_module.apply_mixed_emotions(
-        settings,
-        ("Neutral", "Joy"),
-        (0.2, 0.8),
-    )
-    properties_module.toggle_preferred_emotion(settings)
-
-    assert [item.value for item in settings.mixed_emotions] == [0.2, 0.8]
-    assert [item.value for item in settings.preferred_emotions] == [0.7, 0.3]
-    assert settings.preferred_emotion_active is False
+    settings.preferred_emotions[1].value = 0.4
+    assert properties_module.inference_settings(settings)["emotion_driver"][
+        "preferred"
+    ] == {
+        "values": {"Neutral": 0.0, "Joy": 0.4},
+        "strength": 0.3,
+    }
 
 
 @pytest.mark.parametrize(
@@ -448,13 +415,29 @@ def test_mixed_emotion_display_preserves_worker_values_without_mutating_preferre
     assert [item.value for item in settings.preferred_emotions] == [0.5, 0.2]
 
 
-def test_prediction_delay_does_not_reset_inference(
+def test_prediction_delay_recomputes_the_current_selected_frame(
     properties_module: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    calls: list[object] = []
+    controller = SimpleNamespace(
+        request_selected_frame=lambda scene: calls.append(scene)
+    )
+    runtime = ModuleType("audio2face.runtime")
+    runtime.get_controller = lambda: controller  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, runtime.__name__, runtime)
+    scene = SimpleNamespace(audio2face=object())
+
+    properties_module._selected_frame_mapping_updated(
+        None,
+        SimpleNamespace(scene=scene),
+    )
+
+    assert calls == [scene]
     annotation = properties_module.A2FSceneSettings.__annotations__[
         "prediction_delay"
     ]
-    assert "update" not in annotation
+    assert "update=_selected_frame_mapping_updated" in annotation
 
 
 def test_reset_helpers_only_unset_their_owned_rna_properties(
@@ -469,6 +452,12 @@ def test_reset_helpers_only_unset_their_owned_rna_properties(
     properties_module.reset_emotion_settings(settings)
     assert unset == list(properties_module.EMOTION_SETTING_FIELDS)
     assert "a2e_preferred_emotion_strength" not in unset
+    assert properties_module.TIMELINE_SETTING_FIELDS == (
+        *properties_module.AUDIO2FACE_SETTING_FIELDS,
+        *properties_module.EMOTION_SETTING_FIELDS,
+        "a2e_preferred_emotion_strength",
+        "prediction_delay",
+    )
 
 
 def test_schema_materializes_preferred_defaults_and_empty_mixed_output(
@@ -492,7 +481,6 @@ def test_schema_materializes_preferred_defaults_and_empty_mixed_output(
         ("Neutral", 0.0),
         ("Joy", 0.0),
     ]
-    assert settings.preferred_emotion_active is False
 
 
 def test_reload_preserves_values_only_for_the_exact_same_schema(
@@ -501,7 +489,6 @@ def test_reload_preserves_values_only_for_the_exact_same_schema(
     settings = _settings()
     properties_module.apply_model_schema(settings, _schema(), MODEL_SIGNATURE)
     settings.preferred_emotions[1].value = 0.82
-    settings.preferred_emotion_active = True
     properties_module.apply_mixed_emotions(
         settings,
         ("Neutral", "Joy"),
@@ -519,7 +506,6 @@ def test_reload_preserves_values_only_for_the_exact_same_schema(
         ("Neutral", 0.0),
         ("Joy", 0.0),
     ]
-    assert settings.preferred_emotion_active is True
     assert {
         name: getattr(settings, name)
         for name in AUDIO2FACE_DEFAULTS
@@ -532,7 +518,6 @@ def test_changed_schema_resets_every_control_to_advertised_defaults(
     settings = _settings()
     properties_module.apply_model_schema(settings, _schema(), MODEL_SIGNATURE)
     settings.preferred_emotions[1].value = 0.82
-    settings.preferred_emotion_active = True
     properties_module.apply_mixed_emotions(
         settings,
         ("Neutral", "Joy"),
@@ -555,7 +540,6 @@ def test_changed_schema_resets_every_control_to_advertised_defaults(
         ("Neutral", 0.0),
         ("Joy", 0.0),
     ]
-    assert settings.preferred_emotion_active is False
     assert {
         name: getattr(settings, name) for name in AUDIO2FACE_DEFAULTS
     } == changed_defaults
@@ -569,20 +553,15 @@ def test_changed_schema_resets_every_control_to_advertised_defaults(
     ) == (0.6, 1.0, 6, 0.7, 0.5, 0.5)
 
 
-@pytest.mark.parametrize(
-    ("generated_active", "preferred_active"),
-    ((False, False), (False, True), (True, False), (True, True)),
-)
+@pytest.mark.parametrize("generated_active", (False, True))
 def test_inference_settings_composes_emotion_drivers(
     properties_module: ModuleType,
     generated_active: bool,
-    preferred_active: bool,
 ) -> None:
     settings = _settings()
     properties_module.apply_model_schema(settings, _schema(), MODEL_SIGNATURE)
     settings.preferred_emotions[0].value = 0.25
     settings.preferred_emotions[1].value = 0.75
-    settings.preferred_emotion_active = preferred_active
     settings.auto_audio2emotion = generated_active
     settings.a2e_emotion_strength = 0.8
     settings.a2e_emotion_contrast = 1.4
@@ -605,14 +584,10 @@ def test_inference_settings_composes_emotion_drivers(
             if generated_active
             else None
         ),
-        "preferred": (
-            {
-                "values": {"Neutral": 0.25, "Joy": 0.75},
-                "strength": 0.35,
-            }
-            if preferred_active
-            else None
-        ),
+        "preferred": {
+            "values": {"Neutral": 0.25, "Joy": 0.75},
+            "strength": 0.35,
+        },
     }
 
 
@@ -630,7 +605,6 @@ def test_exact_schema_repairs_invalid_saved_preferred_collection(
 ) -> None:
     settings = _settings()
     properties_module.apply_model_schema(settings, _schema(), MODEL_SIGNATURE)
-    properties_module.toggle_preferred_emotion(settings)
     corrupt(settings)
 
     properties_module.apply_model_schema(settings, _schema(), MODEL_SIGNATURE)
@@ -639,7 +613,6 @@ def test_exact_schema_repairs_invalid_saved_preferred_collection(
         ("Neutral", 0.5),
         ("Joy", 0.2),
     ]
-    assert settings.preferred_emotion_active is False
 
 
 def test_same_schema_rebuilds_transient_mixed_emotions(

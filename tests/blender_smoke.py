@@ -27,17 +27,21 @@ import bpy  # noqa: E402  (available only inside Blender)
 from _bpy_restrict_state import RestrictBlend  # noqa: E402
 
 import audio2face  # noqa: E402
+from audio2face.animation_bake import (  # noqa: E402
+    ACTION_OWNER_KEY,
+    bake_shape_key_actions,
+    plan_bake_targets,
+)
 from audio2face.shape_keys import (  # noqa: E402
     apply_shape_key_frame,
     resolve_target_objects,
 )
-from audio2face.live_stream import (  # noqa: E402
-    PLAYBACK_POSITION_KEY,
-    clear_playback_position,
-    configure_playback_position,
-    playback_position,
-)
 from audio2face import runtime  # noqa: E402
+from audio2face.selected_audio_timeline import (  # noqa: E402
+    SELECTED_AUDIO_STRIP_NAME,
+    is_selected_audio_strip,
+    selected_audio_frame_span,
+)
 from audio2face.preferences import A2FAddonPreferences  # noqa: E402
 from audio2face.properties import (  # noqa: E402
     AUDIO2FACE_SETTING_FIELDS,
@@ -95,6 +99,24 @@ def _route_stream_event(
     )
 
 
+def _assert_native_transport_handlers(*, registered: bool) -> None:
+    def owned(handlers: object) -> tuple[object, ...]:
+        return tuple(
+            handler
+            for handler in handlers
+            if getattr(handler, "__module__", None) == runtime.__name__
+        )
+
+    assert owned(bpy.app.handlers.animation_playback_pre) == ()
+    assert owned(bpy.app.handlers.animation_playback_post) == ()
+    expected = (runtime._frame_change_post_handler,) if registered else ()
+    assert owned(bpy.app.handlers.frame_change_post) == expected
+    expected_depsgraph = (
+        (runtime._depsgraph_update_post_handler,) if registered else ()
+    )
+    assert owned(bpy.app.handlers.depsgraph_update_post) == expected_depsgraph
+
+
 def _make_shape_key_target(
     scene: bpy.types.Scene,
     *,
@@ -147,10 +169,9 @@ def main() -> None:
         assert bpy.app.timers.is_registered(runtime._timer_callback)
         assert runtime._load_pre_handler in bpy.app.handlers.load_pre
         assert runtime._load_post_handler in bpy.app.handlers.load_post
+        _assert_native_transport_handlers(registered=True)
         scene = bpy.context.scene
         settings = scene.audio2face
-        settings.playback_state = "PAUSED"
-        clear_playback_position(settings)
 
         stale_layout = Mock()
         stale_layout.panel.side_effect = (
@@ -160,6 +181,8 @@ def main() -> None:
         )
         panel_context = SimpleNamespace(
             scene=scene,
+            screen=None,
+            window_manager=bpy.context.window_manager,
             region=SimpleNamespace(width=320),
             preferences=SimpleNamespace(
                 system=SimpleNamespace(ui_scale=1.0),
@@ -174,14 +197,14 @@ def main() -> None:
         stale_labels = {
             call.kwargs.get("text")
             for call in stale_layout.mock_calls
-            if call[0].endswith(".label")
+            if call[0] == "label" or call[0].endswith(".label")
         }
         assert {
             "Inputs",
             "Model Tuning",
             "Preferred Emotion",
             "Emotion Tuning",
-        } <= stale_labels
+        } <= stale_labels, stale_labels
         visible_properties = {
             call.args[1]
             for call in stale_layout.mock_calls
@@ -195,7 +218,6 @@ def main() -> None:
         } <= (
             visible_properties
         )
-        settings.playback_state = "IDLE"
         notice_layout = Mock()
         draw_wrapped_label(
             notice_layout,
@@ -246,7 +268,6 @@ def main() -> None:
             "prediction_delay",
             "auto_audio2emotion",
             "preferred_emotions",
-            "preferred_emotion_active",
             "mixed_emotions",
             "a2e_emotion_strength",
             "a2e_emotion_contrast",
@@ -314,12 +335,6 @@ def main() -> None:
         assert not A2FSceneSettings.bl_rna.properties[
             "preferred_emotions"
         ].is_skip_save
-        assert A2FSceneSettings.bl_rna.properties[
-            "preferred_emotion_active"
-        ].is_hidden
-        assert not A2FSceneSettings.bl_rna.properties[
-            "preferred_emotion_active"
-        ].is_skip_save
         assert A2FSceneSettings.bl_rna.properties["mixed_emotions"].is_hidden
         assert A2FSceneSettings.bl_rna.properties[
             "mixed_emotions"
@@ -328,18 +343,6 @@ def main() -> None:
         target = _make_shape_key_target(scene)
 
         settings = scene.audio2face
-        configure_playback_position(settings, 1.25, 4.0)
-        _assert_close(
-            playback_position(settings),
-            1.25,
-            label="absolute playback position",
-        )
-        playback_ui = settings.id_properties_ui(PLAYBACK_POSITION_KEY).as_dict()
-        assert playback_ui["subtype"] == "TIME"
-        _assert_close(playback_ui["min"], 0.0, label="playback slider min")
-        _assert_close(playback_ui["max"], 4.0, label="playback slider max")
-        clear_playback_position(settings)
-        assert PLAYBACK_POSITION_KEY not in settings
         with tempfile.TemporaryDirectory() as temporary_directory:
             wav_path = Path(temporary_directory) / "selected.wav"
             with wave.open(str(wav_path), "wb") as wav_file:
@@ -347,14 +350,36 @@ def main() -> None:
                 wav_file.setsampwidth(2)
                 wav_file.setframerate(16_000)
                 wav_file.writeframes(bytes(16_000 * 2))
+            scene.frame_start = 7
+            original_frame_end = scene.frame_end
+            settings.audio_first_frame = 12
             settings.audio_path = str(wav_path)
-            assert PLAYBACK_POSITION_KEY in settings
-            playback_ui = settings.id_properties_ui(
-                PLAYBACK_POSITION_KEY
-            ).as_dict()
-            _assert_close(playback_ui["max"], 1.0, label="selected WAV duration")
+            _assert_native_transport_handlers(registered=True)
+            sequence_editor = scene.sequence_editor
+            assert sequence_editor is not None
+            owned_strips = [
+                strip
+                for strip in sequence_editor.strips
+                if is_selected_audio_strip(strip)
+            ]
+            assert len(owned_strips) == 1
+            selected_strip = owned_strips[0]
+            assert selected_strip.name == SELECTED_AUDIO_STRIP_NAME
+            assert selected_strip.content_start == 12
+            assert selected_audio_frame_span(scene) == (
+                12,
+                int(selected_strip.content_end) - 1,
+            )
+            assert selected_strip.left_handle_offset == 0.0
+            assert selected_strip.right_handle_offset == 0.0
+            assert scene.sync_mode == "AUDIO_SYNC"
+            assert scene.frame_start == 7
+            assert scene.frame_end == original_frame_end
             settings.audio_path = ""
-            assert PLAYBACK_POSITION_KEY not in settings
+            assert not any(
+                is_selected_audio_strip(strip)
+                for strip in sequence_editor.strips
+            )
         model_schema = {
             "channels": MODEL_CHANNELS.copy(),
             "audio2face_defaults": MODEL_DEFAULTS.copy(),
@@ -380,7 +405,10 @@ def main() -> None:
         assert [
             (item.name, item.value) for item in settings.mixed_emotions
         ] == [("Neutral", 0.0), ("Joy", 0.0)]
-        assert settings.preferred_emotion_active is False
+        assert inference_settings(settings)["emotion_driver"]["preferred"] == {
+            "values": {"Neutral": 1.0, "Joy": 0.0},
+            "strength": 0.5,
+        }
         for name, bounds in expected_model_ranges.items():
             if name == "eye_saccade_seed":
                 continue
@@ -391,7 +419,6 @@ def main() -> None:
                 _assert_close(payload["audio2face"][name], endpoint, label=name)
             setattr(settings, name, original)
         settings.preferred_emotions[1].value = 0.75
-        assert settings.preferred_emotion_active is False
         apply_mixed_emotions(
             settings,
             ("Neutral", "Joy"),
@@ -409,7 +436,6 @@ def main() -> None:
             0.0,
             label="reset transient mixed Joy",
         )
-        assert settings.preferred_emotion_active is False
         _assert_close(
             settings.input_strength,
             2.0,
@@ -422,17 +448,90 @@ def main() -> None:
         controller.refresh_inference_settings = refresh
         try:
             settings.preferred_emotions[1].value = 0.5
-            refresh.assert_not_called()
-            assert bpy.ops.a2f.toggle_preferred_emotion() == {"FINISHED"}
             refresh.assert_called_once_with(scene)
             refresh.reset_mock()
             settings.preferred_emotions[0].value = 0.6
             refresh.assert_called_once_with(scene)
         finally:
             controller.refresh_inference_settings = original_refresh
-        assert settings.preferred_emotion_active is True
         for item, expected in zip(settings.preferred_emotions, (0.6, 0.5)):
             _assert_close(item.value, expected, label=f"authored {item.name}")
+
+        animated_values = ((7, (0.25, 0.2, 0.1)), (9, (1.75, 1.2, 0.9)))
+        preferred_joy = settings.preferred_emotions[1]
+        original_values = (
+            settings.input_mode,
+            settings.skin_strength,
+            settings.a2e_emotion_strength,
+            preferred_joy.value,
+        )
+        preferred_path = preferred_joy.path_from_id("value")
+        keyed_paths = (
+            "audio2face.skin_strength",
+            "audio2face.a2e_emotion_strength",
+            preferred_path,
+        )
+        for frame, values in animated_values:
+            settings.skin_strength, settings.a2e_emotion_strength = values[:2]
+            preferred_joy.value = values[2]
+            for data_path in keyed_paths:
+                scene.keyframe_insert(data_path=data_path, frame=frame)
+
+        action_invalidation = Mock()
+        original_invalidation = controller.invalidate_selected_settings
+        controller.invalidate_selected_settings = action_invalidation
+        try:
+            action = scene.animation_data.action
+            action_slot = scene.animation_data.action_slot
+            skin_curve = None
+            for layer in action.layers:
+                for strip in layer.strips:
+                    channelbag = strip.channelbag(action_slot)
+                    if channelbag is not None:
+                        skin_curve = channelbag.fcurves.find(keyed_paths[0])
+                    if skin_curve is not None:
+                        break
+                if skin_curve is not None:
+                    break
+            assert skin_curve is not None
+            skin_curve.keyframe_points[0].interpolation = "LINEAR"
+            skin_curve.update()
+            bpy.context.view_layer.update()
+            action_invalidation.assert_called_with(scene)
+        finally:
+            controller.invalidate_selected_settings = original_invalidation
+
+        evaluated_settings: list[dict[str, object]] = []
+        settings.input_mode = "STREAM"
+        controller.refresh_inference_settings = lambda evaluated_scene: (
+            evaluated_settings.append(inference_settings(evaluated_scene.audio2face))
+        )
+        try:
+            for frame, expected in animated_values:
+                evaluated_settings.clear()
+                scene.frame_set(frame)
+                bpy.context.view_layer.update()
+                assert evaluated_settings
+                payload = evaluated_settings[-1]
+                actual = (
+                    payload["audio2face"]["skin_strength"],
+                    payload["emotion_driver"]["emotion_strength"],
+                    payload["emotion_driver"]["preferred"]["values"]["Joy"],
+                )
+                for value, wanted, label in zip(
+                    actual,
+                    expected,
+                    ("Skin Strength", "Emotion Strength", "Preferred Joy"),
+                    strict=True,
+                ):
+                    _assert_close(value, wanted, label=f"animated {label} at {frame}")
+        finally:
+            controller.refresh_inference_settings = original_refresh
+            scene.animation_data_clear()
+            settings.input_mode = original_values[0]
+            settings.skin_strength, settings.a2e_emotion_strength = original_values[1:3]
+            preferred_joy.value = original_values[3]
+
         apply_mixed_emotions(
             settings,
             ("Neutral", "Joy"),
@@ -444,10 +543,9 @@ def main() -> None:
         ):
             for item, expected in zip(collection, expected_values):
                 _assert_close(item.value, expected, label=item.name)
-        assert bpy.ops.a2f.toggle_preferred_emotion() == {"FINISHED"}
-        assert settings.preferred_emotion_active is False
-        for item, expected in zip(settings.preferred_emotions, (0.6, 0.5)):
-            _assert_close(item.value, expected, label=item.name)
+        settings.preferred_emotions[0].value = 0.0
+        settings.preferred_emotions[1].value = 0.0
+        assert inference_settings(settings)["emotion_driver"]["preferred"] is None
         extra_target = _make_shape_key_target(
             scene,
             object_name="A2FSmokeExtraTarget",
@@ -544,36 +642,34 @@ def main() -> None:
 
         live = runtime.get_live_stream_controller()
         routed_operation = "blender-smoke-stream"
+        presentation_stopped: list[str | None] = []
         try:
-            live.prepare(
+            live.prepare_external(
                 scene,
                 routed_operation,
                 16_000,
                 tuple(MODEL_CHANNELS),
                 ("Neutral", "Joy"),
-                audio_path=None,
-                playback_started=None,
-                playback_stopped=None,
+                lambda error: presentation_stopped.append(error),
             )
             controller.active_stream = runtime.ActiveStream(
                 operation_id=routed_operation,
                 scene_name=scene.name,
-                wav_source=None,
+                submitted_settings=inference_settings(settings),
             )
             streamed_frame = [0.0] * len(MODEL_CHANNELS)
             streamed_frame[MODEL_CHANNELS.index("jawOpen")] = 0.375
-            # The current SDK can emit receptive-field frames before sample zero.
-            # They must be accepted and applied directly without animation data.
             _route_stream_event(
                 controller,
                 routed_operation,
                 "stream_frame",
                 {
-                    "timestamp_sample": -160,
+                    "timestamp_sample": 0,
                     "weights": streamed_frame,
-                    "effective_emotions": [0.25, 1.25],
+                    "effective_emotions": [0.75, 0.25],
                 },
             )
+            assert presentation_stopped == []
             for keyed_target in (
                 target,
                 extra_target,
@@ -587,43 +683,15 @@ def main() -> None:
                     0.375,
                     label=f"{keyed_target.name} live-stream jawOpen",
                 )
-            _assert_close(settings.stream_time, 0.0, label="negative stream time clamp")
-            _assert_close(
-                settings.mixed_emotions[0].value,
-                0.25,
-                label="mixed Neutral",
-            )
-            _assert_close(
-                settings.mixed_emotions[1].value,
-                1.25,
-                label="mixed Joy",
-            )
-            _route_stream_event(
-                controller,
-                routed_operation,
-                "stream_reset",
-                {},
-            )
-            _route_stream_event(
-                controller,
-                routed_operation,
-                "stream_frame",
-                {
-                    "timestamp_sample": 0,
-                    "weights": streamed_frame,
-                    "effective_emotions": [0.75, 0.25],
-                },
-            )
-            assert live.tick() is True
             _assert_close(
                 settings.mixed_emotions[0].value,
                 0.75,
-                label="mixed Neutral after reset",
+                label="mixed Neutral after settings update",
             )
             _assert_close(
                 settings.mixed_emotions[1].value,
                 0.25,
-                label="mixed Joy after reset",
+                label="mixed Joy after settings update",
             )
             assert [tuple(vertex.co) for vertex in target.data.vertices] == primary_vertices
             assert [tuple(vertex.co) for vertex in extra_target.data.vertices] == extra_vertices
@@ -637,6 +705,79 @@ def main() -> None:
             0.0,
             label="primary live-stream reset",
         )
+
+        bake_target = _make_shape_key_target(
+            scene,
+            object_name="A2FNativeBakeTarget",
+        )
+        existing_bake_target = _make_shape_key_target(
+            scene,
+            object_name="A2FExistingActionBakeTarget",
+        )
+        existing_shape_keys = existing_bake_target.data.shape_keys
+        existing_action = bpy.data.actions.new("A2F Existing Shape Key Action")
+        existing_shape_keys.animation_data_create().action = existing_action
+        existing_curve = existing_action.fcurve_ensure_for_datablock(
+            existing_shape_keys,
+            existing_shape_keys.key_blocks["jawOpen"].path_from_id("value"),
+            index=0,
+            group_name="Artist Curves",
+        )
+        existing_curve.keyframe_points.add(3)
+        for point, co in zip(
+            existing_curve.keyframe_points,
+            ((5.0, 0.1), (8.0, 0.4), (11.0, 0.9)),
+            strict=True,
+        ):
+            point.co = co
+        existing_curve.update()
+        bake_plans = plan_bake_targets(
+            ("jawOpen",),
+            (bake_target, existing_bake_target),
+        )
+        baked_actions = bake_shape_key_actions(
+            (7, 9),
+            ((0.2,), (0.8,)),
+            bake_plans,
+            bpy.data.actions,
+        )
+        assert len(baked_actions) == 2
+        assert bake_target.data.shape_keys.animation_data.action == baked_actions[0]
+        assert baked_actions[1] != existing_action
+        assert existing_shape_keys.animation_data.action == baked_actions[1]
+        assert baked_actions[1][ACTION_OWNER_KEY] is True
+        existing_points = [tuple(point.co) for point in existing_curve.keyframe_points]
+        assert [co[0] for co in existing_points] == [5.0, 8.0, 11.0]
+        for co, expected in zip(
+            existing_points,
+            (0.1, 0.4, 0.9),
+            strict=True,
+        ):
+            _assert_close(co[1], expected, label="existing Action curve value")
+        scene.frame_set(7)
+        bpy.context.view_layer.update()
+        _assert_close(
+            bake_target.data.shape_keys.key_blocks["jawOpen"].value,
+            0.2,
+            label="native bake first frame",
+        )
+        _assert_close(
+            existing_shape_keys.key_blocks["jawOpen"].value,
+            0.2,
+            label="existing Action bake first frame",
+        )
+        scene.frame_set(9)
+        bpy.context.view_layer.update()
+        _assert_close(
+            bake_target.data.shape_keys.key_blocks["jawOpen"].value,
+            0.8,
+            label="native bake final frame",
+        )
+        _assert_close(
+            existing_shape_keys.key_blocks["jawOpen"].value,
+            0.8,
+            label="existing Action bake final frame",
+        )
     finally:
         if registered:
             audio2face.unregister()
@@ -648,6 +789,7 @@ def main() -> None:
         )
         assert runtime._load_pre_handler not in bpy.app.handlers.load_pre
         assert runtime._load_post_handler not in bpy.app.handlers.load_post
+        _assert_native_transport_handlers(registered=False)
 
     print("Audio2Face 5.2 smoke test passed")
 
