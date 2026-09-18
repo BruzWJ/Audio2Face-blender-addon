@@ -2,20 +2,18 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 import math
 import os
 import struct
 import tempfile
 from typing import Any, Iterator
 
-from .wav_stream import (
-    MAX_CHUNK_FRAMES,
-    MAX_OUTPUT_FRAMES,
-    MAX_SAMPLE_RATE,
-    MIN_SAMPLE_RATE,
-    WavStreamSource,
-)
+MAX_CHUNK_FRAMES = 65_536
+MIN_SAMPLE_RATE = 8_000
+MAX_SAMPLE_RATE = 384_000
+MAX_OUTPUT_FRAMES = 512 * 1024 * 1024 // 4
+_DECODE_BUFFER_FRAMES = 4_096
 
 
 class SelectedAudioTimelineError(ValueError):
@@ -58,39 +56,22 @@ def frame_to_audio_sample(
     return min(max(nearest, 0), audio_samples - 1)
 
 
-def _property(item: Any, current: str, previous: str, default: Any = 0) -> Any:
-    value = getattr(item, current, None)
-    return getattr(item, previous, default) if value is None else value
-
-
 def _channel_strips(scene: Any) -> tuple[Any, ...]:
     editor = scene.sequence_editor
     if editor is None:
         return ()
-    channel = int(getattr(scene.audio2face, "audio_channel", 1))
-    # Channel numbers belong to this timeline, not to nested meta timelines.
-    strips = _property(editor, "strips", "sequences", ())
+    # Channel numbers belong to this timeline, not nested meta timelines.
     return tuple(
-        strip for strip in strips
-        if strip.type == "SOUND" and strip.channel == channel
-        and getattr(strip, "sound", None) is not None
+        strip for strip in editor.strips
+        if strip.type == "SOUND" and strip.channel == scene.audio2face.audio_channel
+        and strip.sound is not None
     )
 
 
 def _strip_frame_span(strip: Any) -> tuple[int, int]:
-    """Return visible handle bounds, with an exclusive end."""
+    """Return Blender 5.2's visible handle bounds, with an exclusive end."""
 
-    start = _property(strip, "left_handle", "frame_final_start", None)
-    end = _property(strip, "right_handle", "frame_final_end", None)
-    if start is None:
-        start = _property(strip, "content_start", "frame_start") + _property(
-            strip, "left_handle_offset", "frame_offset_start"
-        )
-    if end is None:
-        end = _property(strip, "content_end", "frame_end") - _property(
-            strip, "right_handle_offset", "frame_offset_end"
-        )
-    return int(start), int(end)
+    return int(strip.left_handle), int(strip.right_handle)
 
 
 def selected_audio_frame_span(scene: Any) -> tuple[int, int] | None:
@@ -107,17 +88,16 @@ def selected_audio_frame_span(scene: Any) -> tuple[int, int] | None:
 
 @dataclass(frozen=True, slots=True)
 class ChannelAudioClip:
-    """A sound strip copied out of Blender; frame_end is exclusive."""
+    """Frozen strip settings and native source references; frame_end is exclusive."""
 
-    path: str
     frame_start: int
     frame_end: int
     source_start: float
     volume: float
     muted: bool
-    speed: float
     signature: tuple[Any, ...]
-    packed_file: Any = field(default=None, compare=False, repr=False)
+    sound: Any = field(compare=False, repr=False)
+    scene: Any = field(compare=False, repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,19 +112,6 @@ class SelectedChannelSnapshot:
     frame_end: int
 
 
-def _sound_path(sound: Any) -> str:
-    path = str(sound.filepath)
-    try:
-        import bpy
-    except ImportError:
-        pass
-    else:
-        abspath = getattr(getattr(bpy, "path", None), "abspath", None)
-        if abspath is not None:
-            path = abspath(path, library=getattr(sound, "library", None))
-    return os.path.abspath(path)
-
-
 def selected_channel_snapshot(scene: Any) -> SelectedChannelSnapshot | None:
     """Copy selected-channel input settings without touching Blender data.
 
@@ -152,15 +119,17 @@ def selected_channel_snapshot(scene: Any) -> SelectedChannelSnapshot | None:
     Muted clips retain their timing and contribute silence to model input.
     """
 
+    import bpy
+
     strips = _channel_strips(scene)
     if not strips:
         return None
-    channel = int(getattr(scene.audio2face, "audio_channel", 1))
+    channel = scene.audio2face.audio_channel
     fps, fps_base = int(scene.render.fps), float(scene.render.fps_base)
     rate = frames_per_second(fps, fps_base)
-    channels = getattr(scene.sequence_editor, "channels", ())
+    channels = scene.sequence_editor.channels
     channel_muted = any(
-        getattr(item, "channel", None) == channel and getattr(item, "mute", False)
+        item.number == channel and item.mute
         for item in channels
     )
     clips = []
@@ -168,50 +137,43 @@ def selected_channel_snapshot(scene: Any) -> SelectedChannelSnapshot | None:
         start, end = _strip_frame_span(strip)
         if end <= start:
             continue
-        origin = float(_property(strip, "content_start", "frame_start"))
-        trim = int(_property(strip, "content_trim_start", "animation_offset_start"))
-        trim_end = int(_property(strip, "content_trim_end", "animation_offset_end"))
-        offset = float(getattr(strip, "sound_offset", 0.0)) + float(
-            getattr(strip.sound, "offset_time", 0.0)
-        )
-        volume = float(getattr(strip, "volume", 1.0))
-        speed = float(getattr(strip, "speed_factor", getattr(strip, "pitch", 1.0)))
-        if not all(math.isfinite(value) for value in (origin, offset, volume, speed)):
+        sound = strip.sound
+        origin = float(strip.content_start)
+        trim, trim_end = int(strip.content_trim_start), int(strip.content_trim_end)
+        offset, volume = float(strip.sound_offset), float(strip.volume)
+        if not all(math.isfinite(value) for value in (origin, offset, volume)):
             raise SelectedAudioTimelineError("sound strip settings must be finite")
-        if volume < 0.0 or speed <= 0.0:
-            raise SelectedAudioTimelineError("sound strip volume or speed is invalid")
-        muted = bool(channel_muted or getattr(strip, "mute", False))
+        if volume < 0.0:
+            raise SelectedAudioTimelineError("sound strip volume must not be negative")
+        muted = bool(channel_muted or strip.mute)
         if not muted and volume > 0.0:
-            if speed != 1.0 or len(getattr(strip, "retiming_keys", ())) > 0:
+            if strip.retiming_keys:
                 raise SelectedAudioTimelineError(
                     "selected channel sound strips must use normal playback speed without retiming keys"
                 )
-            if any(not getattr(modifier, "mute", False) for modifier in getattr(strip, "modifiers", ())):
+            if any(not modifier.mute for modifier in strip.modifiers):
                 raise SelectedAudioTimelineError(
                     "selected channel sound strips with audio modifiers are not supported"
                 )
-        pointer = getattr(strip.sound, "as_pointer", None)
-        identity = pointer() if callable(pointer) else id(strip.sound)
-        packed = getattr(strip.sound, "packed_file", None)
-        packed_pointer = getattr(packed, "as_pointer", None)
-        packed_signature = (
-            (packed_pointer() if callable(packed_pointer) else id(packed), getattr(packed, "size", 0))
-            if packed is not None else None
-        )
+        packed = sound.packed_file
         clips.append(ChannelAudioClip(
-            path=_sound_path(strip.sound),
             frame_start=start,
             frame_end=end,
             source_start=(start - origin + trim) / rate - offset,
             volume=volume,
             muted=muted,
-            speed=speed,
-            signature=(identity, origin, trim, trim_end, offset, packed_signature),
-            packed_file=packed,
+            signature=(
+                sound.as_pointer(), bpy.path.abspath(sound.filepath, library=sound.library),
+                origin, trim, trim_end, offset,
+                (packed.as_pointer(), packed.size) if packed is not None else None,
+                sound.use_mono,
+            ),
+            sound=sound,
+            scene=scene,
         ))
     if not clips:
         return None
-    clips.sort(key=lambda clip: (clip.frame_start, clip.frame_end, clip.path))
+    clips.sort(key=lambda clip: (clip.frame_start, clip.frame_end, clip.signature[0]))
     return SelectedChannelSnapshot(
         channel=channel,
         fps=fps,
@@ -228,85 +190,96 @@ class ChannelAudioMetadata:
     output_frames: int
 
 
-class _WavClipReader:
-    """Streaming fallback for tests and tools running outside Blender."""
+class _AudioClipReader:
+    """Read native-decoded mono float32 samples with bounded PCM seeks."""
 
-    def __init__(self, clip: ChannelAudioClip, rate: int, chunk_frames: int) -> None:
-        self.source = WavStreamSource(
-            os.path.realpath(clip.path), output_sample_rate=rate, chunk_frames=chunk_frames
-        )
-        self.samples = self._samples()
-        self.rate, self.speed = rate, clip.speed
-        self.index = -1
-        self.previous = self.current = 0.0
+    def __init__(
+        self, clip: ChannelAudioClip, rate: int, duration: float,
+    ) -> None:
+        import aud
+        import bpy
 
-    def _samples(self) -> Iterator[float]:
-        for chunk in self.source:
-            yield from struct.unpack(f"<{len(chunk) // 4}f", chunk)
+        # Keep the native writer's final partial buffer past the strip's audio.
+        end = max(0.0, clip.source_start) + duration + _DECODE_BUFFER_FRAMES / rate
+        if end * rate > MAX_OUTPUT_FRAMES:
+            raise SelectedAudioTimelineError("sound source trim exceeds the decoded-audio limit")
+        self._rate = rate
+        self._file = None
+        self._temporary = tempfile.TemporaryDirectory(prefix="audio2face-channel-")
+        path = os.path.join(self._temporary.name, "decoded.wav")
+        try:
+            if clip.sound.packed_file is not None:
+                # Refresh packed bytes without changing authored Sound settings.
+                clip.sound.update_tag()
+            with bpy.context.temp_override(
+                scene=clip.scene, view_layer=clip.scene.view_layers[0],
+            ):
+                depsgraph = bpy.context.evaluated_depsgraph_get()
+                factory = clip.sound.evaluated_get(depsgraph).factory
+            if factory is None:
+                raise SelectedAudioTimelineError("selected sound has no evaluated audio source")
+            # The native factory preserves the chosen media stream and packed
+            # audio. Decode once to avoid compressed seeks losing samples.
+            factory.rechannel(aud.CHANNELS_MONO).resample(rate, 2).limit(0.0, end).write(
+                path, rate, aud.CHANNELS_MONO, aud.FORMAT_FLOAT32,
+                aud.CONTAINER_WAV, aud.CODEC_PCM, 0, _DECODE_BUFFER_FRAMES,
+            )
+            self._file = open(path, "rb")
+            self._data_offset, self._frames = self._pcm_data()
+        except aud.error as exc:
+            self.close()
+            raise SelectedAudioTimelineError(f"could not decode channel audio: {exc}") from exc
+        except Exception:
+            self.close()
+            raise
+
+    def _pcm_data(self) -> tuple[int, int]:
+        """Locate data in our native writer's float32 WAV, not arbitrary input."""
+
+        header = self._file.read(12)
+        if len(header) != 12 or header[:4] != b"RIFF" or header[8:] != b"WAVE":
+            raise SelectedAudioTimelineError("native decoder returned an invalid WAV header")
+        while True:
+            chunk = self._file.read(8)
+            if len(chunk) != 8:
+                raise SelectedAudioTimelineError("native decoder returned no complete audio data")
+            kind, size = struct.unpack("<4sI", chunk)
+            if kind == b"data":
+                if size % 4:
+                    raise SelectedAudioTimelineError("decoded audio must contain whole float32 samples")
+                return self._file.tell(), size // 4
+            self._file.seek(size + (size & 1), os.SEEK_CUR)
 
     def read(self, position: float, count: int) -> list[float]:
-        result = []
-        for offset in range(count):
-            point = position * self.rate + offset * self.speed
-            if point < 0.0:
-                result.append(0.0)
-                continue
-            left = math.floor(point + 1e-7)
-            while self.index < left + 1:
-                self.previous = self.current
-                self.current = next(self.samples, 0.0)
-                self.index += 1
-            fraction = max(0.0, point - left)
-            result.append(self.previous + (self.current - self.previous) * fraction)
+        result = [0.0] * count
+        point = position * self._rate
+        silence = min(count, max(0, math.ceil(-point)))
+        point += silence
+        first = math.floor(point + 1e-7)
+        available = min(count - silence, self._frames - first)
+        if available <= 0:
+            return result
+        size = min(available + 1, self._frames - first) * 4
+        self._file.seek(self._data_offset + first * 4)
+        payload = self._file.read(size)
+        if len(payload) != size:
+            raise SelectedAudioTimelineError("decoded audio was truncated")
+        samples = struct.unpack(f"<{size // 4}f", payload)
+        if not all(math.isfinite(value) for value in samples):
+            raise SelectedAudioTimelineError("decoded audio contains a non-finite sample")
+        samples = [max(-1.0, min(1.0, value)) for value in samples] + [0.0]
+        fraction = max(0.0, point - first)
+        for index in range(available):
+            result[silence + index] = samples[index] + (
+                samples[index + 1] - samples[index]
+            ) * fraction
         return result
 
     def close(self) -> None:
-        self.samples.close()
-        self.source.close()
-
-
-class _AudClipReader(_WavClipReader):
-    """Decode with Blender into a temporary WAV, then stream without seeks.
-
-    Native aud.limit().data() recreates a decoder for each chunk; compressed
-    seeks can lose samples. Native write() instead keeps its decoder alive and
-    uses a bounded buffer. Temporary files are removed as soon as a clip ends.
-    """
-
-    def __init__(
-        self, clip: ChannelAudioClip, rate: int, chunk_frames: int,
-        aud: Any, duration: float,
-    ) -> None:
-        end = max(0.0, clip.source_start) + duration + 2 / rate
-        if end * rate > MAX_OUTPUT_FRAMES:
-            raise SelectedAudioTimelineError("sound source trim exceeds the decoded-audio limit")
-        self._temporary = tempfile.TemporaryDirectory(prefix="audio2face-channel-")
-        path = os.path.join(self._temporary.name, "decoded.wav")
-        error_type = getattr(aud, "error", RuntimeError)
-        try:
-            source_path = clip.path
-            if clip.packed_file is not None:
-                source_path = os.path.join(self._temporary.name, "packed-source")
-                with open(source_path, "wb") as packed_handle:
-                    packed_handle.write(clip.packed_file.data)
-            sound = aud.Sound(source_path).rechannel(aud.CHANNELS_MONO).resample(rate, 2)
-            sound.limit(0.0, end).write(
-                path, rate, aud.CHANNELS_MONO, aud.FORMAT_FLOAT32,
-                aud.CONTAINER_WAV, aud.CODEC_PCM, 0, 4_096,
-            )
-            super().__init__(replace(clip, path=path), rate, chunk_frames)
-        except error_type as exc:
-            self._temporary.cleanup()
-            raise SelectedAudioTimelineError(f"could not decode channel audio: {exc}") from exc
-        except Exception:
-            self._temporary.cleanup()
-            raise
-
-    def close(self) -> None:
-        try:
-            super().close()
-        finally:
-            self._temporary.cleanup()
+        if self._file is not None:
+            self._file.close()
+            self._file = None
+        self._temporary.cleanup()
 
 
 class ChannelAudioSource:
@@ -340,7 +313,7 @@ class ChannelAudioSource:
         self.metadata = ChannelAudioMetadata(output_sample_rate, output_frames)
         self._closed = False
         self._iteration_started = False
-        self._readers: dict[int, Any] = {}
+        self._readers: dict[int, _AudioClipReader] = {}
 
     def close(self) -> None:
         self._closed = True
@@ -356,18 +329,12 @@ class ChannelAudioSource:
     def __exit__(self, _exc_type: object, _exc: object, _traceback: object) -> None:
         self.close()
 
-    def _reader(self, index: int, clip: ChannelAudioClip) -> Any:
+    def _reader(self, index: int, clip: ChannelAudioClip) -> _AudioClipReader:
         if index not in self._readers:
-            try:
-                import aud
-            except ImportError:
-                reader = _WavClipReader(clip, self.metadata.output_sample_rate, self.chunk_frames)
-            else:
-                reader = _AudClipReader(
-                    clip, self.metadata.output_sample_rate, self.chunk_frames, aud,
-                    (clip.frame_end - clip.frame_start) / self._fps,
-                )
-            self._readers[index] = reader
+            self._readers[index] = _AudioClipReader(
+                clip, self.metadata.output_sample_rate,
+                (clip.frame_end - clip.frame_start) / self._fps,
+            )
         return self._readers[index]
 
     def __iter__(self) -> Iterator[bytes]:
@@ -397,7 +364,7 @@ class ChannelAudioSource:
                         if clip.muted or clip.volume == 0.0 or end <= begin:
                             continue
                         reader = self._reader(index, clip)
-                        position = clip.source_start + (begin - left) * clip.speed / rate
+                        position = clip.source_start + (begin - left) / rate
                         samples = reader.read(position, end - begin)
                         for offset, value in enumerate(samples, begin - start):
                             mixed[offset] += value * clip.volume

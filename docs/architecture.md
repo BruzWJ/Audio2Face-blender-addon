@@ -148,8 +148,17 @@ Changing channel audio or shutting down the worker ends that track; play,
 pause, seek, and loop do not. Static strip volume and strip/channel mute are
 applied when combining the audio. Strips must have normal playback speed;
 retiming and audio modifiers must be rendered to audio before using that source.
-Blender's native decoder writes temporary mono float WAV files for bounded
-streaming and resampling, and the source closes and removes them when finished.
+The evaluated Sound datablock supplies Blender's native decoder, preserving its
+selected media stream and packed audio. The decoder writes temporary mono float
+WAV files, and the source closes and removes them when finished. A bounded reader
+seeks directly into that known float32 output, preserving fractional strip
+offsets. Blender owns decoding and resampling; there is no second WAV input
+decoder or older-Blender property compatibility path.
+
+The observed-source map distinguishes invalid channel settings from valid
+snapshots, including empty channels. Correcting unsupported settings refreshes
+the source even when it matches the last valid snapshot. Worker and decoder
+failures still wait for an input change instead of retrying unchanged audio.
 
 After Blender evaluates the new frame, `frame_change_post` maps
 `(scene.frame_current - channel_audio_start)` through effective FPS and

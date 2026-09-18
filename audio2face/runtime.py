@@ -219,6 +219,13 @@ class PendingRequest:
             raise ValueError(f"{self.method} pending state cannot carry an operation ID")
 
 
+@dataclass(frozen=True, slots=True)
+class InvalidSelectedChannel:
+    """An observed validation failure, distinct from a valid empty channel."""
+
+    message: str
+
+
 @dataclass(slots=True)
 class PCMIngress:
     """Thread-safe pending input whose first chunk starts one live stream."""
@@ -338,7 +345,9 @@ class RuntimeController:
         self.expected_worker_exit = False
         self.active_stream: ActiveStream | None = None
         self.selected_track: SelectedTrack | None = None
-        self.observed_selected_sources: dict[str, SelectedChannelSnapshot | None] = {}
+        self.observed_selected_sources: dict[
+            str, SelectedChannelSnapshot | InvalidSelectedChannel | None
+        ] = {}
         self.active_bake: ActiveBake | None = None
         self.pcm_ingress: PCMIngress | None = None
         self.evaluating_settings_timeline = False
@@ -361,11 +370,11 @@ class RuntimeController:
     def _tag_runtime_setup_redraw() -> None:
         """Refresh Preferences and the compact sidebar setup status."""
 
-        window_manager = getattr(bpy.context, "window_manager", None)
+        window_manager = bpy.context.window_manager
         if window_manager is None:
             return
         for window in window_manager.windows:
-            screen = getattr(window, "screen", None)
+            screen = window.screen
             if screen is None:
                 continue
             for area in screen.areas:
@@ -831,6 +840,25 @@ class RuntimeController:
         self.active_stream = stream
         self._set_status(scene, "STREAM_STARTING", "Preparing audio inference")
 
+    def _selected_channel_snapshot(
+        self, scene: bpy.types.Scene
+    ) -> SelectedChannelSnapshot | None:
+        """Record invalid input and clear its diagnostic when validation recovers."""
+
+        try:
+            source = selected_channel_snapshot(scene)
+        except (OSError, RuntimeError, ValueError) as exc:
+            self.observed_selected_sources[scene.name] = InvalidSelectedChannel(str(exc))
+            raise
+        previous = self.observed_selected_sources.get(scene.name)
+        if (
+            isinstance(previous, InvalidSelectedChannel)
+            and scene.audio2face.status == "ERROR"
+            and scene.audio2face.status_message == previous.message
+        ):
+            self._set_status(scene, "MODEL_READY", "Selected channel settings validated")
+        return source
+
     def _ensure_selected_track(self, scene: bpy.types.Scene) -> None:
         """Upload all sound strips on the configured channel as one timeline."""
 
@@ -842,7 +870,7 @@ class RuntimeController:
             or self.loaded_signature is None
         ):
             return
-        source = selected_channel_snapshot(scene)
+        source = self._selected_channel_snapshot(scene)
         self.observed_selected_sources[scene.name] = source
         if source is None or self.selected_track is not None:
             return
@@ -897,13 +925,10 @@ class RuntimeController:
         if track is not None and track.scene_name != scene.name:
             return
         try:
-            source = selected_channel_snapshot(scene)
-            previous = self.observed_selected_sources.get(
-                scene.name, track.source if track is not None else None
-            )
+            source = self._selected_channel_snapshot(scene)
+            previous = self.observed_selected_sources.get(scene.name)
             if source == previous:
                 return
-            self.observed_selected_sources[scene.name] = source
             self.selected_audio_changed(scene)
         except (OSError, RuntimeError, ValueError) as exc:
             self.selected_audio_failed(scene, str(exc))
@@ -1024,15 +1049,16 @@ class RuntimeController:
         track = self.selected_track
         if track is not None and track.scene_name == scene.name:
             self._release_active_bake()
-            source = selected_channel_snapshot(scene)
+            source = self._selected_channel_snapshot(scene)
             self.observed_selected_sources[scene.name] = source
             restart = source is not None
             self._cancel_selected_track(track, restart=restart)
-            self._set_status(
-                scene,
-                "MODEL_READY",
-                "Selected channel replacement queued" if restart else "Selected channel unloaded",
-            )
+            if restart or scene.audio2face.status != "ERROR":
+                self._set_status(
+                    scene,
+                    "MODEL_READY",
+                    "Selected channel replacement queued" if restart else "Selected channel unloaded",
+                )
             return
         self._ensure_selected_track(scene)
 
@@ -1253,7 +1279,7 @@ class RuntimeController:
         ):
             return
         try:
-            if selected_channel_snapshot(scene) != track.source:
+            if self._selected_channel_snapshot(scene) != track.source:
                 return
             self._apply_selected_cache(scene, track)
         except (LiveStreamError, RuntimeError, ValueError) as exc:
@@ -1321,7 +1347,7 @@ class RuntimeController:
         settings = scene.audio2face
         if settings.input_mode != "SELECTED":
             raise SidecarError("animation baking requires Selected Channel mode")
-        source = selected_channel_snapshot(scene)
+        source = self._selected_channel_snapshot(scene)
         if source is None:
             raise SidecarError("the selected channel has no sound strips")
         model_schema = self.model_schema
@@ -3031,7 +3057,7 @@ def _depsgraph_update_post_handler(
         for strip in nla_track.strips
     )
     if any(
-        getattr(update.id, "original", update.id) == action
+        update.id.original == action
         for update in depsgraph.updates
         for action in actions
         if action is not None

@@ -148,6 +148,151 @@ def _make_shape_key_target(
     return target
 
 
+
+def _write_two_stream_audio(path: Path) -> None:
+    """Write two distinct PCM tracks in Matroska without an ffmpeg dependency."""
+
+    def element(identifier: str, payload: bytes) -> bytes:
+        size = len(payload)
+        width = next(
+            width for width in range(1, 9)
+            if size < (1 << (7 * width)) - 1
+        )
+        return (
+            bytes.fromhex(identifier)
+            + (size | (1 << (7 * width))).to_bytes(width, "big")
+            + payload
+        )
+
+    def integer(identifier: str, value: int) -> bytes:
+        return element(
+            identifier, value.to_bytes(max(1, (value.bit_length() + 7) // 8), "big"),
+        )
+
+    header = element(
+        "1A45DFA3",
+        integer("4286", 1) + integer("42F7", 1) + integer("42F2", 4)
+        + integer("42F3", 8) + element("4282", b"matroska")
+        + integer("4287", 4) + integer("4285", 2),
+    )
+    info = element(
+        "1549A966",
+        integer("2AD7B1", 1_000_000)
+        + element("4489", struct.pack(">d", 1000.0))
+        + element("4D80", b"Audio2Face smoke")
+        + element("5741", b"Audio2Face smoke"),
+    )
+    tracks, blocks = [], []
+    for number, value in ((1, 8192), (2, -16384)):
+        audio = element(
+            "E1", element("B5", struct.pack(">d", 24_000.0))
+            + integer("9F", 1) + integer("6264", 16),
+        )
+        tracks.append(element(
+            "AE", integer("D7", number) + integer("73C5", number)
+            + integer("83", 2) + element("86", b"A_PCM/INT/LIT") + audio,
+        ))
+        blocks.append(element(
+            "A3", bytes([0x80 | number]) + struct.pack(">hB", 0, 0x80)
+            + struct.pack("<h", value) * 24_000,
+        ))
+    segment = (
+        info + element("1654AE6B", b"".join(tracks))
+        + element("1F43B675", integer("E7", 0) + b"".join(blocks))
+    )
+    path.write_bytes(header + element("18538067", segment))
+
+
+def _assert_selected_media_streams(scene: bpy.types.Scene, directory: Path) -> None:
+    """Use Blender's chosen media stream, including after packing its source."""
+
+    media_path = directory / "two-audio-streams.mka"
+    _write_two_stream_audio(media_path)
+    editor = scene.sequence_editor
+    strips = [
+        editor.strips.new_sound(
+            name=f"Media stream {index}", filepath=str(media_path),
+            channel=index + 5, frame_start=15, stream=index,
+        )
+        for index in range(2)
+    ]
+
+    def decode(index: int) -> tuple[float, ...]:
+        scene.audio2face.audio_channel = index + 5
+        snapshot = selected_channel_snapshot(scene)
+        assert snapshot is not None and len(snapshot.clips) == 1
+        assert (snapshot.frame_start, snapshot.frame_end) == (15, 38)
+        with ChannelAudioSource(
+            snapshot, output_sample_rate=24_000, chunk_frames=257,
+        ) as source:
+            payload = b"".join(source)
+        assert len(payload) == 24_000 * 4
+        samples = struct.unpack("<24000f", payload)
+        expected = (8192, -16384)[index] / 32767
+        assert max(abs(value - expected) for value in samples) < 2.0e-5, (
+            "selected media stream", index, min(samples), max(samples), expected,
+        )
+        return samples
+
+    try:
+        original = [decode(index) for index in range(2)]
+        for strip in strips:
+            strip.sound.pack()
+            assert strip.sound.packed_file is not None
+        media_path.unlink()
+        for index, expected in enumerate(original):
+            assert decode(index) == expected
+    finally:
+        for strip in strips:
+            editor.strips.remove(strip)
+
+
+
+def _assert_resampled_trim_samples(scene: bpy.types.Scene, directory: Path) -> None:
+    """Varying samples reveal native writer tail corruption hidden by silence."""
+
+    import aud
+
+    path = directory / "varying.wav"
+    values = [int(12000 * math.sin(i / 37) + 3000 * math.cos(i / 11)) for i in range(48_000)]
+    with wave.open(str(path), "wb") as source:
+        source.setnchannels(1)
+        source.setsampwidth(2)
+        source.setframerate(48_000)
+        source.writeframes(struct.pack("<48000h", *values))
+    reference = aud.Sound(str(path)).rechannel(aud.CHANNELS_MONO).resample(16_000, 2).data()[:, 0]
+    strip = scene.sequence_editor.strips.new_sound(
+        name="Resampled trim", filepath=str(path), channel=1, frame_start=5,
+    )
+    scene.audio2face.audio_channel = 1
+    try:
+        for left_trim, right_trim in ((2, 3), (0, 0)):
+            strip.left_handle_offset = left_trim
+            strip.right_handle_offset = right_trim
+            snapshot = selected_channel_snapshot(scene)
+            assert snapshot is not None
+            expected_count = round((24 - left_trim - right_trim) * 16_000 / 24)
+            for chunk_frames in (257, 4096):
+                with ChannelAudioSource(
+                    snapshot, output_sample_rate=16_000, chunk_frames=chunk_frames,
+                ) as source:
+                    payload = b"".join(source)
+                assert len(payload) == expected_count * 4
+                for index, (actual,) in enumerate(struct.iter_unpack("<f", payload)):
+                    point = snapshot.clips[0].source_start * 16_000 + index
+                    left = math.floor(point + 1.0e-7)
+                    fraction = max(0.0, point - left)
+                    previous = float(reference[left])
+                    following = float(reference[left + 1]) if left + 1 < len(reference) else 0.0
+                    expected = previous + (following - previous) * fraction
+                    assert abs(actual - expected) < 1.0e-7, (
+                        "resampled trim", left_trim, right_trim, chunk_frames,
+                        index, actual, expected,
+                    )
+    finally:
+        scene.sequence_editor.strips.remove(strip)
+
+
 def main() -> None:
     assert bpy.app.version[:2] == (5, 2), (
         f"this smoke test targets Blender 5.2, got {bpy.app.version_string}"
@@ -405,16 +550,16 @@ def main() -> None:
                 samples = struct.unpack(f"<{frame_count}f", payload)
                 expected = 8192 / 32767
                 # Check every decoder window and the final sample. The native
-                # sinc resampler rings briefly at an untrimmed source's start;
-                # those first 4 ms must remain audible and within bounded gain.
+                # sinc resampler rings briefly at both ends of an untrimmed
+                # source; those 4 ms must stay audible within bounded gain.
                 for start, end in ((0, gap_start), (gap_end, frame_count)):
                     edge = 64 if sample_rate == 16_000 and start == gap_end else 0
                     if edge:
                         assert all(
                             expected * 0.5 < value < expected * 1.5
-                            for value in samples[start:start + edge]
+                            for value in samples[start:start + edge] + samples[end - edge:end]
                         )
-                    audible = samples[start + edge:end]
+                    audible = samples[start + edge:end - edge]
                     assert max(
                         abs(value - expected) for value in audible
                     ) < 1.0e-5, (sample_rate, start, end, min(audible))
@@ -422,6 +567,20 @@ def main() -> None:
                 return samples
 
             decoded = {rate: decode_channel(rate) for rate in (24_000, 16_000)}
+            audible_snapshot = selected_channel_snapshot(scene)
+            native_channel = next(
+                channel for channel in sequence_editor.channels if channel.number == 3
+            )
+            native_channel.mute = True
+            muted_snapshot = selected_channel_snapshot(scene)
+            assert muted_snapshot is not None and muted_snapshot != audible_snapshot
+            assert all(clip.muted for clip in muted_snapshot.clips)
+            assert selected_audio_frame_span(scene) == (14, 83)
+            with ChannelAudioSource(muted_snapshot, output_sample_rate=16_000) as source:
+                assert b"".join(source) == bytes(source.metadata.output_frames * 4)
+            native_channel.mute = False
+            assert selected_channel_snapshot(scene) == audible_snapshot
+            assert decode_channel(16_000) == decoded[16_000]
             sounds = {strip.sound.as_pointer(): strip.sound for strip in user_strips}
             for sound in sounds.values():
                 sound.pack()
@@ -451,6 +610,8 @@ def main() -> None:
             assert scene.frame_end == original_frame_end
             for strip in user_strips:
                 sequence_editor.strips.remove(strip)
+            _assert_selected_media_streams(scene, Path(temporary_directory))
+            _assert_resampled_trim_samples(scene, Path(temporary_directory))
         model_schema = {
             "channels": MODEL_CHANNELS.copy(),
             "audio2face_defaults": MODEL_DEFAULTS.copy(),
