@@ -11,6 +11,7 @@ real ``bpy`` RNA registration and multi-object ``ShapeKey.value`` assignment.
 from __future__ import annotations
 
 import math
+import struct
 import sys
 import tempfile
 import wave
@@ -38,9 +39,9 @@ from audio2face.shape_keys import (  # noqa: E402
 )
 from audio2face import runtime  # noqa: E402
 from audio2face.selected_audio_timeline import (  # noqa: E402
-    SELECTED_AUDIO_STRIP_NAME,
-    is_selected_audio_strip,
+    ChannelAudioSource,
     selected_audio_frame_span,
+    selected_channel_snapshot,
 )
 from audio2face.preferences import A2FAddonPreferences  # noqa: E402
 from audio2face.properties import (  # noqa: E402
@@ -211,13 +212,15 @@ def main() -> None:
             if call[0].endswith(".prop") and len(call.args) > 1
         }
         assert {
-            "audio_path",
+            "audio_channel",
             "input_strength",
             "auto_audio2emotion",
             "a2e_emotion_strength",
         } <= (
             visible_properties
         )
+        assert "audio_path" not in visible_properties
+        assert "audio_first_frame" not in visible_properties
         notice_layout = Mock()
         draw_wrapped_label(
             notice_layout,
@@ -348,38 +351,106 @@ def main() -> None:
             with wave.open(str(wav_path), "wb") as wav_file:
                 wav_file.setnchannels(1)
                 wav_file.setsampwidth(2)
-                wav_file.setframerate(16_000)
-                wav_file.writeframes(bytes(16_000 * 2))
+                wav_file.setframerate(24_000)
+                wav_file.writeframes(struct.pack("<h", 8192) * 24_000)
+            scene.render.fps = 24
+            scene.render.fps_base = 1.0
             scene.frame_start = 7
             original_frame_end = scene.frame_end
-            settings.audio_first_frame = 12
-            settings.audio_path = str(wav_path)
-            _assert_native_transport_handlers(registered=True)
-            sequence_editor = scene.sequence_editor
-            assert sequence_editor is not None
-            owned_strips = [
-                strip
-                for strip in sequence_editor.strips
-                if is_selected_audio_strip(strip)
-            ]
-            assert len(owned_strips) == 1
-            selected_strip = owned_strips[0]
-            assert selected_strip.name == SELECTED_AUDIO_STRIP_NAME
-            assert selected_strip.content_start == 12
-            assert selected_audio_frame_span(scene) == (
-                12,
-                int(selected_strip.content_end) - 1,
+            original_sync_mode = scene.sync_mode
+            sequence_editor = scene.sequence_editor_create()
+            first_strip = sequence_editor.strips.new_sound(
+                name="Dialogue A", filepath=str(wav_path), channel=3, frame_start=12,
             )
-            assert selected_strip.left_handle_offset == 0.0
-            assert selected_strip.right_handle_offset == 0.0
-            assert scene.sync_mode == "AUDIO_SYNC"
+            first_strip.left_handle_offset = 2.0
+            first_strip.right_handle_offset = 3.0
+            second_strip = sequence_editor.strips.new_sound(
+                name="Dialogue B", filepath=str(wav_path), channel=3, frame_start=60,
+            )
+            other_strip = sequence_editor.strips.new_sound(
+                name="Other Dialogue", filepath=str(wav_path), channel=4, frame_start=6,
+            )
+            other_strip.volume = 0.5
+            user_strips = (first_strip, second_strip, other_strip)
+            original_strip_order = list(sequence_editor.strips)
+            original_strips = [
+                (
+                    strip.name, strip.channel, strip.content_start, strip.content_end,
+                    strip.left_handle_offset, strip.right_handle_offset,
+                )
+                for strip in user_strips
+            ]
+            settings.audio_channel = 3
+            _assert_native_transport_handlers(registered=True)
+            assert selected_audio_frame_span(scene) == (
+                int(first_strip.content_start + first_strip.left_handle_offset),
+                int(second_strip.content_end - second_strip.right_handle_offset) - 1,
+            )
+
+            def decode_channel(sample_rate: int) -> tuple[float, ...]:
+                snapshot = selected_channel_snapshot(scene)
+                assert snapshot is not None
+                assert (snapshot.frame_start, snapshot.frame_end) == (14, 83)
+                assert len(snapshot.clips) == 2
+                frame_count = round(70 * sample_rate / 24)
+                gap_start = round(19 * sample_rate / 24)
+                gap_end = round(46 * sample_rate / 24)
+                with ChannelAudioSource(
+                    snapshot, output_sample_rate=sample_rate,
+                    chunk_frames=1024 if sample_rate == 24_000 else 257,
+                ) as source:
+                    assert source.metadata.output_frames == frame_count
+                    payload = b"".join(source)
+                assert len(payload) == frame_count * 4
+                samples = struct.unpack(f"<{frame_count}f", payload)
+                expected = 8192 / 32767
+                # Check every decoder window and the final sample. The native
+                # sinc resampler rings briefly at an untrimmed source's start;
+                # those first 4 ms must remain audible and within bounded gain.
+                for start, end in ((0, gap_start), (gap_end, frame_count)):
+                    edge = 64 if sample_rate == 16_000 and start == gap_end else 0
+                    if edge:
+                        assert all(
+                            expected * 0.5 < value < expected * 1.5
+                            for value in samples[start:start + edge]
+                        )
+                    audible = samples[start + edge:end]
+                    assert max(
+                        abs(value - expected) for value in audible
+                    ) < 1.0e-5, (sample_rate, start, end, min(audible))
+                assert all(value == 0.0 for value in samples[gap_start:gap_end])
+                return samples
+
+            decoded = {rate: decode_channel(rate) for rate in (24_000, 16_000)}
+            sounds = {strip.sound.as_pointer(): strip.sound for strip in user_strips}
+            for sound in sounds.values():
+                sound.pack()
+                assert sound.packed_file is not None
+            wav_path.unlink()
+            for rate, expected in decoded.items():
+                assert decode_channel(rate) == expected
+
+            settings.input_mode = "STREAM"
+            settings.input_mode = "SELECTED"
+            settings.audio_channel = 4
+            assert selected_audio_frame_span(scene) == (
+                int(other_strip.content_start), int(other_strip.content_end) - 1,
+            )
+            settings.audio_channel = 2
+            assert selected_audio_frame_span(scene) is None
+            assert list(sequence_editor.strips) == original_strip_order
+            assert [
+                (
+                    strip.name, strip.channel, strip.content_start, strip.content_end,
+                    strip.left_handle_offset, strip.right_handle_offset,
+                )
+                for strip in user_strips
+            ] == original_strips
+            assert scene.sync_mode == original_sync_mode
             assert scene.frame_start == 7
             assert scene.frame_end == original_frame_end
-            settings.audio_path = ""
-            assert not any(
-                is_selected_audio_strip(strip)
-                for strip in sequence_editor.strips
-            )
+            for strip in user_strips:
+                sequence_editor.strips.remove(strip)
         model_schema = {
             "channels": MODEL_CHANNELS.copy(),
             "audio2face_defaults": MODEL_DEFAULTS.copy(),
