@@ -11,6 +11,7 @@ from .properties import (
     reset_model_tuning,
 )
 from .runtime import RuntimeController, get_controller
+from .selected_audio_timeline import selected_audio_frame_span
 from .shape_keys import supports_shape_keys
 from .sidecar import Lifecycle
 
@@ -203,7 +204,7 @@ class A2F_OT_bake_animation(bpy.types.Operator):
     bl_idname = "a2f.bake_animation"
     bl_label = "Bake Shape Key Animation"
     bl_description = (
-        "Sample the selected WAV's continuous result at each Blender frame, "
+        "Sample the selected channel's continuous result at each Blender frame, "
         "then write native Shape Key animation"
     )
 
@@ -212,10 +213,12 @@ class A2F_OT_bake_animation(bpy.types.Operator):
         settings = context.scene.audio2face
         controller = get_controller()
         if settings.input_mode != "SELECTED":
-            cls.poll_message_set("baking requires Selected Audio mode")
+            cls.poll_message_set("baking requires Selected Channel mode")
             return False
-        if not settings.audio_path:
-            cls.poll_message_set("select a WAV file first")
+        if selected_audio_frame_span(context.scene) is None:
+            cls.poll_message_set(
+                "add sound strips to the selected Sequencer channel first"
+            )
             return False
         if controller.client.state != Lifecycle.RUNNING or not controller.negotiated:
             cls.poll_message_set("start the Audio2Face worker first")

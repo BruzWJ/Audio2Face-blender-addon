@@ -35,7 +35,7 @@ STATUS_ITEMS = (
     ("STREAM_STARTING", "Starting Stream", "Preparing incremental PCM inference"),
     ("STREAMING", "Streaming", "Incremental PCM is driving model channel values"),
     ("STREAM_ENDING", "Ending Stream", "Draining the stream's final model frames"),
-    ("TRACK_UPLOADING", "Uploading Audio", "Uploading the selected WAV"),
+    ("TRACK_UPLOADING", "Uploading Audio", "Uploading the selected channel audio"),
     ("TRACK_PREPARING", "Preparing Audio", "Rendering continuous inference"),
     ("BAKING", "Baking", "Generating Blender-timeline Shape Key frames"),
     ("STOPPING", "Stopping", "Worker is shutting down"),
@@ -170,89 +170,22 @@ def _preferred_emotion_updated(
     _refresh_inference(scene)
 
 
-def _configure_selected_audio_timeline(
-    settings: bpy.types.PropertyGroup,
-    scene: bpy.types.Scene,
-) -> tuple[int, int] | None:
-    from .runtime import get_controller
-    from .selected_audio_timeline import (
-        configure_selected_audio,
-        remove_selected_audio_strips,
-    )
-
-    if not settings.audio_path:
-        return None
-    audio_path = bpy.path.abspath(settings.audio_path)
-    try:
-        frame_span = configure_selected_audio(
-            scene,
-            audio_path,
-            first_frame=settings.audio_first_frame,
-        )
-    except (OSError, RuntimeError, ValueError) as exc:
-        message = str(exc)
-        try:
-            remove_selected_audio_strips(scene)
-        except (OSError, RuntimeError, ValueError) as cleanup_exc:
-            message = f"{message}; could not remove selected audio strip: {cleanup_exc}"
-        get_controller().selected_audio_failed(scene, message)
-        return None
-    return frame_span
-
-
-def _audio_path_updated(
-    settings: bpy.types.PropertyGroup,
+def _audio_channel_updated(
+    _settings: bpy.types.PropertyGroup,
     context: bpy.types.Context,
 ) -> None:
-    """Replace the Selected WAV source and its native sound strip."""
+    """Refresh inference from the selected existing Sequencer channel."""
 
     from .runtime import get_controller
-    from .selected_audio_timeline import remove_selected_audio_strips
 
     scene = _update_scene(context)
     if scene is None:
         return
     controller = get_controller()
-    if not settings.audio_path:
-        message: str | None = None
-        try:
-            controller.selected_audio_changed(scene)
-        except (OSError, RuntimeError, ValueError) as exc:
-            message = str(exc)
-        try:
-            remove_selected_audio_strips(scene)
-        except (OSError, RuntimeError, ValueError) as cleanup_exc:
-            cleanup_message = f"could not remove selected audio strip: {cleanup_exc}"
-            message = (
-                cleanup_message if message is None else f"{message}; {cleanup_message}"
-            )
-        if message is not None:
-            controller.selected_audio_failed(scene, message)
-        return
-    if _configure_selected_audio_timeline(settings, scene) is None:
-        return
     try:
         controller.selected_audio_changed(scene)
     except (OSError, RuntimeError, ValueError) as exc:
         controller.selected_audio_failed(scene, str(exc))
-
-
-def _audio_first_frame_updated(
-    settings: bpy.types.PropertyGroup,
-    context: bpy.types.Context,
-) -> None:
-    """Move the Selected WAV and recompute the current Blender frame."""
-
-    from .runtime import get_controller
-
-    scene = _update_scene(context)
-    if scene is None:
-        return
-    if _configure_selected_audio_timeline(settings, scene) is None:
-        return
-    controller = get_controller()
-    controller.invalidate_selected_settings(scene)
-    controller.request_selected_frame(scene)
 
 
 def _selected_frame_mapping_updated(
@@ -270,32 +203,17 @@ def _selected_frame_mapping_updated(
 
 
 def _input_mode_updated(
-    settings: bpy.types.PropertyGroup,
+    _settings: bpy.types.PropertyGroup,
     context: bpy.types.Context,
 ) -> None:
-    """Enter or leave Selected WAV ownership explicitly."""
+    """Switch inference inputs without changing the user's Sequencer."""
 
     from .runtime import get_controller
-    from .selected_audio_timeline import remove_selected_audio_strips
 
     scene = _update_scene(context)
     if scene is None:
         return
-    controller = get_controller()
-    controller.input_mode_changed(scene)
-    if settings.input_mode == "SELECTED":
-        _audio_first_frame_updated(settings, context)
-        return
-    try:
-        remove_selected_audio_strips(scene)
-    except (OSError, RuntimeError, ValueError) as cleanup_exc:
-        cleanup_message = f"could not remove selected audio strip: {cleanup_exc}"
-        message = (
-            f"{settings.status_message}; {cleanup_message}"
-            if settings.status == "ERROR"
-            else cleanup_message
-        )
-        controller.selected_audio_failed(scene, message)
+    get_controller().input_mode_changed(scene)
 
 
 def _target_object_poll(
@@ -355,25 +273,26 @@ class A2FMixedEmotionItem(bpy.types.PropertyGroup):
 class A2FSceneSettings(bpy.types.PropertyGroup):
     input_mode: EnumProperty(
         name="Input Mode",
-        description="Play and bake a selected WAV or receive incremental PCM",
+        description="Read a Sequencer channel or receive incremental PCM",
         items=(
-            ("SELECTED", "Selected WAV", "Play or bake a selected WAV file"),
+            (
+                "SELECTED",
+                "Selected Channel",
+                "Use all sound strips on the selected Sequencer channel",
+            ),
             ("STREAM", "Stream", "Drive Shape Keys from incremental mono float PCM"),
         ),
         default="SELECTED",
         update=_input_mode_updated,
     )
-    audio_path: StringProperty(
-        name="Speech WAV",
-        description="WAV played or baked in Selected mode",
-        subtype="FILE_PATH",
-        update=_audio_path_updated,
-    )
-    audio_first_frame: IntProperty(
-        name="First Frame",
-        description="Blender timeline frame where the selected WAV begins",
+    audio_channel: IntProperty(
+        name="Selected Channel",
+        description="Sequencer channel whose sound strips provide the audio input",
         default=1,
-        update=_audio_first_frame_updated,
+        min=1,
+        max=128,
+        options=set(),
+        update=_audio_channel_updated,
     )
     input_strength: FloatProperty(
         name="Input Strength",

@@ -41,7 +41,6 @@ def _draw_audio_playback(
                 text="Bake Shape Key Animation",
                 icon="ACTION",
             )
-        playback_box.prop(settings, "audio_first_frame")
         playback_box.prop(settings, "prediction_delay", slider=True)
         return
 
@@ -234,14 +233,14 @@ class A2F_PT_main(bpy.types.Panel):
         input_box.label(text="Inputs", icon="SOUND")
         input_mode_row = input_box.row(align=True)
         input_mode_row.prop(settings, "input_mode", expand=True)
+        if settings.input_mode == "SELECTED":
+            input_box.prop(settings, "audio_channel")
         _draw_audio_playback(
             input_box,
             settings,
             controller,
             context.scene,
         )
-        if settings.input_mode == "SELECTED":
-            input_box.prop(settings, "audio_path")
 
         _draw_model_tuning(layout, settings)
 
