@@ -302,6 +302,42 @@ def _assert_resampled_trim_samples(scene: bpy.types.Scene, directory: Path) -> N
         scene.sequence_editor.strips.remove(strip)
 
 
+def _assert_decoder_eof_boundaries(scene: bpy.types.Scene, directory: Path) -> None:
+    """Exercise native FFmpeg's short-buffer and zero-length EOF boundaries."""
+
+    import aud
+
+    editor = scene.sequence_editor
+    scene.audio2face.audio_channel = 1
+    for count in (1, 31, 4096, 8192):
+        path = directory / f"boundary-{count}.wav"
+        with wave.open(str(path), "wb") as source:
+            source.setnchannels(1)
+            source.setsampwidth(2)
+            source.setframerate(16_000)
+            source.writeframes(struct.pack("<h", 8192) * count)
+        reference = aud.Sound(str(path)).rechannel(aud.CHANNELS_MONO).resample(16_000, 2).data()[:, 0]
+        assert len(reference) == count
+        strip = editor.strips.new_sound(
+            name="EOF boundary", filepath=str(path), channel=1, frame_start=1,
+        )
+        try:
+            snapshot = selected_channel_snapshot(scene)
+            with ChannelAudioSource(snapshot) as source:
+                payload = b"".join(source)
+            samples = struct.unpack(f"<{len(payload) // 4}f", payload)
+            clip = snapshot.clips[0]
+            visible = min(count, round(
+                (clip.frame_end - clip.frame_start) * 16_000 * snapshot.fps_base / snapshot.fps
+            ))
+            assert max(abs(value - float(expected)) for value, expected in zip(samples, reference[:visible])) < 1.0e-6, (
+                count, samples[:8], reference[:8], snapshot,
+            )
+            assert not any(samples[visible:])
+        finally:
+            editor.strips.remove(strip)
+
+
 def main() -> None:
     assert bpy.app.version[:2] == (5, 2), (
         f"this smoke test targets Blender 5.2, got {bpy.app.version_string}"
@@ -635,6 +671,7 @@ def main() -> None:
             assert scene.frame_end == original_frame_end
             for strip in user_strips:
                 sequence_editor.strips.remove(strip)
+            _assert_decoder_eof_boundaries(scene, Path(temporary_directory))
             _assert_selected_media_streams(scene, Path(temporary_directory))
             _assert_resampled_trim_samples(scene, Path(temporary_directory))
         model_schema = {

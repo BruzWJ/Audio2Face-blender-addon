@@ -158,7 +158,10 @@ applied when combining the audio. Strips must have normal playback speed;
 retiming and audio modifiers must be rendered to audio before using that source.
 The evaluated Sound datablock supplies Blender's native decoder, preserving its
 selected media stream and packed audio. The decoder writes temporary mono float
-WAV files, and the source closes and removes them when finished. A bounded reader
+WAV files, and the source closes and removes them when finished. Native decoding
+adds a bounded zero tail and finishes within a buffer to avoid FFmpeg's empty
+EOF write failure; the reader consumes only the requested strip interval.
+A bounded reader
 seeks directly into that known float32 output, preserving fractional strip
 offsets. Blender owns decoding and resampling; there is no second WAV input
 decoder or older-Blender property compatibility path.

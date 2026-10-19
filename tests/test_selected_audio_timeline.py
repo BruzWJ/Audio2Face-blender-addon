@@ -12,6 +12,7 @@ import pytest
 from audio2face.selected_audio_timeline import (
     _AudioClipReader,
     ChannelAudioSource,
+    MAX_OUTPUT_FRAMES,
     SelectedAudioTimelineError,
     frame_to_audio_sample,
     frames_per_second,
@@ -44,6 +45,7 @@ class _Factory:
         self.samples = samples
         self.paths: list[Path] = []
         self.end = 0.0
+        self.padded = False
 
     def rechannel(self, channels: int) -> _Factory:
         assert channels == 1
@@ -55,7 +57,13 @@ class _Factory:
 
     def limit(self, start: float, end: float) -> _Factory:
         assert start == 0.0
-        self.end = end
+        # aud.Sound.limit accepts a C float, including for long source trims.
+        self.end = struct.unpack("f", struct.pack("f", end))[0]
+        return self
+
+    def join(self, silence: SimpleNamespace) -> _Factory:
+        assert silence.rate == 8000
+        self.padded = True
         return self
 
     def write(
@@ -68,7 +76,12 @@ class _Factory:
         self.paths.append(Path(path))
         if self.samples is None:
             raise _AudioError("unsupported source")
-        samples = self.samples[:round(self.end * rate)]
+        count = int(self.end * rate)
+        samples = self.samples[:count]
+        if self.padded:
+            samples += [0.0] * (count - len(samples))
+        if not len(samples) % buffer or (len(samples) < buffer and len(samples) % 32):
+            raise _AudioError("filling the audio frame failed with ffmpeg")
         _float_wav(Path(path), samples)
 
 
@@ -160,6 +173,7 @@ def _blender(monkeypatch: pytest.MonkeyPatch) -> None:
     ))
     monkeypatch.setitem(sys.modules, "aud", SimpleNamespace(
         error=_AudioError, CHANNELS_MONO=1, FORMAT_FLOAT32=2, CONTAINER_WAV=3, CODEC_PCM=4,
+        Sound=SimpleNamespace(silence=lambda rate: SimpleNamespace(rate=rate)),
     ))
 
 
@@ -386,9 +400,27 @@ def test_native_factory_is_lazy_bounded_and_cleaned_up(packed: bool) -> None:
     assert strip.sound.events == (["refresh", "evaluate"] if packed else ["evaluate"])
     assert first == selected_channel_snapshot(scene)
     factory = strip.sound.factory
-    assert factory.end == pytest.approx(0.25 + 4096 / 8000)
+    assert 2000 + 4096 < factory.end * 8000 < 2000 + 3 * 4096
     assert len(factory.paths) == 1
     assert not factory.paths[0].exists()
+
+
+@pytest.mark.parametrize("sample_count", [0, 1, 31, 4096, 4097, 8192])
+def test_native_eof_padding_preserves_audio_and_timeline_length(sample_count: int) -> None:
+    strip = _Strip("/voice.wav", duration=12, samples=[0.25] * sample_count)
+    result = _decode(_scene(strip, fps=8))
+    assert result == (0.25,) * sample_count + (0.0,) * (12000 - sample_count)
+    assert len(strip.sound.factory.paths) == 1
+    assert not strip.sound.factory.paths[0].exists()
+
+
+def test_native_decode_padding_stays_within_resource_limit() -> None:
+    strip = _Strip("/long.wav", duration=1, samples=[])
+    strip.sound_offset = -MAX_OUTPUT_FRAMES / 8000
+    with pytest.raises(SelectedAudioTimelineError, match="decoded-audio limit"):
+        _decode(_scene(strip, fps=8))
+    assert strip.sound.events == []
+    assert strip.sound.factory.paths == []
 
 
 @pytest.mark.parametrize(("field", "value", "message"), [

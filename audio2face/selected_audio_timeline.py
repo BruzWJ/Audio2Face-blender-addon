@@ -197,9 +197,16 @@ class _AudioClipReader:
         import aud
         import bpy
 
-        # Keep the native writer's final partial buffer past the strip's audio.
-        end = max(0.0, clip.source_start) + duration + _DECODE_BUFFER_FRAMES / rate
-        if end * rate > MAX_OUTPUT_FRAMES:
+        # Audaspace's FFmpeg writer fails on empty reads at exact buffer
+        # boundaries and on short first buffers. Finish halfway through a
+        # padded buffer, safely beyond the audio and limit()'s float32 rounding.
+        required_frames = (max(0.0, clip.source_start) + duration) * rate
+        decode_frames = (
+            (math.ceil(required_frames / _DECODE_BUFFER_FRAMES) + 1)
+            * _DECODE_BUFFER_FRAMES + _DECODE_BUFFER_FRAMES // 2
+        )
+        # Reserve a final buffer for the native writer's flush.
+        if decode_frames + _DECODE_BUFFER_FRAMES > MAX_OUTPUT_FRAMES:
             raise SelectedAudioTimelineError("sound source trim exceeds the decoded-audio limit")
         self._rate = rate
         self._file = None
@@ -218,7 +225,9 @@ class _AudioClipReader:
                 raise SelectedAudioTimelineError("selected sound has no evaluated audio source")
             # The native factory preserves the chosen media stream and packed
             # audio. Decode once to avoid compressed seeks losing samples.
-            factory.rechannel(aud.CHANNELS_MONO).resample(rate, 2).limit(0.0, end).write(
+            factory.rechannel(aud.CHANNELS_MONO).resample(rate, 2).join(
+                aud.Sound.silence(rate),
+            ).limit(0.0, decode_frames / rate).write(
                 path, rate, aud.CHANNELS_MONO, aud.FORMAT_FLOAT32,
                 aud.CONTAINER_WAV, aud.CODEC_PCM, 0, _DECODE_BUFFER_FRAMES,
             )
