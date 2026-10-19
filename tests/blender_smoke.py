@@ -53,7 +53,11 @@ from audio2face.properties import (  # noqa: E402
     inference_settings,
 )
 from audio2face.ui_text import draw_wrapped_label  # noqa: E402
-from audio2face.ui import A2F_PT_main  # noqa: E402
+from audio2face.ui import (  # noqa: E402
+    A2F_MT_audio_channels,
+    A2F_PT_main,
+    _audio_channel_choices,
+)
 
 
 MODEL_CHANNELS = ["jawOpen", *(f"modelChannel{index}" for index in range(51))]
@@ -415,13 +419,17 @@ def main() -> None:
             if call[0].endswith(".prop") and len(call.args) > 1
         }
         assert {
-            "audio_channel",
             "input_strength",
             "auto_audio2emotion",
             "a2e_emotion_strength",
         } <= (
             visible_properties
         )
+        assert any(
+            entry.args == ("A2F_MT_audio_channels",)
+            for entry in stale_layout.mock_calls if entry[0].endswith(".menu")
+        )
+        assert "audio_channel" not in visible_properties
         assert "audio_path" not in visible_properties
         assert "audio_first_frame" not in visible_properties
         notice_layout = Mock()
@@ -584,6 +592,28 @@ def main() -> None:
                 for strip in user_strips
             ]
             settings.audio_channel = 3
+            dialogue_channel = sequence_editor.channels[3]
+            original_channel_name = dialogue_channel.name
+            dialogue_channel.name = "Dialogue"
+            assert _audio_channel_choices(scene) == ((3, "3: Dialogue"), (4, "Channel 4"))
+            menu_layout = Mock()
+            A2F_MT_audio_channels.draw(
+                SimpleNamespace(layout=menu_layout), SimpleNamespace(scene=scene),
+            )
+            assert menu_layout.operator.call_count == 2
+            controller = runtime.get_controller()
+            original_changed = controller.selected_audio_changed
+            controller.selected_audio_changed = Mock()
+            try:
+                assert bpy.ops.wm.context_set_int(
+                    data_path="scene.audio2face.audio_channel", value=4,
+                ) == {"FINISHED"}
+                assert settings.audio_channel == 4
+                controller.selected_audio_changed.assert_called_once_with(scene)
+            finally:
+                controller.selected_audio_changed = original_changed
+                settings.audio_channel = 3
+                dialogue_channel.name = original_channel_name
             _assert_native_transport_handlers(registered=True)
             assert selected_channel_frame_span(scene) == (7, original_frame_end)
 

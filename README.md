@@ -180,7 +180,8 @@ single-user when independent animation is required.
 ## Audio modes and playback
 
 **Selected Channel** reads every sound strip on the chosen Video Sequencer
-channel. Arrange and trim audio directly in Blender; the add-on reads the visible
+channel. Its dropdown lists used channels and named empty channels, displaying
+their Blender channel names. Arrange and trim audio directly in Blender; the add-on reads the visible
 strip intervals at their original positions. Inference covers the scene frame
 range and extends to include every selected-channel sound strip. Empty channels
 and timeline regions before, between, or after clips feed silence through the
