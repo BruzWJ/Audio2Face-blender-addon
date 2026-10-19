@@ -74,16 +74,16 @@ def _strip_frame_span(strip: Any) -> tuple[int, int]:
     return int(strip.left_handle), int(strip.right_handle)
 
 
-def selected_audio_frame_span(scene: Any) -> tuple[int, int] | None:
-    """Return the inclusive span of all sound strips on the selected channel."""
+def selected_channel_frame_span(scene: Any) -> tuple[int, int]:
+    """Cover the scene's inclusive range and every selected sound strip."""
 
-    spans = [
-        (start, end) for strip in _channel_strips(scene)
-        for start, end in (_strip_frame_span(strip),) if end > start
-    ]
-    if not spans:
-        return None
-    return min(start for start, _ in spans), max(end for _, end in spans) - 1
+    frame_start, frame_end = int(scene.frame_start), int(scene.frame_end)
+    for strip in _channel_strips(scene):
+        start, end = _strip_frame_span(strip)
+        if end > start:
+            frame_start = min(frame_start, start)
+            frame_end = max(frame_end, end - 1)
+    return frame_start, frame_end
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,22 +112,22 @@ class SelectedChannelSnapshot:
     frame_end: int
 
 
-def selected_channel_snapshot(scene: Any) -> SelectedChannelSnapshot | None:
+def selected_channel_snapshot(scene: Any) -> SelectedChannelSnapshot:
     """Copy selected-channel input settings without touching Blender data.
 
     No audio file is opened or stat'ed here: comparisons run during playback.
-    Muted clips retain their timing and contribute silence to model input.
+    Empty regions and muted clips contribute silence throughout the scene range.
+    Sound strips beyond that range extend the input without changing the scene.
     """
 
     import bpy
 
     strips = _channel_strips(scene)
-    if not strips:
-        return None
+    frame_start, frame_end = selected_channel_frame_span(scene)
     channel = scene.audio2face.audio_channel
     fps, fps_base = int(scene.render.fps), float(scene.render.fps_base)
     rate = frames_per_second(fps, fps_base)
-    channels = scene.sequence_editor.channels
+    channels = scene.sequence_editor.channels if scene.sequence_editor is not None else ()
     channel_muted = any(
         item.number == channel and item.mute
         for item in channels
@@ -171,16 +171,14 @@ def selected_channel_snapshot(scene: Any) -> SelectedChannelSnapshot | None:
             sound=sound,
             scene=scene,
         ))
-    if not clips:
-        return None
     clips.sort(key=lambda clip: (clip.frame_start, clip.frame_end, clip.signature[0]))
     return SelectedChannelSnapshot(
         channel=channel,
         fps=fps,
         fps_base=fps_base,
         clips=tuple(clips),
-        frame_start=min(clip.frame_start for clip in clips),
-        frame_end=max(clip.frame_end for clip in clips) - 1,
+        frame_start=frame_start,
+        frame_end=frame_end,
     )
 
 
@@ -285,8 +283,8 @@ class _AudioClipReader:
 class ChannelAudioSource:
     """One-shot bounded mono f32le stream of a channel's existing timeline.
 
-    The stream begins at its first visible sound-strip frame. Gaps are silence;
-    overlapping strips are summed and clipped to the model's [-1, 1] range.
+    Empty regions, including an entirely empty channel, are silence. Overlapping
+    strips are summed and clipped to the model's [-1, 1] range.
     """
 
     def __init__(
@@ -305,10 +303,9 @@ class ChannelAudioSource:
         self.snapshot = snapshot
         self.chunk_frames = chunk_frames
         self._fps = frames_per_second(snapshot.fps, snapshot.fps_base)
-        output_frames = round(
-            (snapshot.frame_end + 1 - snapshot.frame_start) * output_sample_rate / self._fps
-        )
-        if not 0 < output_frames <= MAX_OUTPUT_FRAMES:
+        timeline_frames = snapshot.frame_end + 1 - snapshot.frame_start
+        output_frames = max(1, round(timeline_frames * output_sample_rate / self._fps))
+        if timeline_frames <= 0 or output_frames > MAX_OUTPUT_FRAMES:
             raise SelectedAudioTimelineError("selected channel duration exceeds the audio limit")
         self.metadata = ChannelAudioMetadata(output_sample_rate, output_frames)
         self._closed = False

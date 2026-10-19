@@ -278,7 +278,7 @@ class A2FSceneSettings(bpy.types.PropertyGroup):
             (
                 "SELECTED",
                 "Selected Channel",
-                "Use all sound strips on the selected Sequencer channel",
+                "Use the selected Sequencer channel, with silence where no sound strips play",
             ),
             ("STREAM", "Stream", "Drive Shape Keys from incremental mono float PCM"),
         ),
@@ -287,7 +287,7 @@ class A2FSceneSettings(bpy.types.PropertyGroup):
     )
     audio_channel: IntProperty(
         name="Selected Channel",
-        description="Sequencer channel whose sound strips provide the audio input",
+        description="Read sound strips on this Sequencer channel; empty timeline regions use silence",
         default=1,
         min=1,
         max=128,

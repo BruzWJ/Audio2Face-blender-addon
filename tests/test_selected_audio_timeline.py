@@ -15,7 +15,7 @@ from audio2face.selected_audio_timeline import (
     SelectedAudioTimelineError,
     frame_to_audio_sample,
     frames_per_second,
-    selected_audio_frame_span,
+    selected_channel_frame_span,
     selected_channel_snapshot,
 )
 
@@ -130,12 +130,15 @@ class _Strip:
         return self.content_end - self.right_handle_offset
 
 
-def _scene(*strips: _Strip, channel: int = 1, fps: int = 24) -> SimpleNamespace:
+def _scene(
+    *strips: _Strip, channel: int = 1, fps: int = 24,
+    frame_start: int = 1, frame_end: int = 1,
+) -> SimpleNamespace:
     return SimpleNamespace(
         audio2face=SimpleNamespace(audio_channel=channel),
         render=SimpleNamespace(fps=fps, fps_base=1.0),
         sequence_editor=SimpleNamespace(strips=list(strips), channels=[]),
-        frame_start=-10, frame_end=200, sync_mode="NONE", view_layers=[object()],
+        frame_start=frame_start, frame_end=frame_end, sync_mode="NONE", view_layers=[object()],
     )
 
 
@@ -162,7 +165,6 @@ def _blender(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _decode(scene: SimpleNamespace, *, chunk_frames: int = 257) -> tuple[float, ...]:
     snapshot = selected_channel_snapshot(scene)
-    assert snapshot is not None
     source = ChannelAudioSource(snapshot, output_sample_rate=8_000, chunk_frames=chunk_frames)
     chunks = list(source)
     assert all(0 < len(chunk) <= chunk_frames * 4 for chunk in chunks)
@@ -192,12 +194,11 @@ def test_channel_span_uses_every_visible_sound_strip_without_mutation() -> None:
     other = _Strip("/other.wav", 1, start=-100, duration=300)
     image = _Strip("/image.png", 3, start=-100, duration=300)
     image.type = "IMAGE"
-    scene = _scene(last, first, other, image, channel=3)
+    scene = _scene(last, first, other, image, channel=3, frame_start=-10, frame_end=200)
     before = [vars(strip).copy() for strip in scene.sequence_editor.strips]
-    assert selected_audio_frame_span(scene) == (-18, 79)
+    assert selected_channel_frame_span(scene) == (-18, 200)
     snapshot = selected_channel_snapshot(scene)
-    assert snapshot is not None
-    assert (snapshot.frame_start, snapshot.frame_end) == (-18, 79)
+    assert (snapshot.frame_start, snapshot.frame_end) == (-18, 200)
     assert [clip.sound for clip in snapshot.clips] == [first.sound, last.sound]
     assert snapshot.clips[0].source_start == pytest.approx(2 / 24)
     assert [vars(strip) for strip in scene.sequence_editor.strips] == before
@@ -206,13 +207,26 @@ def test_channel_span_uses_every_visible_sound_strip_without_mutation() -> None:
         snapshot.frame_start = 1
 
 
-def test_empty_channel_does_not_create_an_editor() -> None:
-    scene = _scene(_Strip("/other.wav", 2))
-    assert selected_audio_frame_span(scene) is None
-    assert selected_channel_snapshot(scene) is None
+def test_empty_channel_streams_scene_range_silence_without_creating_an_editor() -> None:
+    other = _Strip("/other.wav", 2)
+    scene = _scene(other, fps=8, frame_start=-2, frame_end=1)
+    snapshot = selected_channel_snapshot(scene)
+    assert selected_channel_frame_span(scene) == (-2, 1)
+    assert snapshot.clips == ()
+    assert _decode(scene) == (0.0,) * 4000
+    assert other.sound.events == []
     scene.sequence_editor = None
-    assert selected_audio_frame_span(scene) is None
-    assert selected_channel_snapshot(scene) is None
+    assert selected_channel_snapshot(scene) == snapshot
+    assert _decode(scene) == (0.0,) * 4000
+    assert scene.sequence_editor is None
+    scene.frame_end = 2
+    assert selected_channel_snapshot(scene) != snapshot
+    assert _decode(scene) == (0.0,) * 5000
+
+
+def test_sub_sample_scene_duration_still_feeds_one_silent_sample() -> None:
+    scene = _scene(fps=32767, frame_start=1, frame_end=1)
+    assert _decode(scene) == (0.0,)
 
 
 def test_snapshot_tracks_timeline_input_changes() -> None:
@@ -232,7 +246,10 @@ def test_snapshot_tracks_timeline_input_changes() -> None:
     scene.render.fps_base = 1.001
     assert selected_channel_snapshot(scene) != previous
     scene.audio2face.audio_channel = 2
-    assert selected_channel_snapshot(scene) is None
+    empty = selected_channel_snapshot(scene)
+    assert empty.clips == ()
+    assert empty.channel == 2
+    assert (empty.frame_start, empty.frame_end) == (scene.frame_start, scene.frame_end)
 
 
 def test_snapshot_tracks_sound_identity_without_native_evaluation() -> None:
@@ -275,8 +292,35 @@ def test_stream_preserves_gaps_trimmed_content_and_other_channels() -> None:
                samples=[0.125] * 1000 + [0.5] * 1000 + [0.25] * 1000),
         _Strip("/last.wav", start=-1, duration=1, samples=[-0.25] * 1000),
         _Strip("/missing-other-channel.wav", channel=2), fps=8,
+        frame_start=-4, frame_end=-1,
     )
     assert _decode(scene) == (0.5,) * 1000 + (0.0,) * 2000 + (-0.25,) * 1000
+
+
+def test_scene_range_adds_leading_and_trailing_silence_without_using_preview_range() -> None:
+    scene = _scene(
+        _Strip("/voice.wav", start=2, duration=2, samples=[0.5] * 2000),
+        fps=8, frame_start=1, frame_end=5,
+    )
+    snapshot = selected_channel_snapshot(scene)
+    assert (snapshot.frame_start, snapshot.frame_end) == (1, 5)
+    assert _decode(scene) == (0.0,) * 1000 + (0.5,) * 2000 + (0.0,) * 2000
+    scene.use_preview_range = True
+    scene.frame_preview_start, scene.frame_preview_end = 2, 3
+    assert selected_channel_snapshot(scene) == snapshot
+
+
+def test_sound_strips_outside_scene_range_extend_input_and_keep_original_positions() -> None:
+    scene = _scene(
+        _Strip("/before.wav", start=-1, duration=1, samples=[0.25] * 1000),
+        _Strip("/after.wav", start=5, duration=1, samples=[-0.5] * 1000),
+        fps=8, frame_start=1, frame_end=3,
+    )
+    snapshot = selected_channel_snapshot(scene)
+    assert selected_channel_frame_span(scene) == (-1, 5)
+    assert (snapshot.frame_start, snapshot.frame_end) == (-1, 5)
+    assert _decode(scene) == (0.25,) * 1000 + (0.0,) * 5000 + (-0.5,) * 1000
+    assert (scene.frame_start, scene.frame_end) == (1, 3)
 
 
 def test_overlap_gain_muted_clips_and_channel_mute() -> None:
@@ -299,7 +343,7 @@ def test_overlap_gain_muted_clips_and_channel_mute() -> None:
 def test_source_offsets_hard_trim_and_eof_are_silent() -> None:
     strip = _Strip("/voice.wav", start=5, duration=4, samples=[0.25] * 1000 + [0.5] * 1000)
     strip.sound_offset = 0.125
-    scene = _scene(strip, fps=8)
+    scene = _scene(strip, fps=8, frame_start=5, frame_end=8)
     assert _decode(scene) == (0.0,) * 1000 + (0.25,) * 1000 + (0.5,) * 1000 + (0.0,) * 1000
     strip.sound_offset = 0.0
     strip.content_trim_start = 1

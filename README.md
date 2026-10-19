@@ -131,8 +131,8 @@ driver caches.
    Objects**. Selected Channel baking requires at least one target with a matching
    model channel; targets remain optional for a live Stream.
 5. Click **Start Worker**. Blender launches the verified package-local worker,
-   negotiates the protocol, and loads both selected models. When the worker,
-   models, and selected channel audio are ready, Blender uploads that audio once
+   negotiates the protocol, and loads both selected models. When the models
+   are ready, Blender uploads the selected channel once
    and keeps its track prepared independently of media playback.
 6. Configure the saved, animatable **Preferred Emotion** sliders. Any nonzero
    value enables that source; set every value to zero to clear it. **Mixed
@@ -141,7 +141,7 @@ driver caches.
 7. In Selected Channel mode, use Blender's Timeline or Spacebar transport.
    Each native frame change samples the corresponding row from the prepared cache
    and transiently updates matching Shape Keys. Model,
-   emotion, and Preferred Emotion keyframes are evaluated over the sound span;
+   emotion, and Preferred Emotion keyframes are evaluated over the channel span;
    edits revise that animated cache without changing media or worker lifecycle.
    Click **Bake Shape Key Animation** separately when the preview should become
    native Shape Key Actions.
@@ -152,7 +152,7 @@ driver caches.
 
 Installing or enabling the extension does not start the worker. Loading the
 models prepares the GPU/model process but does not start Blender media.
-Selected channel audio readiness creates and retains one prepared track and
+The selected channel creates and retains one prepared track and
 its latest complete render; Blender playback merely selects cached samples.
 The first external PCM chunk instead starts a true sequential Stream operation.
 **Start Worker** and **Stop Worker** alone control the GPU/model process
@@ -181,12 +181,17 @@ single-user when independent animation is required.
 
 **Selected Channel** reads every sound strip on the chosen Video Sequencer
 channel. Arrange and trim audio directly in Blender; the add-on reads the visible
-strip intervals at their original positions and preserves silence between clips.
+strip intervals at their original positions. Inference covers the scene frame
+range and extends to include every selected-channel sound strip. Empty channels
+and timeline regions before, between, or after clips feed silence through the
+normal inference path. Use Preferred Emotion to choose an expression during
+silence; idle movement depends on the loaded model and eye settings. The current
+worker has no automatic blink scheduler. No silent audio file is needed.
 It never creates, moves, renames, or removes sound strips, and leaves the scene's
 sync mode, scene range, and preview range unchanged. There is no separate audio
 start-frame setting.
 
-When both channel audio and loaded models are ready, the add-on decodes,
+When the models are loaded, the add-on decodes,
 downmixes, resamples, and combines the channel audio into a persistent prepared
 track. Audio from other Sequencer channels is excluded from inference. Blender's
 native playback still follows its own Sequencer playback settings. Input honors
@@ -198,14 +203,19 @@ Blender's Timeline and Spacebar are the Selected Channel transport controls.
 Blender's current frame maps to one audio sample in the completed track cache.
 Pause freezes it, scrubbing samples it immediately, and a native range loop wraps
 sound and facial values together. The worker has no play, pause, loop, or
-seconds-position state. Frames outside the channel's sound span are neutral.
+seconds-position state. Frames outside the combined scene and channel span are
+neutral. The preview range only controls Blender playback; it does not change
+the inference span.
 
 Changing model tuning, emotion tuning, Preferred Emotion, or their keyframes
 queues a newer continuous render revision. Operator-backed Graph Editor and
 Dope Sheet transforms finish before Blender scans the values at native frames.
 Numeric edits may overlap a background scan, so temporary frame evaluation
 preserves values waiting to be inserted or updated as keys instead of restoring
-the old FCurve value over them. Editing an Action invalidates the complete
+the old FCurve value over them. Pending slider edits at a paused integer frame
+also enter the rendered settings timeline, while other frames keep their FCurve
+values. This applies to silent regions and empty channels too.
+Editing an Action invalidates the complete
 schedule, so future FCurve edits are included even when the current value is
 unchanged. A newer revision supersedes older work without canceling the resident
 track, and a completed revision is published atomically; native playback keeps
@@ -215,10 +225,10 @@ seek inside native transport. The requested current-frame sample is emitted
 from the new continuous result before its cache batches, so paused preview and
 bake remain identical.
 
-**Bake Shape Key Animation** is asynchronous and separate from playback. From
-the first selected-channel strip's visible start through the last strip's
-inclusive visible end, it samples the same published cache used by preview and
-writes LINEAR Shape Key curves into an add-on-owned native Action. Bake does not upload the audio, run stateless
+**Bake Shape Key Animation** is asynchronous and separate from playback. Across
+the combined scene and channel span, including silent regions, it samples the
+same published cache used by preview and writes LINEAR Shape Key curves into
+an add-on-owned native Action. Bake does not upload the audio, run stateless
 per-frame inference, or replace the track. Re-baking replaces the add-on-owned
 Action's curves, while unrelated artist Actions remain unchanged.
 **Prediction Delay** shifts the sampled audio position; positive values advance

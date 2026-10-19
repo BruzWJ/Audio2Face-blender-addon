@@ -40,7 +40,7 @@ from audio2face.shape_keys import (  # noqa: E402
 from audio2face import runtime  # noqa: E402
 from audio2face.selected_audio_timeline import (  # noqa: E402
     ChannelAudioSource,
-    selected_audio_frame_span,
+    selected_channel_frame_span,
     selected_channel_snapshot,
 )
 from audio2face.preferences import A2FAddonPreferences  # noqa: E402
@@ -220,16 +220,20 @@ def _assert_selected_media_streams(scene: bpy.types.Scene, directory: Path) -> N
     def decode(index: int) -> tuple[float, ...]:
         scene.audio2face.audio_channel = index + 5
         snapshot = selected_channel_snapshot(scene)
-        assert snapshot is not None and len(snapshot.clips) == 1
-        assert (snapshot.frame_start, snapshot.frame_end) == (15, 38)
+        assert len(snapshot.clips) == 1
+        assert (snapshot.frame_start, snapshot.frame_end) == selected_channel_frame_span(scene)
+        frame_count = round((snapshot.frame_end + 1 - snapshot.frame_start) * 1000)
+        start = (15 - snapshot.frame_start) * 1000
+        end = start + 24_000
         with ChannelAudioSource(
             snapshot, output_sample_rate=24_000, chunk_frames=257,
         ) as source:
             payload = b"".join(source)
-        assert len(payload) == 24_000 * 4
-        samples = struct.unpack("<24000f", payload)
+        assert len(payload) == frame_count * 4
+        samples = struct.unpack(f"<{frame_count}f", payload)
+        assert not any(samples[:start] + samples[end:])
         expected = (8192, -16384)[index] / 32767
-        assert max(abs(value - expected) for value in samples) < 2.0e-5, (
+        assert max(abs(value - expected) for value in samples[start:end]) < 2.0e-5, (
             "selected media stream", index, min(samples), max(samples), expected,
         )
         return samples
@@ -270,8 +274,10 @@ def _assert_resampled_trim_samples(scene: bpy.types.Scene, directory: Path) -> N
             strip.left_handle_offset = left_trim
             strip.right_handle_offset = right_trim
             snapshot = selected_channel_snapshot(scene)
-            assert snapshot is not None
-            expected_count = round((24 - left_trim - right_trim) * 16_000 / 24)
+            clip = snapshot.clips[0]
+            expected_count = round((snapshot.frame_end + 1 - snapshot.frame_start) * 16_000 / 24)
+            start = round((clip.frame_start - snapshot.frame_start) * 16_000 / 24)
+            end = round((clip.frame_end - snapshot.frame_start) * 16_000 / 24)
             for chunk_frames in (257, 4096):
                 with ChannelAudioSource(
                     snapshot, output_sample_rate=16_000, chunk_frames=chunk_frames,
@@ -279,7 +285,10 @@ def _assert_resampled_trim_samples(scene: bpy.types.Scene, directory: Path) -> N
                     payload = b"".join(source)
                 assert len(payload) == expected_count * 4
                 for index, (actual,) in enumerate(struct.iter_unpack("<f", payload)):
-                    point = snapshot.clips[0].source_start * 16_000 + index
+                    if not start <= index < end:
+                        assert actual == 0.0
+                        continue
+                    point = clip.source_start * 16_000 + index - start
                     left = math.floor(point + 1.0e-7)
                     fraction = max(0.0, point - left)
                     previous = float(reference[left])
@@ -318,6 +327,19 @@ def main() -> None:
         _assert_native_transport_handlers(registered=True)
         scene = bpy.context.scene
         settings = scene.audio2face
+        empty_scene = bpy.data.scenes.new("Silent Channel")
+        try:
+            assert empty_scene.sequence_editor is None
+            silent_snapshot = selected_channel_snapshot(empty_scene)
+            assert silent_snapshot.clips == ()
+            assert (silent_snapshot.frame_start, silent_snapshot.frame_end) == (
+                empty_scene.frame_start, empty_scene.frame_end,
+            )
+            with ChannelAudioSource(silent_snapshot) as silent_source:
+                assert b"".join(silent_source) == bytes(silent_source.metadata.output_frames * 4)
+            assert empty_scene.sequence_editor is None
+        finally:
+            bpy.data.scenes.remove(empty_scene)
 
         stale_layout = Mock()
         stale_layout.panel.side_effect = (
@@ -527,19 +549,17 @@ def main() -> None:
             ]
             settings.audio_channel = 3
             _assert_native_transport_handlers(registered=True)
-            assert selected_audio_frame_span(scene) == (
-                int(first_strip.content_start + first_strip.left_handle_offset),
-                int(second_strip.content_end - second_strip.right_handle_offset) - 1,
-            )
+            assert selected_channel_frame_span(scene) == (7, original_frame_end)
 
             def decode_channel(sample_rate: int) -> tuple[float, ...]:
                 snapshot = selected_channel_snapshot(scene)
-                assert snapshot is not None
-                assert (snapshot.frame_start, snapshot.frame_end) == (14, 83)
+                assert (snapshot.frame_start, snapshot.frame_end) == (7, original_frame_end)
                 assert len(snapshot.clips) == 2
-                frame_count = round(70 * sample_rate / 24)
-                gap_start = round(19 * sample_rate / 24)
-                gap_end = round(46 * sample_rate / 24)
+                frame_count = round((original_frame_end + 1 - 7) * sample_rate / 24)
+                first_start = round(7 * sample_rate / 24)
+                gap_start = round(26 * sample_rate / 24)
+                gap_end = round(53 * sample_rate / 24)
+                last_end = round(77 * sample_rate / 24)
                 with ChannelAudioSource(
                     snapshot, output_sample_rate=sample_rate,
                     chunk_frames=1024 if sample_rate == 24_000 else 257,
@@ -552,7 +572,7 @@ def main() -> None:
                 # Check every decoder window and the final sample. The native
                 # sinc resampler rings briefly at both ends of an untrimmed
                 # source; those 4 ms must stay audible within bounded gain.
-                for start, end in ((0, gap_start), (gap_end, frame_count)):
+                for start, end in ((first_start, gap_start), (gap_end, last_end)):
                     edge = 64 if sample_rate == 16_000 and start == gap_end else 0
                     if edge:
                         assert all(
@@ -563,7 +583,7 @@ def main() -> None:
                     assert max(
                         abs(value - expected) for value in audible
                     ) < 1.0e-5, (sample_rate, start, end, min(audible))
-                assert all(value == 0.0 for value in samples[gap_start:gap_end])
+                assert not any(samples[:first_start] + samples[gap_start:gap_end] + samples[last_end:])
                 return samples
 
             decoded = {rate: decode_channel(rate) for rate in (24_000, 16_000)}
@@ -573,9 +593,9 @@ def main() -> None:
             )
             native_channel.mute = True
             muted_snapshot = selected_channel_snapshot(scene)
-            assert muted_snapshot is not None and muted_snapshot != audible_snapshot
+            assert muted_snapshot != audible_snapshot
             assert all(clip.muted for clip in muted_snapshot.clips)
-            assert selected_audio_frame_span(scene) == (14, 83)
+            assert selected_channel_frame_span(scene) == (7, original_frame_end)
             with ChannelAudioSource(muted_snapshot, output_sample_rate=16_000) as source:
                 assert b"".join(source) == bytes(source.metadata.output_frames * 4)
             native_channel.mute = False
@@ -592,11 +612,16 @@ def main() -> None:
             settings.input_mode = "STREAM"
             settings.input_mode = "SELECTED"
             settings.audio_channel = 4
-            assert selected_audio_frame_span(scene) == (
-                int(other_strip.content_start), int(other_strip.content_end) - 1,
+            assert selected_channel_frame_span(scene) == (
+                int(other_strip.content_start),
+                max(original_frame_end, int(other_strip.content_end) - 1),
             )
             settings.audio_channel = 2
-            assert selected_audio_frame_span(scene) is None
+            assert selected_channel_frame_span(scene) == (7, original_frame_end)
+            empty_snapshot = selected_channel_snapshot(scene)
+            assert empty_snapshot.clips == ()
+            with ChannelAudioSource(empty_snapshot) as source:
+                assert b"".join(source) == bytes(source.metadata.output_frames * 4)
             assert list(sequence_editor.strips) == original_strip_order
             assert [
                 (
@@ -757,6 +782,50 @@ def main() -> None:
                     strict=True,
                 ):
                     _assert_close(value, wanted, label=f"animated {label} at {frame}")
+
+            # A pending edit on a keyed slider must reach inference over silence.
+            settings.input_mode = "SELECTED"
+            scene.frame_set(8)
+            snapshot = selected_channel_snapshot(scene)
+            assert snapshot.clips == ()
+            source = ChannelAudioSource(snapshot)
+            track = runtime.SelectedTrack(
+                operation_id="pending-preferred-edit", scene_name=scene.name,
+                source=snapshot, audio_source=source, chunks=iter(source), prepared=True,
+            )
+            original_rate = controller.model_sample_rate
+            original_request = controller.client.request
+            controller.selected_track = track
+            controller.model_sample_rate = source.metadata.output_sample_rate
+            controller.refresh_inference_settings = original_refresh
+            request = Mock(return_value="pending-preferred-edit")
+            controller.client.request = request
+            try:
+                baseline, _ = controller._evaluate_settings_timeline(scene, track)
+                track.render_timeline = track.published_timeline = baseline
+                preferred_joy.value = 0.8
+                controller._refresh_invalidated_selected_settings()
+                assert request.call_count == 1
+                method, payload = request.call_args.args
+                assert method == "track_render"
+                sample = controller._track_sample(scene, track, 8, prediction_delay=0.0)
+                authored = runtime._settings_at_sample(track.render_timeline, sample)
+                _assert_close(
+                    authored["emotion_driver"]["preferred"]["values"]["Joy"],
+                    0.8, label="pending keyed Joy sent over silence",
+                )
+                scene.frame_set(9)
+                sample = controller._track_sample(scene, track, 9, prediction_delay=0.0)
+                following = runtime._settings_at_sample(track.render_timeline, sample)
+                _assert_close(
+                    following["emotion_driver"]["preferred"]["values"]["Joy"],
+                    0.9, label="following Preferred Joy key retained",
+                )
+            finally:
+                controller._release_selected_track()
+                controller.model_sample_rate = original_rate
+                controller.client.request = original_request
+                controller.pending.clear()
         finally:
             controller.refresh_inference_settings = original_refresh
             scene.animation_data_clear()

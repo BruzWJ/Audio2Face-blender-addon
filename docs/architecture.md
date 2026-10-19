@@ -41,7 +41,7 @@ Blender owns the package-local worker as a child process. The worker opens no
 port, and CUDA, TensorRT, Audio2X, model metadata, and inference executors stay
 outside Blender's process. **Start Worker** launches the child, loads the two
 models, and makes the backend ready for an audio operation. Selected Channel
-creates a persistent prepared track when both model and channel audio are ready; a true
+creates a persistent prepared track, including silence on an empty channel; a true
 Stream uses the resident sequential executors when external PCM begins. **Stop
 Worker** exits the child and releases the active operation, models, and CUDA
 resources. Installing or enabling the extension does not start the worker.
@@ -133,14 +133,22 @@ not an input to the Audio2Face-to-ARKit solve.
 The saved **Selected Channel** number chooses all existing sound strips on one
 Video Sequencer channel. Source selection is not animatable. The add-on reads
 the strips' visible start/end frames and source offsets, retains their original
-positions and trims, and inserts silence in gaps. It never creates, moves,
-renames, or deletes sound strips. There is no add-on start-frame property;
+positions and trims, and inserts silence wherever no strip plays. The inclusive
+inference span is the union of the scene frame range and every selected-channel
+sound strip's visible span. An empty channel, including a scene without a
+Sequencer, has an ordinary snapshot with no clips and covers the scene range.
+The same mixer emits zero-valued mono PCM without a decoder or temporary file;
+there is no separate silence source. Preferred Emotion and eye settings continue
+through the ordinary model, render, preview, and bake paths. Silence carries
+inference time; visible idle motion depends on the model and its settings.
+It never creates, moves, renames, or deletes sound strips.
+There is no add-on start-frame property;
 Blender owns strip timing and duration. The add-on leaves the scene's sync mode,
 scene range, and preview range unchanged.
 
 The Timeline, Spacebar, and other native Blender transports enter the same
 media lifecycle. They do not enter or leave a worker operation. As soon as
-channel audio and loaded models are both ready, the add-on decodes, downmixes,
+the models are loaded, the add-on decodes, downmixes,
 and resamples the strips to model-rate mono f32le, combines them at their native
 positions, uploads the result once through the `track_*` protocol, and retains
 the prepared track. Other Sequencer channels never contribute to that input.
@@ -156,7 +164,7 @@ offsets. Blender owns decoding and resampling; there is no second WAV input
 decoder or older-Blender property compatibility path.
 
 The observed-source map distinguishes invalid channel settings from valid
-snapshots, including empty channels. Correcting unsupported settings refreshes
+snapshots. Correcting unsupported settings refreshes
 the source even when it matches the last valid snapshot. Worker and decoder
 failures still wait for an input change instead of retrying unchanged audio.
 
@@ -164,8 +172,8 @@ After Blender evaluates the new frame, `frame_change_post` maps
 `(scene.frame_current - channel_audio_start)` through effective FPS and
 Prediction Delay to a target sample, then linearly samples the latest complete
 cache. It requests a new render only when the frame-evaluated settings differ
-from the rendered settings timeline. Frames outside the native sound span are
-neutral. When an Action used by the scene changes, `depsgraph_update_post`
+from the rendered settings timeline. Frames outside the combined scene/channel
+span are neutral. When an Action used by the scene changes, `depsgraph_update_post`
 queues a complete settings reevaluation on the existing main-thread timer, so
 an edit to a future FCurve cannot remain hidden by an unchanged current-frame
 value. If playback or baking is active, that invalidation remains pending while
@@ -176,11 +184,16 @@ runs the full frame sweep after the native operation stops; this is not a timed
 debounce. Before sweeping, the controller snapshots the current authored
 settings; after returning to the original frame, it restores any value which an
 existing FCurve re-evaluated. This keeps a value available for Blender's
-subsequent key insertion or update without altering the FCurve itself. No add-on
+subsequent key insertion or update without altering the FCurve itself. At a paused
+integer frame, the captured settings and Prediction Delay also supply that
+frame's timeline entry, so a pending edit on a keyed control reaches inference
+instead of being deduplicated against the old curve. Other frames retain native
+FCurve evaluation; subframe cursors retain the integer-frame sampling contract.
+The same timeline drives preview and bake, including silent regions. No add-on
 handler observes or controls native transport.
 
 A tuning, emotion, or keyframe edit sends a newer `track_render` revision with
-one sample-based settings timeline evaluated over the native sound span. The
+one sample-based settings timeline evaluated over the inference span. The
 worker supersedes older work without canceling the track, resets its regular
 executors, replays the retained PCM once, and applies settings as the source
 timeline advances. The requested current-frame sample is emitted as soon as
@@ -194,9 +207,9 @@ clip.
 
 **Bake Shape Key Animation** is a separate persistence operation. It evaluates
 settings and Prediction Delay at every integer Blender frame in the native
-channel span from the first visible strip frame through the last visible strip
-frame, restores the user's frame, and waits for the matching continuous
-cache if necessary. Preview and bake therefore consume identical values and
+channel inference span, including silent regions, restores the user's frame,
+and waits for the matching continuous cache if necessary.
+Preview and bake therefore consume identical values and
 frame-to-sample mappings. Bake writes only matching Shape Key `value` curves;
 it does not upload audio again, run stateless per-frame inference, or create a
 second executor family.

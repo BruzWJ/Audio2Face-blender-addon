@@ -54,7 +54,7 @@ from .selected_audio_timeline import (
     ChannelAudioSource,
     SelectedChannelSnapshot,
     frame_to_audio_sample,
-    selected_audio_frame_span,
+    selected_channel_frame_span,
     selected_channel_snapshot,
 )
 from .runtime_bundle import (
@@ -221,7 +221,7 @@ class PendingRequest:
 
 @dataclass(frozen=True, slots=True)
 class InvalidSelectedChannel:
-    """An observed validation failure, distinct from a valid empty channel."""
+    """An observed validation failure, distinct from a valid channel snapshot."""
 
     message: str
 
@@ -346,7 +346,7 @@ class RuntimeController:
         self.active_stream: ActiveStream | None = None
         self.selected_track: SelectedTrack | None = None
         self.observed_selected_sources: dict[
-            str, SelectedChannelSnapshot | InvalidSelectedChannel | None
+            str, SelectedChannelSnapshot | InvalidSelectedChannel
         ] = {}
         self.active_bake: ActiveBake | None = None
         self.pcm_ingress: PCMIngress | None = None
@@ -842,7 +842,7 @@ class RuntimeController:
 
     def _selected_channel_snapshot(
         self, scene: bpy.types.Scene
-    ) -> SelectedChannelSnapshot | None:
+    ) -> SelectedChannelSnapshot:
         """Record invalid input and clear its diagnostic when validation recovers."""
 
         try:
@@ -860,7 +860,7 @@ class RuntimeController:
         return source
 
     def _ensure_selected_track(self, scene: bpy.types.Scene) -> None:
-        """Upload all sound strips on the configured channel as one timeline."""
+        """Upload the configured channel's audio and silence as one timeline."""
 
         settings = scene.audio2face
         if (
@@ -872,7 +872,7 @@ class RuntimeController:
             return
         source = self._selected_channel_snapshot(scene)
         self.observed_selected_sources[scene.name] = source
-        if source is None or self.selected_track is not None:
+        if self.selected_track is not None:
             return
         if self.active_stream is not None:
             return
@@ -1049,16 +1049,9 @@ class RuntimeController:
         track = self.selected_track
         if track is not None and track.scene_name == scene.name:
             self._release_active_bake()
-            source = self._selected_channel_snapshot(scene)
-            self.observed_selected_sources[scene.name] = source
-            restart = source is not None
-            self._cancel_selected_track(track, restart=restart)
-            if restart or scene.audio2face.status != "ERROR":
-                self._set_status(
-                    scene,
-                    "MODEL_READY",
-                    "Selected channel replacement queued" if restart else "Selected channel unloaded",
-                )
+            self.observed_selected_sources[scene.name] = self._selected_channel_snapshot(scene)
+            self._cancel_selected_track(track, restart=True)
+            self._set_status(scene, "MODEL_READY", "Selected channel replacement queued")
             return
         self._ensure_selected_track(scene)
 
@@ -1150,12 +1143,17 @@ class RuntimeController:
         scene: bpy.types.Scene,
         track: SelectedTrack,
     ) -> tuple[SettingsTimeline, tuple[int, ...]]:
-        """Evaluate inference settings and presentation samples over the sound span."""
+        """Evaluate settings and presentation samples over the channel timeline."""
 
         frame_start, frame_end = track.source.frame_start, track.source.frame_end
         original_frame = int(scene.frame_current)
         original_subframe = float(scene.frame_subframe)
         settings = scene.audio2face
+        # Preview an uncommitted edit at its native integer frame. Fractional
+        # cursor values must not replace the FCurve's integer-frame samples.
+        authored_frame = original_frame if original_subframe == 0.0 else None
+        authored_settings = inference_settings(settings)
+        authored_prediction_delay = settings.prediction_delay
         # Returning to the original frame re-applies its existing FCurves. Keep
         # any UI value which is still waiting to be inserted as a new key.
         authored_values = tuple(
@@ -1179,9 +1177,18 @@ class RuntimeController:
                         prediction_delay=0.0,
                     ),
                 )
-                snapshots.append((sample, inference_settings(scene.audio2face)))
+                snapshots.append((
+                    sample,
+                    authored_settings if frame == authored_frame
+                    else inference_settings(scene.audio2face),
+                ))
                 frame_samples.append(
-                    cast(int, self._track_sample(scene, track, frame))
+                    cast(int, self._track_sample(
+                        scene, track, frame,
+                        prediction_delay=(
+                            authored_prediction_delay if frame == authored_frame else None
+                        ),
+                    ))
                 )
         finally:
             try:
@@ -1348,8 +1355,6 @@ class RuntimeController:
         if settings.input_mode != "SELECTED":
             raise SidecarError("animation baking requires Selected Channel mode")
         source = self._selected_channel_snapshot(scene)
-        if source is None:
-            raise SidecarError("the selected channel has no sound strips")
         model_schema = self.model_schema
         if model_schema is None:
             raise SidecarError("worker model metadata is unavailable")
@@ -1904,8 +1909,8 @@ class RuntimeController:
         """Forward settings evaluated by Blender for the current native frame."""
 
         if scene.audio2face.input_mode == "SELECTED":
-            span = selected_audio_frame_span(scene)
-            if span is None or not span[0] <= int(scene.frame_current) <= span[1]:
+            span = selected_channel_frame_span(scene)
+            if not span[0] <= int(scene.frame_current) <= span[1]:
                 return
         self.refresh_inference_settings(scene)
 
