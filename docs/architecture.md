@@ -172,7 +172,7 @@ the source even when it matches the last valid snapshot. Worker and decoder
 failures still wait for an input change instead of retrying unchanged audio.
 
 After Blender evaluates the new frame, `frame_change_post` maps
-`(scene.frame_current - channel_audio_start)` through effective FPS and
+`(scene.frame_current - snapshot.frame_start)` through effective FPS and
 Prediction Delay to a target sample, then linearly samples the latest complete
 cache. It requests a new render only when the frame-evaluated settings differ
 from the rendered settings timeline. Frames outside the combined scene/channel
