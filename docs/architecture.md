@@ -2,13 +2,13 @@
 
 ## System boundary
 
-Audio2Face has one cached Selected WAV track path and one sequential
+Audio2Face has one cached Selected Channel track path and one sequential
 external Stream path:
 
 ```text
-Selected WAV -- add-on-owned VSE strip --> native timeline/audio clock
+User sound strips on selected VSE channel --> native timeline/audio clock
        |
-       +-- decode/resample/upload once --> persistent prepared track
+       +-- decode/resample/combine/upload --> persistent prepared track
                                                   |
                                   sequential A2E/A2F settings-timeline render
                                                   |
@@ -40,8 +40,8 @@ Blender 5.2 extension -- private audio2face/13 JSONL -- native worker
 Blender owns the package-local worker as a child process. The worker opens no
 port, and CUDA, TensorRT, Audio2X, model metadata, and inference executors stay
 outside Blender's process. **Start Worker** launches the child, loads the two
-models, and makes the backend ready for an audio operation. A Selected WAV
-creates a persistent prepared track when both model and source are ready; a true
+models, and makes the backend ready for an audio operation. Selected Channel
+creates a persistent prepared track, including silence on an empty channel; a true
 Stream uses the resident sequential executors when external PCM begins. **Stop
 Worker** exits the child and releases the active operation, models, and CUDA
 resources. Installing or enabling the extension does not start the worker.
@@ -59,15 +59,15 @@ The extension owns:
   external model-root selections, model optimization, cancellation, and logs;
 - worker launch, handshake, model loading, streaming, asynchronous baking,
   cancellation, and shutdown;
-- one add-on-owned Selected WAV Sequencer strip positioned by **First Frame**,
-  one-time Selected WAV track upload, `frame_change_post` cache sampling,
-  native Shape Key Action output, and external PCM ingress;
+- read-only input from every sound strip on the selected Sequencer channel,
+  one-time channel audio upload, `frame_change_post` cache sampling, native
+  Shape Key Action output, and external PCM ingress;
 - Audio2Face and emotion controls and the registered target-object list;
 - strict protocol, model-schema, stream-frame, and track-render response
   validation; and
 - Action construction and clocked live delivery on Blender's main thread.
 
-Selected WAV PCM is uploaded once. A settings revision runs Audio2Emotion and
+Selected Channel PCM is uploaded once. A settings revision runs Audio2Emotion and
 Audio2Face continuously over the complete track, then publishes bounded frame
 batches atomically. Native frame changes with matching settings only sample the
 published timestamps on Blender's main thread. Bake samples that same cache.
@@ -94,7 +94,7 @@ Adding or removing an object affects the next frame. An empty list is a valid
 no-subscriber state: inference continues and a later-added object receives the
 next frame.
 
-A Selected WAV bake preflights the targets before frame iteration. At least one
+A Selected Channel bake preflights the targets before frame iteration. At least one
 target must contain a Shape Key matching a negotiated channel, and only
 existing matches receive curves.
 
@@ -128,29 +128,55 @@ not an input to the Audio2Face-to-ARKit solve.
 
 ## Audio lifecycles
 
-### Selected WAV
+### Selected Channel
 
-Selecting a valid WAV creates or updates one explicitly add-on-owned VSE sound
-strip at the saved **First Frame**; unrelated strips are preserved. Blender
-owns the strip's native duration and updates it when scene FPS changes. The
-add-on does not calculate or override `SoundStrip.duration`, and it does not
-change scene or preview playback ranges. It selects Blender's `AUDIO_SYNC`
-mode so playback drops delayed viewport frames to remain synchronized to sound.
+The saved **Selected Channel** number chooses all existing sound strips on one
+Video Sequencer channel. Source selection is not animatable. The add-on reads
+the strips' visible start/end frames and source offsets, retains their original
+positions and trims, and inserts silence wherever no strip plays. The inclusive
+inference span is the union of the scene frame range and every selected-channel
+sound strip's visible span. An empty channel, including a scene without a
+Sequencer, has an ordinary snapshot with no clips and covers the scene range.
+The same mixer emits zero-valued mono PCM without a decoder or temporary file;
+there is no separate silence source. Preferred Emotion and eye settings continue
+through the ordinary model, render, preview, and bake paths. Silence carries
+inference time; visible idle motion depends on the model and its settings.
+It never creates, moves, renames, or deletes sound strips.
+There is no add-on start-frame property;
+Blender owns strip timing and duration. The add-on leaves the scene's sync mode,
+scene range, and preview range unchanged.
 
 The Timeline, Spacebar, and other native Blender transports enter the same
-media lifecycle. They do not enter or leave a worker operation. As soon as a
-valid source and loaded models are both ready, the add-on decodes, downmixes,
-and resamples the WAV to model-rate mono f32le, uploads it once through the
-`track_*` protocol, and retains the prepared track. Source
-replacement or worker shutdown ends that track; play, pause, seek, and loop do
-not.
+media lifecycle. They do not enter or leave a worker operation. As soon as
+the models are loaded, the add-on decodes, downmixes,
+and resamples the strips to model-rate mono f32le, combines them at their native
+positions, uploads the result once through the `track_*` protocol, and retains
+the prepared track. Other Sequencer channels never contribute to that input.
+Changing channel audio or shutting down the worker ends that track; play,
+pause, seek, and loop do not. Static strip volume and strip/channel mute are
+applied when combining the audio. Strips must have normal playback speed;
+retiming and audio modifiers must be rendered to audio before using that source.
+The evaluated Sound datablock supplies Blender's native decoder, preserving its
+selected media stream and packed audio. The decoder writes temporary mono float
+WAV files, and the source closes and removes them when finished. Native decoding
+adds a bounded zero tail and finishes within a buffer to avoid FFmpeg's empty
+EOF write failure; the reader consumes only the requested strip interval.
+A bounded reader
+seeks directly into that known float32 output, preserving fractional strip
+offsets. Blender owns decoding and resampling; there is no second WAV input
+decoder or older-Blender property compatibility path.
+
+The observed-source map distinguishes invalid channel settings from valid
+snapshots. Correcting unsupported settings refreshes
+the source even when it matches the last valid snapshot. Worker and decoder
+failures still wait for an input change instead of retrying unchanged audio.
 
 After Blender evaluates the new frame, `frame_change_post` maps
-`(scene.frame_current - strip.content_start)` through effective FPS and
+`(scene.frame_current - snapshot.frame_start)` through effective FPS and
 Prediction Delay to a target sample, then linearly samples the latest complete
 cache. It requests a new render only when the frame-evaluated settings differ
-from the rendered settings timeline. Frames outside the native sound span are
-neutral. When an Action used by the scene changes, `depsgraph_update_post`
+from the rendered settings timeline. Frames outside the combined scene/channel
+span are neutral. When an Action used by the scene changes, `depsgraph_update_post`
 queues a complete settings reevaluation on the existing main-thread timer, so
 an edit to a future FCurve cannot remain hidden by an unchanged current-frame
 value. If playback or baking is active, that invalidation remains pending while
@@ -161,11 +187,16 @@ runs the full frame sweep after the native operation stops; this is not a timed
 debounce. Before sweeping, the controller snapshots the current authored
 settings; after returning to the original frame, it restores any value which an
 existing FCurve re-evaluated. This keeps a value available for Blender's
-subsequent key insertion or update without altering the FCurve itself. No add-on
+subsequent key insertion or update without altering the FCurve itself. At a paused
+integer frame, the captured settings and Prediction Delay also supply that
+frame's timeline entry, so a pending edit on a keyed control reaches inference
+instead of being deduplicated against the old curve. Other frames retain native
+FCurve evaluation; subframe cursors retain the integer-frame sampling contract.
+The same timeline drives preview and bake, including silent regions. No add-on
 handler observes or controls native transport.
 
 A tuning, emotion, or keyframe edit sends a newer `track_render` revision with
-one sample-based settings timeline evaluated over the native sound span. The
+one sample-based settings timeline evaluated over the inference span. The
 worker supersedes older work without canceling the track, resets its regular
 executors, replays the retained PCM once, and applies settings as the source
 timeline advances. The requested current-frame sample is emitted as soon as
@@ -179,8 +210,9 @@ clip.
 
 **Bake Shape Key Animation** is a separate persistence operation. It evaluates
 settings and Prediction Delay at every integer Blender frame in the native
-strip span, restores the user's frame, and waits for the matching continuous
-cache if necessary. Preview and bake therefore consume identical values and
+channel inference span, including silent regions, restores the user's frame,
+and waits for the matching continuous cache if necessary.
+Preview and bake therefore consume identical values and
 frame-to-sample mappings. Bake writes only matching Shape Key `value` curves;
 it does not upload audio again, run stateless per-frame inference, or create a
 second executor family.
@@ -192,7 +224,7 @@ boundary. Producers supply model-rate mono f32le PCM and own capture,
 resampling, and audible monitoring. The main-thread poll starts the operation,
 flushes the bounded FIFO in order, and applies worker credits as backpressure.
 No network listener is created. This is the only sequential audio mode; it does
-not use the Selected WAV track or Blender's media transport.
+not use the Selected Channel track or Blender's media transport.
 
 ### Native executor lifecycles
 
@@ -200,7 +232,7 @@ Model loading during **Start Worker** initializes the model-owned CUDA resources
 on device 0 and makes the backend ready to create the executor family required
 by the chosen audio mode.
 
-A Selected WAV `track_start` retains one regular sequential Audio2Emotion and
+A Selected Channel `track_start` retains one regular sequential Audio2Emotion and
 Audio2Face/device-blendshape family. `track_chunk` uploads complete PCM once and
 `track_prepare` marks that retained source ready. Each `track_render` resets the
 regular executors, replays the retained PCM, and applies the expanded settings
@@ -284,7 +316,7 @@ runtime contract.
 ```text
 IDLE --Start Worker--> STARTING --hello--> LOADING_MODEL --> MODEL_READY
 
-MODEL_READY + Selected WAV --> TRACK_UPLOADING --> TRACK_PREPARING --> MODEL_READY
+MODEL_READY + Selected Channel --> TRACK_UPLOADING --> TRACK_PREPARING --> MODEL_READY
 MODEL_READY + tuning change --> TRACK_PREPARING --> MODEL_READY
 MODEL_READY + native frame/transport change -----------------------> MODEL_READY
 MODEL_READY + Bake -------------------------------> BAKING --------> MODEL_READY
@@ -296,7 +328,7 @@ Any live worker --Stop Worker--> STOPPING --> IDLE
 Unexpected exit or rejected contract --> ERROR
 ```
 
-One worker accepts at most one audio operation: one persistent Selected WAV
+One worker accepts at most one audio operation: one persistent Selected Channel
 track or one sequential Stream. Bake is Blender-side iteration over the
 existing track, not another uploaded audio operation. Native playback does not
 participate in this state machine. A normal Stream end drains tail frames;
@@ -313,7 +345,7 @@ presentation state, then closes that worker before later messages can mutate
 scene state. Exact envelope, payload, ordering, and queue limits are in the
 [protocol](protocol.md).
 
-Unregistering the extension cancels active inference and WAV decoding, stops
+Unregistering the extension cancels active inference and audio decoding, stops
 model optimization, unregisters its timer, and closes the worker before
 removing Blender classes and scene RNA. Blender owns native timeline playback
 and Sequencer data.

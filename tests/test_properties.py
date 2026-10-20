@@ -160,118 +160,70 @@ def test_automatic_emotion_strength_is_an_independent_two_x_multiplier(
     assert "subtype" not in annotation
 
 
-def test_selected_audio_callbacks_manage_source_placement_and_mode(
+def test_selected_channel_callbacks_refresh_without_mutating_the_sequencer(
     properties_module: ModuleType,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[tuple[object, ...]] = []
-    timeline = ModuleType("audio2face.selected_audio_timeline")
-    timeline.configure_selected_audio = (  # type: ignore[attr-defined]
-        lambda scene, path, *, first_frame: calls.append(
-            ("configure", scene, path, first_frame)
-        )
-        or 42
-    )
-    timeline.remove_selected_audio_strips = (  # type: ignore[attr-defined]
-        lambda scene: calls.append(("remove", scene))
-    )
-    monkeypatch.setitem(sys.modules, timeline.__name__, timeline)
     controller = SimpleNamespace(
         selected_audio_changed=lambda scene: calls.append(("source", scene)),
         selected_audio_failed=lambda scene, message: calls.append(
             ("failure", scene, message)
         ),
-        invalidate_selected_settings=lambda scene: calls.append(
-            ("invalidate", scene)
-        ),
-        request_selected_frame=lambda scene: calls.append(("frame", scene)),
         input_mode_changed=lambda scene: calls.append(("mode", scene)),
     )
     runtime = ModuleType("audio2face.runtime")
     runtime.get_controller = lambda: controller  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, runtime.__name__, runtime)
-    settings = SimpleNamespace(
-        input_mode="SELECTED",
-        audio_path="first.wav",
-        audio_first_frame=12,
-        status="MODEL_READY",
-        status_message="Selected WAV is ready",
+    settings = SimpleNamespace(input_mode="SELECTED", audio_channel=3)
+    strip = SimpleNamespace(channel=3, content_start=12, content_end=42)
+    scene = SimpleNamespace(
+        audio2face=settings,
+        sequence_editor=SimpleNamespace(strips=[strip]),
+        sync_mode="NONE",
     )
-    scene = SimpleNamespace(audio2face=settings)
+    original_strip = vars(strip).copy()
     context = SimpleNamespace(scene=scene)
 
-    properties_module._audio_path_updated(settings, context)
-    settings.audio_first_frame = -3
-    properties_module._audio_first_frame_updated(settings, context)
-    settings.audio_path = ""
-    properties_module._audio_path_updated(settings, context)
-    settings.audio_path = "second.wav"
+    properties_module._audio_channel_updated(settings, context)
+    settings.audio_channel = 4
+    properties_module._audio_channel_updated(settings, context)
     properties_module._input_mode_updated(settings, context)
     settings.input_mode = "STREAM"
     properties_module._input_mode_updated(settings, context)
 
     assert calls == [
-        ("configure", scene, "first.wav", 12),
         ("source", scene),
-        ("configure", scene, "first.wav", -3),
-        ("invalidate", scene),
-        ("frame", scene),
         ("source", scene),
-        ("remove", scene),
         ("mode", scene),
-        ("configure", scene, "second.wav", -3),
-        ("invalidate", scene),
-        ("frame", scene),
         ("mode", scene),
-        ("remove", scene),
     ]
+    assert scene.sequence_editor.strips == [strip]
+    assert vars(strip) == original_strip
+    assert scene.sync_mode == "NONE"
 
-    def reject_audio(*_args: object, **_kwargs: object) -> None:
-        raise ValueError("invalid WAV")
+    def reject_audio(_scene: object) -> None:
+        raise ValueError("invalid channel audio")
 
-    timeline.configure_selected_audio = reject_audio  # type: ignore[attr-defined]
-    settings.audio_path = "broken.wav"
-    properties_module._audio_path_updated(settings, context)
+    controller.selected_audio_changed = reject_audio
+    properties_module._audio_channel_updated(settings, context)
+    assert calls[-1] == ("failure", scene, "invalid channel audio")
+    assert scene.sequence_editor.strips == [strip]
+    assert vars(strip) == original_strip
 
-    assert calls[-2:] == [("remove", scene), ("failure", scene, "invalid WAV")]
-
-    def reject_blender_audio(*_args: object, **_kwargs: object) -> None:
-        raise RuntimeError("Blender could not create the sound strip")
-
-    timeline.configure_selected_audio = reject_blender_audio  # type: ignore[attr-defined]
-    properties_module._audio_path_updated(settings, context)
-
-    assert calls[-2:] == [
-        ("remove", scene),
-        ("failure", scene, "Blender could not create the sound strip"),
-    ]
-
-    def reject_strip_removal(_scene: object) -> None:
-        raise RuntimeError("Blender could not remove the sound strip")
-
-    timeline.remove_selected_audio_strips = reject_strip_removal  # type: ignore[attr-defined]
-    settings.audio_path = ""
-    properties_module._audio_path_updated(settings, context)
-
-    assert calls[-2:] == [
-        ("source", scene),
-        (
-            "failure",
-            scene,
-            "could not remove selected audio strip: "
-            "Blender could not remove the sound strip",
-        ),
-    ]
     annotations = properties_module.A2FSceneSettings.__annotations__
     assert "update=_input_mode_updated" in annotations["input_mode"]
-    assert "update=_audio_path_updated" in annotations["audio_path"]
-    first_frame = properties_module.A2FSceneSettings.__annotations__[
-        "audio_first_frame"
-    ]
-    assert "name='First Frame'" in first_frame
-    assert "default=1" in first_frame
-    assert "update=_audio_first_frame_updated" in first_frame
-    assert "SKIP_SAVE" not in first_frame
+    assert "Selected Channel" in annotations["input_mode"]
+    assert "audio_path" not in annotations
+    assert "audio_first_frame" not in annotations
+    channel = annotations["audio_channel"]
+    assert "name='Selected Channel'" in channel
+    assert "default=1" in channel
+    assert "min=1" in channel
+    assert "max=128" in channel
+    assert "options=set()" in channel
+    assert "update=_audio_channel_updated" in channel
+    assert "SKIP_SAVE" not in channel
 
 
 def test_shared_update_callback_refreshes_the_context_scene(

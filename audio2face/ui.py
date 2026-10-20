@@ -15,6 +15,47 @@ if TYPE_CHECKING:
     from .properties import A2FSceneSettings
 
 
+def _audio_channel_choices(scene: bpy.types.Scene) -> tuple[tuple[int, str], ...]:
+    """List authored channels while retaining an empty current selection."""
+
+    selected = scene.audio2face.audio_channel
+    numbers = {selected}
+    names: dict[int, str] = {}
+    editor = scene.sequence_editor
+    if editor is not None:
+        numbers.update(strip.channel for strip in editor.strips)
+        for channel in editor.channels:
+            if channel.number == 0:
+                continue
+            names[channel.number] = channel.name
+            if channel.name and channel.name != f"Channel {channel.number}":
+                numbers.add(channel.number)
+    return tuple(
+        (
+            number,
+            f"{number}: {names[number]}"
+            if names.get(number) and names[number] != f"Channel {number}"
+            else f"Channel {number}",
+        )
+        for number in sorted(numbers)
+    )
+
+
+class A2F_MT_audio_channels(bpy.types.Menu):
+    bl_label = "Selected Channel"
+
+    def draw(self, context: bpy.types.Context) -> None:
+        selected = context.scene.audio2face.audio_channel
+        for number, label in _audio_channel_choices(context.scene):
+            choice = self.layout.operator(
+                "wm.context_set_int",
+                text=label,
+                icon="RADIOBUT_ON" if number == selected else "RADIOBUT_OFF",
+            )
+            choice.data_path = "scene.audio2face.audio_channel"
+            choice.value = number
+
+
 def _draw_audio_playback(
     layout: bpy.types.UILayout,
     settings: A2FSceneSettings,
@@ -41,7 +82,6 @@ def _draw_audio_playback(
                 text="Bake Shape Key Animation",
                 icon="ACTION",
             )
-        playback_box.prop(settings, "audio_first_frame")
         playback_box.prop(settings, "prediction_delay", slider=True)
         return
 
@@ -234,14 +274,19 @@ class A2F_PT_main(bpy.types.Panel):
         input_box.label(text="Inputs", icon="SOUND")
         input_mode_row = input_box.row(align=True)
         input_mode_row.prop(settings, "input_mode", expand=True)
+        if settings.input_mode == "SELECTED":
+            channel_row = input_box.row()
+            channel_row.label(text="Selected Channel")
+            channel_row.menu(
+                "A2F_MT_audio_channels",
+                text=dict(_audio_channel_choices(context.scene))[settings.audio_channel],
+            )
         _draw_audio_playback(
             input_box,
             settings,
             controller,
             context.scene,
         )
-        if settings.input_mode == "SELECTED":
-            input_box.prop(settings, "audio_path")
 
         _draw_model_tuning(layout, settings)
 
@@ -305,4 +350,4 @@ class A2F_PT_main(bpy.types.Panel):
                     slider=True,
                 )
 
-CLASSES = (A2F_UL_target_objects, A2F_PT_main)
+CLASSES = (A2F_MT_audio_channels, A2F_UL_target_objects, A2F_PT_main)

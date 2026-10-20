@@ -125,7 +125,7 @@ def main() -> None:
         "a2e_preferred_emotion_strength": 0.5,
     }
     assert {
-        "audio_first_frame",
+        "audio_channel",
         "prediction_delay",
         "auto_audio2emotion",
         "preferred_emotions",
@@ -133,6 +133,9 @@ def main() -> None:
         *emotion_property_defaults,
         *AUDIO2FACE_DEFAULTS,
     } <= scene_property_names
+    assert "audio_path" not in scene_property_names
+    assert "audio_first_frame" not in scene_property_names
+    assert not properties.A2FSceneSettings.bl_rna.properties["audio_channel"].is_animatable
     for name, default in AUDIO2FACE_DEFAULTS.items():
         actual = properties.A2FSceneSettings.bl_rna.properties[name].default
         if isinstance(default, float):

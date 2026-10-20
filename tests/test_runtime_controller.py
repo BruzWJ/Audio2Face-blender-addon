@@ -58,6 +58,12 @@ def _settings_with_skin(settings: _Settings) -> dict[str, object]:
     return payload
 
 
+def _settings_with_skin_and_emotion(settings: _Settings) -> dict[str, object]:
+    payload = _settings_with_skin(settings)
+    payload["emotion_driver"]["preferred"]["values"]["Joy"] = settings.preferred_emotions[0].value
+    return payload
+
+
 def _timeline(
     runtime: ModuleType,
     settings: dict[str, object] | None = None,
@@ -81,8 +87,7 @@ class _Settings:
         self.status_message = "before"
         self.input_mode = "SELECTED"
         self.prediction_delay = 0.0
-        self.audio_path = ""
-        self.audio_first_frame = 1
+        self.audio_channel = 1
         self.stream_time = 0.0
         self.preferred_emotions: list[object] = []
         self.target_objects: list[object] = []
@@ -105,7 +110,7 @@ class _Scene:
         self.frame_current = 1
         self.frame_subframe = 0.0
         self.render = SimpleNamespace(fps=24, fps_base=1.0)
-        self.sequence_editor = SimpleNamespace(strips=[])
+        self.sequence_editor = SimpleNamespace(strips=[], channels=[])
         self.animation_data = None
         self.frame_set_calls: list[tuple[int, float]] = []
         self.frame_evaluator = lambda _frame: None
@@ -120,21 +125,50 @@ class _Scene:
         self.frame_evaluator(frame)
 
 
-class _SoundStrip(dict[str, str]):
-    def __init__(self, frame_start: int, frame_end: int) -> None:
-        super().__init__(
-            audio2face_selected_audio_owner="audio2face/selected-wav/1"
+class _SoundStrip:
+    def __init__(
+        self,
+        frame_start: int,
+        frame_end: int,
+        *,
+        channel: int = 1,
+        path: str = "/audio/selected.wav",
+    ) -> None:
+        self.type = "SOUND"
+        self.channel = channel
+        self.sound = SimpleNamespace(
+            filepath=path, library=None, packed_file=None, use_mono=False,
         )
+        self.sound.as_pointer = lambda: id(self.sound)
+        self.left_handle = frame_start
+        self.right_handle = frame_end + 1
         self.content_start = frame_start
         self.content_end = frame_end + 1
+        self.content_trim_start = 0
+        self.content_trim_end = 0
+        self.sound_offset = 0.0
+        self.volume = 1.0
+        self.mute = False
+        self.retiming_keys = []
+        self.modifiers = []
 
 
 def _install_selected_audio_span(
     scene: _Scene,
     frame_start: int = 1,
     frame_end: int = 250,
+    *,
+    path: str = "/audio/selected.wav",
 ) -> None:
-    scene.sequence_editor.strips[:] = [_SoundStrip(frame_start, frame_end)]
+    scene.frame_start, scene.frame_end = frame_start, frame_end
+    scene.sequence_editor.strips[:] = [
+        _SoundStrip(
+            frame_start,
+            frame_end,
+            channel=scene.audio2face.audio_channel,
+            path=path,
+        )
+    ]
 
 
 class _Scenes(list[_Scene]):
@@ -231,8 +265,8 @@ def runtime_module(monkeypatch: pytest.MonkeyPatch) -> tuple[ModuleType, ModuleT
         actions=object(),
         window_managers=[],
     )
-    bpy.context = SimpleNamespace(scene=None, window=None)  # type: ignore[attr-defined]
-    bpy.path = SimpleNamespace(abspath=lambda value: value)  # type: ignore[attr-defined]
+    bpy.context = SimpleNamespace(scene=None, window=None, window_manager=None)  # type: ignore[attr-defined]
+    bpy.path = SimpleNamespace(abspath=lambda value, **_kwargs: value)  # type: ignore[attr-defined]
     bpy.utils = SimpleNamespace(  # type: ignore[attr-defined]
         extension_path_user=lambda *_args, **_kwargs: "/tmp/a2f-runtime-test"
     )
@@ -374,26 +408,26 @@ def _activate_track(
     audio_samples: int = 48_000,
     prepared: bool = True,
 ) -> object:
-    _install_selected_audio_span(scene)
-    wav_source = SimpleNamespace(
+    audio_source = SimpleNamespace(
         close_calls=0,
         metadata=SimpleNamespace(output_frames=audio_samples),
     )
 
     def close() -> None:
-        wav_source.close_calls += 1
+        audio_source.close_calls += 1
 
-    wav_source.close = close
+    audio_source.close = close
     track = runtime.SelectedTrack(
         operation_id=operation_id,
         scene_name=scene.name,
-        path=Path(scene.audio2face.audio_path or "/audio/selected.wav"),
-        wav_source=wav_source,
+        source=runtime.selected_channel_snapshot(scene),
+        audio_source=audio_source,
         chunks=iter(()),
         uploaded_samples=audio_samples,
         prepared=prepared,
     )
     controller.selected_track = track
+    controller.observed_selected_sources[scene.name] = track.source
     return track
 
 
@@ -409,9 +443,9 @@ def _publish_settings_timeline(
 _SELECTED_AUDIO_CHUNKS = (struct.pack("<ff", 0.1, 0.2), struct.pack("<f", 0.3))
 
 
-class _FakeSelectedWavSource:
-    def __init__(self, path: Path, **kwargs: object) -> None:
-        self.path = path
+class _FakeSelectedChannelSource:
+    def __init__(self, source: object, **kwargs: object) -> None:
+        self.source = source
         self.kwargs = kwargs
         self.advances = 0
         self.close_calls = 0
@@ -432,13 +466,19 @@ class _FakeSelectedWavSource:
             self.close_calls += 1
 
 
-def _start_selected_track(runtime, bpy, monkeypatch, tmp_path, *, frame=1):  # type: ignore[no-untyped-def]
+def _start_selected_track(  # type: ignore[no-untyped-def]
+    runtime, bpy, monkeypatch, tmp_path, *, frame=1, channel=1, strips=None,
+    source_type=_FakeSelectedChannelSource,
+):
     scene, settings = _local_scene(bpy)
     scene.frame_current = frame
     audio_path = tmp_path / "selected.wav"
     audio_path.write_bytes(b"fixture")
-    settings.audio_path = str(audio_path)
-    _install_selected_audio_span(scene)
+    settings.audio_channel = channel
+    if strips is None:
+        _install_selected_audio_span(scene, path=str(audio_path))
+    else:
+        scene.sequence_editor.strips[:] = strips
     controller = runtime.RuntimeController()
     controller._require_worker_ready = lambda: None
     controller.model_sample_rate = 16_000
@@ -446,7 +486,7 @@ def _start_selected_track(runtime, bpy, monkeypatch, tmp_path, *, frame=1):  # t
     controller.loaded_signature = ("face/model.json", "emotion/model.json")
     controller.client._state = runtime.Lifecycle.RUNNING
     controller.negotiated = True
-    monkeypatch.setattr(runtime, "WavStreamSource", _FakeSelectedWavSource)
+    monkeypatch.setattr(runtime, "ChannelAudioSource", source_type)
     requests: list[tuple[str, dict[str, object]]] = []
     controller.client.request = lambda method, params: (
         requests.append((method, params)) or f"request-{len(requests)}"
@@ -1500,7 +1540,7 @@ def test_stream_to_selected_waits_for_stream_terminal_then_starts_track(
     settings.input_mode = "STREAM"
     audio_path = tmp_path / "selected.wav"
     audio_path.write_bytes(b"fixture")
-    settings.audio_path = str(audio_path)
+    _install_selected_audio_span(scene, path=str(audio_path))
     controller = runtime.RuntimeController()
     controller.client._state = runtime.Lifecycle.RUNNING
     controller.negotiated = True
@@ -1509,7 +1549,7 @@ def test_stream_to_selected_waits_for_stream_terminal_then_starts_track(
     controller.loaded_signature = ("face/model.json", "emotion/model.json")
     settings.status = "STREAMING"
     stream = _activate_stream(runtime, controller, scene)
-    monkeypatch.setattr(runtime, "WavStreamSource", _FakeSelectedWavSource)
+    monkeypatch.setattr(runtime, "ChannelAudioSource", _FakeSelectedChannelSource)
     requests: list[tuple[str, dict[str, object]]] = []
     controller.client.request = lambda method, params: (
         requests.append((method, params)) or f"request-{len(requests)}"
@@ -1533,7 +1573,7 @@ def test_stream_to_selected_waits_for_stream_terminal_then_starts_track(
 
     assert controller.active_stream is None
     assert controller.selected_track is not None
-    assert controller.selected_track.path == audio_path
+    assert controller.selected_track.source == runtime.selected_channel_snapshot(scene)
     assert [method for method, _params in requests] == ["cancel", "track_start"]
     assert all(
         call == {"reset": False, "notify": False}
@@ -1570,7 +1610,6 @@ def test_selected_to_stream_retains_first_pcm_until_track_terminal(
 ) -> None:
     runtime, bpy = runtime_module
     scene, settings = _local_scene(bpy)
-    settings.audio_path = "/audio/selected.wav"
     controller = runtime.RuntimeController()
     controller.client._state = runtime.Lifecycle.RUNNING
     controller.negotiated = True
@@ -1636,10 +1675,10 @@ def test_selected_track_uploads_once_then_starts_one_continuous_render(
     controller, track, requests = _start_selected_track(
         runtime, bpy, monkeypatch, tmp_path, frame=25
     )
-    source = track.wav_source
+    source = track.audio_source
 
-    assert (source.path, source.kwargs) == (
-        tmp_path / "selected.wav",
+    assert (source.source, source.kwargs) == (
+        runtime.selected_channel_snapshot(bpy.data.scenes[0]),
         {"output_sample_rate": 16_000, "chunk_frames": 65_536},
     )
     assert source.advances == 0
@@ -1708,12 +1747,587 @@ def test_selected_track_uploads_once_then_starts_one_continuous_render(
     assert settings.status == "BAKING"
 
 
+def test_selected_channel_uses_every_native_sound_strip_without_moving_audio(
+    runtime_module: tuple[ModuleType, ModuleType],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runtime, bpy = runtime_module
+    strips = [
+        _SoundStrip(2, 200, channel=1, path="/audio/ignored.wav"),
+        _SoundStrip(40, 52, channel=4, path="/audio/second.wav"),
+        _SoundStrip(20, 25, channel=4, path="/audio/first.wav"),
+    ]
+    originals = [vars(strip).copy() for strip in strips]
+
+    controller, track, requests = _start_selected_track(
+        runtime,
+        bpy,
+        monkeypatch,
+        tmp_path,
+        frame=100,
+        channel=4,
+        strips=strips,
+    )
+
+    assert track.source.channel == 4
+    assert (track.source.frame_start, track.source.frame_end) == (1, 250)
+    assert {clip.sound.filepath for clip in track.source.clips} == {
+        "/audio/first.wav", "/audio/second.wav"
+    }
+    assert track.audio_source.source == track.source
+    assert [vars(strip) for strip in strips] == originals
+    assert bpy.context.scene.sequence_editor.strips == strips
+    assert bpy.context.scene.frame_current == 100
+    assert bpy.context.scene.frame_set_calls == []
+    assert [method for method, _params in requests] == ["track_start"]
+    assert controller.selected_track is track
+
+
+def test_native_selected_channel_edit_replaces_the_resident_audio(
+    runtime_module: tuple[ModuleType, ModuleType],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runtime, bpy = runtime_module
+    controller, track, requests = _start_selected_track(
+        runtime, bpy, monkeypatch, tmp_path
+    )
+    scene = bpy.context.scene
+    strip = scene.sequence_editor.strips[0]
+    strip.volume = 0.25
+    runtime._CONTROLLER = controller
+
+    runtime._depsgraph_update_post_handler(
+        scene,
+        SimpleNamespace(updates=[SimpleNamespace(id=scene)]),
+    )
+
+    assert requests[-1] == ("cancel", {"operation_id": track.operation_id})
+    assert track.cancel_requested is True
+    assert track.restart_after_cancel is True
+    assert scene.frame_set_calls == []
+
+    controller._handle_response({"id": "request-2", "result": {}})
+    controller._handle_event(
+        {
+            "event": "track_ended",
+            "operation_id": track.operation_id,
+            "data": {"reason": "canceled"},
+        }
+    )
+
+    replacement = controller.selected_track
+    assert replacement is not None and replacement is not track
+    assert replacement.source.clips[0].volume == 0.25
+    assert replacement.source != track.source
+    assert track.audio_source.close_calls == 1
+    assert [method for method, _params in requests] == [
+        "track_start", "cancel", "track_start"
+    ]
+
+
+def test_pending_channel_replacement_coalesces_edits_and_fps_changes(
+    runtime_module: tuple[ModuleType, ModuleType],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runtime, bpy = runtime_module
+    controller, track, requests = _start_selected_track(
+        runtime, bpy, monkeypatch, tmp_path
+    )
+    scene = bpy.context.scene
+    scene.sequence_editor.strips[0].volume = 0.5
+    controller.refresh_selected_channel(scene)
+    scene.audio2face.audio_channel = 3
+    controller.refresh_selected_channel(scene)
+    scene.sequence_editor.strips.append(_SoundStrip(30, 40, channel=3))
+    scene.render.fps = 30
+    controller.refresh_selected_channel(scene)
+    scene.sequence_editor.strips[-1].volume = 0.25
+    scene.frame_start, scene.frame_end = -15, 300
+    controller.refresh_selected_channel(scene)
+
+    assert [method for method, _params in requests] == ["track_start", "cancel"]
+    assert controller.selected_track is track
+
+    controller._handle_response({"id": "request-2", "result": {}})
+    controller._handle_event(
+        {
+            "event": "track_ended",
+            "operation_id": track.operation_id,
+            "data": {"reason": "canceled"},
+        }
+    )
+
+    replacement = controller.selected_track
+    assert replacement is not None and replacement is not track
+    assert replacement.source == runtime.selected_channel_snapshot(scene)
+    assert replacement.source.channel == 3
+    assert replacement.source.fps == 30
+    assert (replacement.source.frame_start, replacement.source.frame_end) == (-15, 300)
+    assert replacement.source.clips[0].volume == 0.25
+    assert [method for method, _params in requests] == [
+        "track_start", "cancel", "track_start"
+    ]
+
+
+def test_late_prepare_after_channel_edit_does_not_scan_canceled_source(
+    runtime_module: tuple[ModuleType, ModuleType],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runtime, bpy = runtime_module
+    controller, track, requests = _start_selected_track(
+        runtime, bpy, monkeypatch, tmp_path
+    )
+    scene = bpy.context.scene
+    controller.pending["prepare"] = _stream_pending(
+        runtime, "track_prepare", scene.name, track.operation_id
+    )
+    scene.sequence_editor.strips[0].volume = 0.5
+    controller.refresh_selected_channel(scene)
+    scans: list[object] = []
+
+    def fail_scan(_scene: object, old_track: object) -> None:
+        scans.append(old_track)
+        raise ValueError("the retired source should not be evaluated")
+
+    monkeypatch.setattr(controller, "_evaluate_settings_timeline", fail_scan)
+
+    controller._handle_response({"id": "prepare", "result": {}})
+
+    assert scans == []
+    assert scene.audio2face.status == "MODEL_READY"
+    controller._handle_response({"id": "request-2", "result": {}})
+    controller._handle_event(
+        {
+            "event": "track_ended",
+            "operation_id": track.operation_id,
+            "data": {"reason": "canceled"},
+        }
+    )
+    assert controller.selected_track is not None
+    assert controller.selected_track is not track
+    assert [method for method, _params in requests] == [
+        "track_start", "cancel", "track_start"
+    ]
+
+
+def test_timer_discovers_channel_edits_without_depsgraph_events(
+    runtime_module: tuple[ModuleType, ModuleType],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runtime, bpy = runtime_module
+    controller, track, requests = _start_selected_track(
+        runtime, bpy, monkeypatch, tmp_path
+    )
+    scene = bpy.context.scene
+    scene.sequence_editor.strips[0].volume = 0.5
+    monkeypatch.setattr(controller.client, "tick", lambda: None)
+    monkeypatch.setattr(controller.client, "poll", lambda: [])
+
+    controller.poll()
+
+    assert controller.selected_track is track
+    assert track.cancel_requested is True
+    assert requests[-1] == ("cancel", {"operation_id": track.operation_id})
+
+
+@pytest.mark.parametrize("failure", ["request", "event"])
+@pytest.mark.parametrize("silent", [False, True])
+def test_failed_channel_waits_for_source_edit_before_retrying(
+    runtime_module: tuple[ModuleType, ModuleType],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    failure: str,
+    silent: bool,
+) -> None:
+    runtime, bpy = runtime_module
+    controller, track, requests = _start_selected_track(
+        runtime, bpy, monkeypatch, tmp_path, strips=[] if silent else None
+    )
+    scene = bpy.context.scene
+    error = {"code": "bad_audio", "message": "decode failed"}
+    if failure == "request":
+        controller._handle_error({"id": "request-1", "error": error})
+        controller._handle_response({"id": "request-2", "result": {}})
+        controller._handle_event(
+            {
+                "event": "track_ended",
+                "operation_id": track.operation_id,
+                "data": {"reason": "canceled"},
+            }
+        )
+    else:
+        controller._handle_event(
+            {"event": "error", "operation_id": track.operation_id, "data": error}
+        )
+    previous_requests = requests.copy()
+    monkeypatch.setattr(controller.client, "tick", lambda: None)
+    monkeypatch.setattr(controller.client, "poll", lambda: [])
+
+    controller.poll()
+    controller.poll()
+
+    assert controller.selected_track is None
+    assert requests == previous_requests
+    assert scene.audio2face.status == "ERROR"
+    assert scene.audio2face.status_message == "bad_audio: decode failed"
+
+    if silent:
+        scene.frame_end += 1
+    else:
+        scene.sequence_editor.strips[0].sound.filepath = "/audio/repaired.wav"
+    controller.poll()
+
+    assert controller.selected_track is not None
+    assert controller.selected_track.source == runtime.selected_channel_snapshot(scene)
+    assert requests[len(previous_requests)][0] == "track_start"
+    assert scene.audio2face.status == "TRACK_UPLOADING"
+
+
+def _end_canceled_track(controller: object, track: object) -> None:
+    controller._handle_event(
+        {
+            "event": "track_ended",
+            "operation_id": track.operation_id,
+            "data": {"reason": "canceled"},
+        }
+    )
+
+
+@pytest.mark.parametrize("transition", ["retiming", "modifier", "frame", "mode", "empty"])
+@pytest.mark.parametrize("cancel_completed", [False, True])
+def test_restoring_valid_channel_settings_restarts_the_original_source(
+    runtime_module: tuple[ModuleType, ModuleType],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    transition: str,
+    cancel_completed: bool,
+) -> None:
+    runtime, bpy = runtime_module
+    controller, track, requests = _start_selected_track(
+        runtime, bpy, monkeypatch, tmp_path
+    )
+    scene = bpy.context.scene
+    strip = scene.sequence_editor.strips[0]
+    if transition == "modifier":
+        strip.modifiers = [SimpleNamespace(mute=False)]
+    else:
+        strip.retiming_keys = [object()]
+    if transition == "frame":
+        track.prepared = True
+        controller.request_selected_frame(scene)
+        assert scene.audio2face.status == "ERROR"
+        strip.retiming_keys = []
+        strip.modifiers = [SimpleNamespace(mute=False)]
+    controller.refresh_selected_channel(scene)
+    controller.refresh_selected_channel(scene)
+
+    assert scene.audio2face.status == "ERROR"
+    assert track.cancel_requested is True
+    assert track.restart_after_cancel is False
+    assert [method for method, _params in requests] == ["track_start", "cancel"]
+    controller._handle_response({"id": "request-2", "result": {}})
+    if cancel_completed:
+        _end_canceled_track(controller, track)
+        assert controller.selected_track is None
+    if transition == "mode":
+        scene.audio2face.input_mode = "STREAM"
+        controller.input_mode_changed(scene)
+
+    strip.retiming_keys = []
+    strip.modifiers = []
+    if transition == "empty":
+        scene.sequence_editor.strips.clear()
+    else:
+        assert runtime.selected_channel_snapshot(scene) == track.source
+    controller.refresh_selected_channel(scene)
+    if transition == "mode":
+        assert [method for method, _params in requests] == ["track_start", "cancel"]
+        scene.audio2face.input_mode = "SELECTED"
+        controller.input_mode_changed(scene)
+    if not cancel_completed:
+        assert controller.selected_track is track
+        assert track.restart_after_cancel is True
+        assert scene.audio2face.status == "MODEL_READY"
+        _end_canceled_track(controller, track)
+    controller.refresh_selected_channel(scene)
+
+    replacement = controller.selected_track
+    assert replacement is not None and replacement is not track
+    assert replacement.source == runtime.selected_channel_snapshot(scene)
+    assert scene.audio2face.status == "TRACK_UPLOADING"
+    assert [method for method, _params in requests] == [
+        "track_start", "cancel", "track_start"
+    ]
+    assert scene.frame_set_calls == []
+
+
+def test_channel_decode_failure_after_validation_recovery_is_not_retried(
+    runtime_module: tuple[ModuleType, ModuleType],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runtime, bpy = runtime_module
+    controller, track, requests = _start_selected_track(
+        runtime, bpy, monkeypatch, tmp_path
+    )
+    scene = bpy.context.scene
+    strip = scene.sequence_editor.strips[0]
+    strip.retiming_keys = [object()]
+    controller.refresh_selected_channel(scene)
+    controller._handle_response({"id": "request-2", "result": {}})
+    _end_canceled_track(controller, track)
+    attempts = []
+
+    def fail_decode(source: object, **_kwargs: object) -> None:
+        attempts.append(source)
+        raise ValueError("audio decoding failed")
+
+    monkeypatch.setattr(runtime, "ChannelAudioSource", fail_decode)
+    strip.retiming_keys = []
+    controller.refresh_selected_channel(scene)
+    controller.refresh_selected_channel(scene)
+
+    assert attempts == [track.source]
+    assert controller.selected_track is None
+    assert scene.audio2face.status == "ERROR"
+    assert scene.audio2face.status_message == "audio decoding failed"
+    assert [method for method, _params in requests] == ["track_start", "cancel"]
+
+
+@pytest.mark.parametrize("invalid_source", [False, True])
+def test_model_reload_reuploads_an_unchanged_observed_channel(
+    runtime_module: tuple[ModuleType, ModuleType],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    invalid_source: bool,
+) -> None:
+    runtime, bpy = runtime_module
+    controller, old_track, requests = _start_selected_track(
+        runtime, bpy, monkeypatch, tmp_path
+    )
+    scene = bpy.context.scene
+    if invalid_source:
+        scene.sequence_editor.strips[0].retiming_keys = [object()]
+        controller.refresh_selected_channel(scene)
+        assert scene.audio2face.status == "ERROR"
+        scene.sequence_editor.strips[0].retiming_keys = []
+    controller._release_selected_track()
+    controller._clear_model_state()
+    assert controller.observed_selected_sources == {}
+    scene.audio2face.status = "LOADING_MODEL"
+    controller.pending["load"] = _model_pending(
+        runtime, scene.name, ("face/reloaded.json", "emotion/model.json")
+    )
+
+    controller._handle_response(
+        {
+            "id": "load",
+            "result": {"sample_rate": 24_000, "model_schema": _model_schema()},
+        }
+    )
+
+    replacement = controller.selected_track
+    assert replacement is not None and replacement is not old_track
+    assert replacement.source == old_track.source
+    assert replacement.audio_source.kwargs["output_sample_rate"] == 24_000
+    assert [method for method, _params in requests] == (
+        ["track_start", "cancel", "track_start"] if invalid_source
+        else ["track_start", "track_start"]
+    )
+
+
+def test_edits_on_another_channel_keep_the_existing_audio(
+    runtime_module: tuple[ModuleType, ModuleType],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runtime, bpy = runtime_module
+    controller, track, requests = _start_selected_track(
+        runtime, bpy, monkeypatch, tmp_path
+    )
+    scene = bpy.context.scene
+    other_strip = _SoundStrip(100, 200, channel=2)
+    scene.sequence_editor.strips.append(other_strip)
+    controller.refresh_selected_channel(scene)
+    other_strip.volume = 0.1
+    controller.refresh_selected_channel(scene)
+
+    assert controller.selected_track is track
+    assert track.cancel_requested is False
+    assert [method for method, _params in requests] == ["track_start"]
+
+
+@pytest.mark.parametrize("change", ["remove_last_strip", "channel", "scene_range"])
+def test_channel_edits_replace_audio_with_silence_and_back(
+    runtime_module: tuple[ModuleType, ModuleType],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    change: str,
+) -> None:
+    runtime, bpy = runtime_module
+    controller, track, requests = _start_selected_track(
+        runtime, bpy, monkeypatch, tmp_path,
+        strips=[] if change == "scene_range" else None,
+    )
+    scene = bpy.context.scene
+    if change == "remove_last_strip":
+        scene.sequence_editor.strips.clear()
+    elif change == "channel":
+        scene.audio2face.audio_channel = 2
+    else:
+        scene.frame_start, scene.frame_end = -5, 300
+    controller.refresh_selected_channel(scene)
+
+    assert track.cancel_requested is True
+    assert track.restart_after_cancel is True
+    controller._handle_response({"id": "request-2", "result": {}})
+    _end_canceled_track(controller, track)
+    silent_track = controller.selected_track
+    assert silent_track is not None and silent_track is not track
+    assert silent_track.source.clips == ()
+    assert (silent_track.source.frame_start, silent_track.source.frame_end) == (
+        scene.frame_start, scene.frame_end,
+    )
+    controller.refresh_selected_channel(scene)
+    assert [method for method, _params in requests] == [
+        "track_start", "cancel", "track_start"
+    ]
+
+    scene.sequence_editor.strips.append(
+        _SoundStrip(50, 80, channel=scene.audio2face.audio_channel)
+    )
+    controller.refresh_selected_channel(scene)
+    controller._handle_response({"id": "request-4", "result": {}})
+    _end_canceled_track(controller, silent_track)
+
+    assert controller.selected_track is not None
+    assert controller.selected_track.source == runtime.selected_channel_snapshot(scene)
+    assert len(controller.selected_track.source.clips) == 1
+    assert [method for method, _params in requests] == [
+        "track_start", "cancel", "track_start", "cancel", "track_start"
+    ]
+    assert scene.frame_set_calls == []
+
+
+def test_empty_channel_uploads_zero_pcm_through_the_selected_track_protocol(
+    runtime_module: tuple[ModuleType, ModuleType],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runtime, bpy = runtime_module
+    controller, track, requests = _start_selected_track(
+        runtime, bpy, monkeypatch, tmp_path, strips=[],
+        source_type=runtime.ChannelAudioSource,
+    )
+    size = runtime.MAX_STREAM_CHUNK_BYTES // 4
+    chunk_count = (track.audio_source.metadata.output_frames + size - 1) // size
+    for request_index in range(1, chunk_count + 2):
+        controller._handle_response({"id": f"request-{request_index}", "result": {}})
+    chunks = [
+        base64.b64decode(params["audio_f32le_base64"], validate=True)
+        for method, params in requests if method == "track_chunk"
+    ]
+
+    assert track.source.clips == ()
+    assert b"".join(chunks) == bytes(track.audio_source.metadata.output_frames * 4)
+    assert track.uploaded_samples == track.audio_source.metadata.output_frames
+    assert requests[-1][0] == "track_prepare"
+    assert bpy.context.scene.audio2face.status == "TRACK_PREPARING"
+    assert bpy.context.scene.frame_set_calls == []
+    previous_requests = requests.copy()
+    original_frame = bpy.context.scene.frame_current
+    controller._handle_response({"id": f"request-{len(requests)}", "result": {}})
+
+    assert track.prepared is True
+    assert requests[:-1] == previous_requests
+    assert requests[-1] == (
+        "track_render",
+        {
+            "operation_id": track.operation_id,
+            "revision": 1,
+            "settings_timeline": list(_timeline(runtime).payload),
+            "preview_sample": 0,
+        },
+    )
+    assert bpy.context.scene.frame_current == original_frame
+
+
+@pytest.mark.parametrize("layout", ["empty", "no_editor", "internal_gap"])
+def test_silent_frames_scan_preferred_emotion_and_present_inferred_rows(
+    runtime_module: tuple[ModuleType, ModuleType],
+    monkeypatch: pytest.MonkeyPatch,
+    layout: str,
+) -> None:
+    runtime, bpy = runtime_module
+    scene, settings = _local_scene(bpy)
+    scene.frame_start, scene.frame_end = 10, 12
+    if layout == "no_editor":
+        scene.sequence_editor = None
+    elif layout == "internal_gap":
+        scene.sequence_editor.strips[:] = [_SoundStrip(10, 10), _SoundStrip(12, 12)]
+    settings.preferred_emotions = [SimpleNamespace(value=0.0)]
+    scene.frame_evaluator = lambda frame: setattr(
+        settings.preferred_emotions[0], "value", {10: 0.1, 11: 0.2, 12: 0.3}.get(frame, 0.0)
+    )
+
+    monkeypatch.setattr(runtime, "inference_settings", _settings_with_skin_and_emotion)
+    controller = runtime.RuntimeController()
+    runtime._CONTROLLER = controller
+    controller.model_sample_rate = 48_000
+    controller.model_schema = _model_schema()
+    track = _activate_track(runtime, controller, scene, audio_samples=6_000)
+    track.timestamps = (0, 2_000, 4_000)
+    track.weights = tuple((value,) * len(MODEL_CHANNELS) for value in (0.1, 0.2, 0.3))
+    track.effective_emotions = ((0.1,), (0.2,), (0.3,))
+    timeline, _frame_samples = controller._evaluate_settings_timeline(scene, track)
+    _publish_settings_timeline(runtime, track, timeline)
+    assert timeline.payload[1] == {
+        "sample": 2_000,
+        "settings": {"emotion_driver": {"preferred": {"values": {"Joy": 0.2}}}},
+    }
+    scene.frame_set_calls.clear()
+
+    for frame in range(9, 14):
+        scene.frame_set(frame)
+        runtime._frame_change_post_handler(scene)
+
+    calls = runtime._test_live_stream.model_frame_calls
+    assert len(track.source.clips) == (2 if layout == "internal_gap" else 0)
+    assert [call[3][0] for call in calls] == [0.0, 0.1, 0.2, 0.3, 0.0]
+    assert [call[4][0] for call in calls] == [0.0, 0.1, 0.2, 0.3, 0.0]
+    assert scene.frame_set_calls == [(frame, 0.0) for frame in range(9, 14)]
+
+
+def test_selected_source_refresh_ignores_internal_setting_scans(
+    runtime_module: tuple[ModuleType, ModuleType],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runtime, bpy = runtime_module
+    controller, track, requests = _start_selected_track(
+        runtime, bpy, monkeypatch, tmp_path
+    )
+    scene = bpy.context.scene
+    scene.sequence_editor.strips[0].volume = 0.5
+    controller.evaluating_settings_timeline = True
+
+    controller.refresh_selected_channel(scene)
+
+    assert controller.selected_track is track
+    assert track.cancel_requested is False
+    assert [method for method, _params in requests] == ["track_start"]
+
+
 def test_failed_selected_track_does_not_retry_the_same_audio(
     runtime_module: tuple[ModuleType, ModuleType],
 ) -> None:
     runtime, bpy = runtime_module
     scene, settings = _local_scene(bpy)
-    settings.audio_path = "/audio/selected.wav"
     controller = runtime.RuntimeController()
     track = _activate_track(runtime, controller, scene)
     controller.pending["chunk"] = _stream_pending(
@@ -1752,7 +2366,6 @@ def test_replacement_cancel_race_preserves_a_later_error(
 ) -> None:
     runtime, bpy = runtime_module
     scene, settings = _local_scene(bpy)
-    settings.audio_path = "/audio/replacement.wav"
     controller = runtime.RuntimeController()
     controller.client._state = runtime.Lifecycle.RUNNING
     track = _activate_track(runtime, controller, scene)
@@ -1822,15 +2435,14 @@ def test_selected_settings_timeline_evaluates_native_frames_and_restores_subfram
 ) -> None:
     runtime, bpy = runtime_module
     scene, settings = _local_scene(bpy)
-    settings.audio_path = "/audio/selected.wav"
     scene.frame_current = 22
     scene.frame_subframe = 0.375
     settings.skin_strength = 0.75
     settings.prediction_delay = 0.5
     controller = runtime.RuntimeController()
     controller.model_sample_rate = 48_000
-    track = _activate_track(runtime, controller, scene, audio_samples=8_001)
     _install_selected_audio_span(scene, 10, 13)
+    track = _activate_track(runtime, controller, scene, audio_samples=8_001)
 
     def evaluate_frame(frame: int) -> None:
         settings.skin_strength = 1.0 if frame < 12 else 0.5
@@ -1866,22 +2478,63 @@ def test_selected_settings_timeline_evaluates_native_frames_and_restores_subfram
     assert controller.evaluating_settings_timeline is False
 
 
-def test_selected_setting_scan_preserves_value_until_keyframe_update(
+@pytest.mark.parametrize("current_frame,subframe", [(2, 0.0), (2, 0.25), (4, 0.0)])
+def test_pending_settings_and_prediction_delay_apply_only_at_current_integer_frame(
     runtime_module: tuple[ModuleType, ModuleType],
     monkeypatch: pytest.MonkeyPatch,
+    current_frame: int,
+    subframe: float,
 ) -> None:
     runtime, bpy = runtime_module
     scene, settings = _local_scene(bpy)
-    settings.audio_path = "/audio/selected.wav"
+    scene.frame_start, scene.frame_end = 1, 3
+    scene.frame_current, scene.frame_subframe = current_frame, subframe
+    settings.skin_strength, settings.prediction_delay = 0.9, 0.025
+    controller = runtime.RuntimeController()
+    controller.model_sample_rate = 48_000
+    track = _activate_track(runtime, controller, scene, audio_samples=6_000)
+
+    def evaluate_frame(frame: int) -> None:
+        settings.skin_strength = (frame + scene.frame_subframe) / 10.0
+        settings.prediction_delay = 0.0
+
+    scene.frame_evaluator = evaluate_frame
+    monkeypatch.setattr(runtime, "inference_settings", _settings_with_skin)
+    timeline, frame_samples = controller._evaluate_settings_timeline(scene, track)
+
+    current_integer_frame = current_frame == 2 and subframe == 0.0
+    assert [values["audio2face"]["skin_strength"] for _, values in timeline.snapshots] == (
+        [0.1, 0.9, 0.3] if current_integer_frame else [0.1, 0.2, 0.3]
+    )
+    assert frame_samples == ((0, 3_200, 4_000) if current_integer_frame else (0, 2_000, 4_000))
+    assert (scene.frame_current, scene.frame_subframe) == (current_frame, subframe)
+    assert (settings.skin_strength, settings.prediction_delay) == (0.9, 0.025)
+
+
+@pytest.mark.parametrize("layout", ["audio", "empty", "no_editor", "internal_gap"])
+def test_selected_setting_scan_previews_pending_edits_before_keyframe_update(
+    runtime_module: tuple[ModuleType, ModuleType],
+    monkeypatch: pytest.MonkeyPatch,
+    layout: str,
+) -> None:
+    runtime, bpy = runtime_module
+    scene, settings = _local_scene(bpy)
     settings.skin_strength = 0.5
     settings.preferred_emotions = [SimpleNamespace(value=0.2)]
     controller = runtime.RuntimeController()
     controller.model_sample_rate = 48_000
     controller.model_schema = _model_schema()
-    track = _activate_track(runtime, controller, scene, audio_samples=6_001)
     _install_selected_audio_span(scene, 1, 3)
+    scene.frame_current = 2
+    if layout == "empty":
+        scene.sequence_editor.strips.clear()
+    elif layout == "no_editor":
+        scene.sequence_editor = None
+    elif layout == "internal_gap":
+        scene.sequence_editor.strips[:] = [_SoundStrip(1, 1), _SoundStrip(3, 3)]
+    track = _activate_track(runtime, controller, scene, audio_samples=6_001)
 
-    initial_settings = _settings_with_skin(settings)
+    initial_settings = _settings_with_skin_and_emotion(settings)
     _publish_settings_timeline(
         runtime,
         track,
@@ -1895,7 +2548,7 @@ def test_selected_setting_scan_preserves_value_until_keyframe_update(
     controller._apply_selected_cache = lambda current_scene, _track: (
         applied_frames.append(current_scene.frame_current)
     )
-    monkeypatch.setattr(runtime, "inference_settings", _settings_with_skin)
+    monkeypatch.setattr(runtime, "inference_settings", _settings_with_skin_and_emotion)
 
     authored_value = 0.25
     authored_prediction_delay = -0.25
@@ -1918,7 +2571,7 @@ def test_selected_setting_scan_preserves_value_until_keyframe_update(
     settings.skin_strength = authored_value
     settings.prediction_delay = authored_prediction_delay
     settings.preferred_emotions[0].value = authored_preferred_value
-    edited_settings = _settings_with_skin(settings)
+    edited_settings = _settings_with_skin_and_emotion(settings)
 
     controller.refresh_inference_settings(scene)
 
@@ -1932,7 +2585,24 @@ def test_selected_setting_scan_preserves_value_until_keyframe_update(
     assert settings.skin_strength == authored_value
     assert settings.prediction_delay == authored_prediction_delay
     assert settings.preferred_emotions[0].value == authored_preferred_value
-    assert requests == []
+    assert [method for method, _params in requests] == ["track_render"]
+    assert requests[0][1]["settings_timeline"] == [
+        {"sample": 0, "settings": initial_settings},
+        {
+            "sample": 2_000,
+            "settings": {
+                "audio2face": {"skin_strength": authored_value},
+                "emotion_driver": {"preferred": {"values": {"Joy": authored_preferred_value}}},
+            },
+        },
+        {
+            "sample": 4_000,
+            "settings": {
+                "audio2face": {"skin_strength": curve_value},
+                "emotion_driver": {"preferred": {"values": {"Joy": curve_preferred_value}}},
+            },
+        },
+    ]
     assert controller.invalidated_selected_scene is None
 
     # The user now inserts/updates the key using the value which survived the
@@ -1947,20 +2617,21 @@ def test_selected_setting_scan_preserves_value_until_keyframe_update(
         (1, 0.0),
         (2, 0.0),
         (3, 0.0),
-        (1, 0.0),
+        (2, 0.0),
         (1, 0.0),
         (2, 0.0),
         (3, 0.0),
-        (1, 0.0),
+        (2, 0.0),
     ]
-    assert [method for method, _params in requests] == ["track_render"]
-    assert requests[0][1]["settings_timeline"] == [
+    assert [method for method, _params in requests] == ["track_render", "track_render"]
+    assert [params["revision"] for _method, params in requests] == [1, 2]
+    assert requests[1][1]["settings_timeline"] == [
         {"sample": 0, "settings": edited_settings},
     ]
     assert settings.skin_strength == authored_value
     assert settings.prediction_delay == authored_prediction_delay
     assert settings.preferred_emotions[0].value == authored_preferred_value
-    assert applied_frames == [1, 1]
+    assert applied_frames == [2, 2]
     assert controller.invalidated_selected_scene is None
     assert track.render_error is None
     assert settings.status != "ERROR"
@@ -1972,7 +2643,6 @@ def test_setting_edits_supersede_render_revisions_and_ignore_stale_output(
 ) -> None:
     runtime, bpy = runtime_module
     scene, settings = _local_scene(bpy)
-    settings.audio_path = "/audio/selected.wav"
     controller = runtime.RuntimeController()
     controller.model_sample_rate = 48_000
     controller.model_schema = _model_schema()
@@ -2099,7 +2769,6 @@ def test_reverting_to_published_settings_supersedes_inflight_render(
 ) -> None:
     runtime, bpy = runtime_module
     scene, settings = _local_scene(bpy)
-    settings.audio_path = "/audio/selected.wav"
     controller = runtime.RuntimeController()
     controller.model_sample_rate = 48_000
     controller.model_schema = _model_schema()
@@ -2145,18 +2814,19 @@ def test_reverting_to_published_settings_supersedes_inflight_render(
     assert settings.status == "MODEL_READY"
 
 
+@pytest.mark.parametrize("evaluated_id", [False, True])
 def test_action_edit_rebuilds_future_curve_changes_before_native_frames(
     runtime_module: tuple[ModuleType, ModuleType],
     monkeypatch: pytest.MonkeyPatch,
+    evaluated_id: bool,
 ) -> None:
     runtime, bpy = runtime_module
     scene, settings = _local_scene(bpy)
-    settings.audio_path = "/audio/selected.wav"
     controller = runtime.RuntimeController()
     controller.model_sample_rate = 48_000
     controller.model_schema = _model_schema()
-    track = _activate_track(runtime, controller, scene, audio_samples=6_001)
     _install_selected_audio_span(scene, 1, 3)
+    track = _activate_track(runtime, controller, scene, audio_samples=6_001)
     initial_settings = _inference_settings_payload()
     initial_settings["audio2face"]["skin_strength"] = 0.5
     final_settings = _inference_settings_payload()
@@ -2201,17 +2871,19 @@ def test_action_edit_rebuilds_future_curve_changes_before_native_frames(
     ]
     curve_changed = True
     scene.frame_set(1)
-    action = object()
+    action = SimpleNamespace()
+    action.original = action
     scene.animation_data = SimpleNamespace(action=action, nla_tracks=[])
     runtime._depsgraph_update_post_handler(
         scene,
-        SimpleNamespace(updates=[SimpleNamespace(id=object())]),
+        SimpleNamespace(updates=[SimpleNamespace(id=SimpleNamespace(original=object()))]),
     )
     assert controller.invalidated_selected_scene is None
 
+    changed_id = SimpleNamespace(original=action) if evaluated_id else action
     runtime._depsgraph_update_post_handler(
         scene,
-        SimpleNamespace(updates=[SimpleNamespace(id=action)]),
+        SimpleNamespace(updates=[SimpleNamespace(id=changed_id)]),
     )
 
     assert controller.invalidated_selected_scene == scene.name
@@ -2257,10 +2929,9 @@ def test_bounded_track_frame_batches_publish_atomically_on_render_completion(
 ) -> None:
     runtime, bpy = runtime_module
     scene, settings = _local_scene(bpy)
-    settings.audio_path = "/audio/selected.wav"
     controller = runtime.RuntimeController()
     settings.status = "MODEL_READY"
-    settings.status_message = "Selected WAV is ready"
+    settings.status_message = "Selected channel is ready"
     controller.model_sample_rate = 48_000
     controller.model_schema = _model_schema()
     track = _activate_track(runtime, controller, scene, audio_samples=96_001)
@@ -2324,7 +2995,7 @@ def test_bounded_track_frame_batches_publish_atomically_on_render_completion(
     assert track.stage is None
     assert controller.rejected_reason is None
     assert settings.status == "MODEL_READY"
-    assert settings.status_message == "Selected WAV is ready"
+    assert settings.status_message == "Selected channel is ready"
 
 
 def test_native_frame_change_does_not_create_a_worker_track(
@@ -2332,7 +3003,6 @@ def test_native_frame_change_does_not_create_a_worker_track(
 ) -> None:
     runtime, bpy = runtime_module
     scene, settings = _local_scene(bpy)
-    settings.audio_path = "/audio/selected.wav"
     controller = runtime.RuntimeController()
 
     def fail_if_called(_scene: object) -> None:
@@ -2423,7 +3093,7 @@ def test_releasing_operations_retains_pending_requests_for_worker_acknowledgment
     controller._release_selected_track(track.operation_id)
 
     assert controller.selected_track is None
-    assert track.wav_source.close_calls == 1
+    assert track.audio_source.close_calls == 1
     assert set(controller.pending) == {"track"}
 
 
@@ -3084,7 +3754,8 @@ def test_bake_waits_for_one_continuous_render_without_reuploading_audio(
     scene, settings = _local_scene(bpy)
     audio_path = tmp_path / "selected.wav"
     audio_path.write_bytes(b"fixture")
-    settings.audio_path = str(audio_path)
+    _install_selected_audio_span(scene, 20, 22, path=str(audio_path))
+    scene.frame_current = 20
     settings.target_objects = [SimpleNamespace(object=object())]
     controller = runtime.RuntimeController()
     controller.model_sample_rate = 48_000
@@ -3094,11 +3765,6 @@ def test_bake_waits_for_one_continuous_render_without_reuploading_audio(
     plan = object()
     monkeypatch.setattr(controller, "_require_worker_ready", lambda: None)
     monkeypatch.setattr(runtime, "plan_bake_targets", lambda *_args: (plan,))
-    monkeypatch.setattr(
-        runtime,
-        "configure_selected_audio",
-        lambda *_args, **_kwargs: (1, 2),
-    )
     requests: list[tuple[str, dict[str, object]]] = []
     controller.client.request = lambda method, params: (
         requests.append((method, params)) or "request-1"
@@ -3109,6 +3775,7 @@ def test_bake_waits_for_one_continuous_render_without_reuploading_audio(
     assert controller.selected_track is track
     assert controller.active_bake is not None
     assert controller.active_bake.targets == (plan,)
+    assert (controller.active_bake.frame_start, controller.active_bake.frame_end) == (20, 22)
     assert requests == (
         [
             (
@@ -3126,20 +3793,22 @@ def test_bake_waits_for_one_continuous_render_without_reuploading_audio(
     )
     assert track.stage == (runtime.TrackRenderStage(1) if prepared else None)
     assert settings.status == "BAKING"
-    assert track.wav_source.close_calls == 0
+    assert track.audio_source.close_calls == 0
     assert runtime._test_live_controller.stop_calls == []
 
 
+@pytest.mark.parametrize("silent", [False, True])
 def test_bake_samples_the_exact_published_cache_on_blender_frames(
     runtime_module: tuple[ModuleType, ModuleType],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    silent: bool,
 ) -> None:
     runtime, bpy = runtime_module
     scene, settings = _local_scene(bpy)
     audio_path = tmp_path / "selected.wav"
     audio_path.write_bytes(b"fixture")
-    settings.audio_path = str(audio_path)
+    _install_selected_audio_span(scene, path=str(audio_path))
     target = object()
     settings.target_objects = [SimpleNamespace(object=target)]
     scene.frame_current = 6
@@ -3158,13 +3827,15 @@ def test_bake_samples_the_exact_published_cache_on_blender_frames(
     controller.model_sample_rate = 48_000
     controller.model_schema = _model_schema()
     controller.loaded_signature = ("face/model.json", "emotion/model.json")
+    _install_selected_audio_span(scene, 10, 12)
+    if silent:
+        scene.sequence_editor.strips.clear()
     track = _activate_track(
         runtime,
         controller,
         scene,
         audio_samples=6_001,
     )
-    _install_selected_audio_span(scene, 10, 12)
     track.timestamps = (0, 2_000, 4_000)
     track.weights = tuple(
         (value,) * len(MODEL_CHANNELS) for value in (0.1, 0.2, 0.3)
@@ -3174,11 +3845,6 @@ def test_bake_samples_the_exact_published_cache_on_blender_frames(
     plan = object()
     monkeypatch.setattr(controller, "_require_worker_ready", lambda: None)
     monkeypatch.setattr(runtime, "plan_bake_targets", lambda *_args: (plan,))
-    monkeypatch.setattr(
-        runtime,
-        "configure_selected_audio",
-        lambda *_args, **_kwargs: (10, 12),
-    )
     requests: list[tuple[str, dict[str, object]]] = []
     controller.client.request = lambda method, params: (
         requests.append((method, params)) or f"request-{len(requests)}"
@@ -3215,7 +3881,7 @@ def test_bake_samples_the_exact_published_cache_on_blender_frames(
         (12, 0.0),
         (6, 0.375),
     ]
-    assert track.wav_source.close_calls == 0
+    assert track.audio_source.close_calls == 0
     assert settings.status == "MODEL_READY"
 
     intervening_error = True

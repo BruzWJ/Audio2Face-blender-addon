@@ -51,9 +51,11 @@ from .properties import (
     inference_settings,
 )
 from .selected_audio_timeline import (
-    configure_selected_audio,
+    ChannelAudioSource,
+    SelectedChannelSnapshot,
     frame_to_audio_sample,
-    selected_audio_frame_span,
+    selected_channel_frame_span,
+    selected_channel_snapshot,
 )
 from .runtime_bundle import (
     BundleError,
@@ -68,7 +70,6 @@ from .sidecar import (
     SidecarClient,
     SidecarError,
 )
-from .wav_stream import WavStreamSource
 
 
 def _model_emotion_channels(model_schema: dict[str, Any]) -> tuple[str, ...]:
@@ -218,6 +219,13 @@ class PendingRequest:
             raise ValueError(f"{self.method} pending state cannot carry an operation ID")
 
 
+@dataclass(frozen=True, slots=True)
+class InvalidSelectedChannel:
+    """An observed validation failure, distinct from a valid channel snapshot."""
+
+    message: str
+
+
 @dataclass(slots=True)
 class PCMIngress:
     """Thread-safe pending input whose first chunk starts one live stream."""
@@ -254,12 +262,12 @@ class TrackRenderStage:
 
 @dataclass(slots=True)
 class SelectedTrack:
-    """One retained Selected WAV source and its prepared render cache."""
+    """One retained selected channel source and its prepared render cache."""
 
     operation_id: str
     scene_name: str
-    path: Path
-    wav_source: WavStreamSource
+    source: SelectedChannelSnapshot
+    audio_source: ChannelAudioSource
     chunks: Iterator[bytes]
     uploaded_samples: int = 0
     prepared: bool = False
@@ -337,6 +345,9 @@ class RuntimeController:
         self.expected_worker_exit = False
         self.active_stream: ActiveStream | None = None
         self.selected_track: SelectedTrack | None = None
+        self.observed_selected_sources: dict[
+            str, SelectedChannelSnapshot | InvalidSelectedChannel
+        ] = {}
         self.active_bake: ActiveBake | None = None
         self.pcm_ingress: PCMIngress | None = None
         self.evaluating_settings_timeline = False
@@ -359,11 +370,11 @@ class RuntimeController:
     def _tag_runtime_setup_redraw() -> None:
         """Refresh Preferences and the compact sidebar setup status."""
 
-        window_manager = getattr(bpy.context, "window_manager", None)
+        window_manager = bpy.context.window_manager
         if window_manager is None:
             return
         for window in window_manager.windows:
-            screen = getattr(window, "screen", None)
+            screen = window.screen
             if screen is None:
                 continue
             for area in screen.areas:
@@ -718,6 +729,7 @@ class RuntimeController:
         self.loaded_signature = None
         self.model_sample_rate = None
         self.model_schema = None
+        self.observed_selected_sources.clear()
 
     def _ensure_scene_model_schema(self, scene: bpy.types.Scene) -> None:
         """Populate model-derived emotion channels for the target scene."""
@@ -828,30 +840,39 @@ class RuntimeController:
         self.active_stream = stream
         self._set_status(scene, "STREAM_STARTING", "Preparing audio inference")
 
+    def _selected_channel_snapshot(
+        self, scene: bpy.types.Scene
+    ) -> SelectedChannelSnapshot:
+        """Record invalid input and clear its diagnostic when validation recovers."""
+
+        try:
+            source = selected_channel_snapshot(scene)
+        except (OSError, RuntimeError, ValueError) as exc:
+            self.observed_selected_sources[scene.name] = InvalidSelectedChannel(str(exc))
+            raise
+        previous = self.observed_selected_sources.get(scene.name)
+        if (
+            isinstance(previous, InvalidSelectedChannel)
+            and scene.audio2face.status == "ERROR"
+            and scene.audio2face.status_message == previous.message
+        ):
+            self._set_status(scene, "MODEL_READY", "Selected channel settings validated")
+        return source
+
     def _ensure_selected_track(self, scene: bpy.types.Scene) -> None:
-        """Upload the configured WAV into one retained prepared track."""
+        """Upload the configured channel's audio and silence as one timeline."""
 
         settings = scene.audio2face
         if (
             settings.input_mode != "SELECTED"
-            or not settings.audio_path
             or self.client.state != Lifecycle.RUNNING
             or not self.negotiated
             or self.loaded_signature is None
         ):
             return
-        audio_path = self._selected_path(
-            bpy.path.abspath(settings.audio_path),
-            "selected WAV file",
-        )
-        track = self.selected_track
-        if track is not None:
-            if (
-                track.scene_name == scene.name
-                and track.path == audio_path
-                and not track.cancel_requested
-            ):
-                return
+        source = self._selected_channel_snapshot(scene)
+        self.observed_selected_sources[scene.name] = source
+        if self.selected_track is not None:
             return
         if self.active_stream is not None:
             return
@@ -859,8 +880,8 @@ class RuntimeController:
         if sample_rate is None:
             raise SidecarError("worker model did not report its sampling rate")
         self._ensure_scene_model_schema(scene)
-        wav_source = WavStreamSource(
-            audio_path,
+        audio_source = ChannelAudioSource(
+            source,
             output_sample_rate=sample_rate,
             chunk_frames=MAX_STREAM_CHUNK_BYTES // 4,
         )
@@ -868,9 +889,9 @@ class RuntimeController:
         track = SelectedTrack(
             operation_id=operation_id,
             scene_name=scene.name,
-            path=audio_path,
-            wav_source=wav_source,
-            chunks=iter(wav_source),
+            source=source,
+            audio_source=audio_source,
+            chunks=iter(audio_source),
         )
         self.selected_track = track
         try:
@@ -884,7 +905,33 @@ class RuntimeController:
         except Exception:
             self._release_selected_track(operation_id)
             raise
-        self._set_status(scene, "TRACK_UPLOADING", "Uploading the selected WAV")
+        self._set_status(scene, "TRACK_UPLOADING", "Uploading the selected channel")
+
+    def refresh_selected_channel(self, scene: bpy.types.Scene) -> None:
+        """Refresh edited channel audio without writing any Sequencer state."""
+
+        if (
+            self.evaluating_settings_timeline
+            or not scene.is_editable
+            or not hasattr(scene, "audio2face")
+            or scene.audio2face.input_mode != "SELECTED"
+            or self.expected_worker_exit
+            or self.client.state != Lifecycle.RUNNING
+            or not self.negotiated
+            or self.loaded_signature is None
+        ):
+            return
+        track = self.selected_track
+        if track is not None and track.scene_name != scene.name:
+            return
+        try:
+            source = self._selected_channel_snapshot(scene)
+            previous = self.observed_selected_sources.get(scene.name)
+            if source == previous:
+                return
+            self.selected_audio_changed(scene)
+        except (OSError, RuntimeError, ValueError) as exc:
+            self.selected_audio_failed(scene, str(exc))
 
     def _send_next_track_chunk(
         self,
@@ -896,8 +943,8 @@ class RuntimeController:
         try:
             payload = next(track.chunks)
         except StopIteration:
-            if track.uploaded_samples != track.wav_source.metadata.output_frames:
-                raise SidecarError("selected WAV upload ended at an unexpected sample")
+            if track.uploaded_samples != track.audio_source.metadata.output_frames:
+                raise SidecarError("selected channel upload ended at an unexpected sample")
             self._request(
                 scene,
                 "track_prepare",
@@ -930,7 +977,7 @@ class RuntimeController:
             operation_id is not None and track.operation_id != operation_id
         ):
             return
-        track.wav_source.close()
+        track.audio_source.close()
         self.selected_track = None
         self.invalidated_selected_scene = None
 
@@ -976,7 +1023,7 @@ class RuntimeController:
                 if self.selected_track is not None:
                     return
         if scene.audio2face.status != "ERROR":
-            self._set_status(scene, "MODEL_READY", "Selected WAV unloaded")
+            self._set_status(scene, "MODEL_READY", "Selected channel unloaded")
 
     def _fail_selected_track(
         self,
@@ -1002,13 +1049,9 @@ class RuntimeController:
         track = self.selected_track
         if track is not None and track.scene_name == scene.name:
             self._release_active_bake()
-            restart = bool(scene.audio2face.audio_path)
-            self._cancel_selected_track(track, restart=restart)
-            self._set_status(
-                scene,
-                "MODEL_READY",
-                "Selected WAV replacement queued" if restart else "Selected WAV unloaded",
-            )
+            self.observed_selected_sources[scene.name] = self._selected_channel_snapshot(scene)
+            self._cancel_selected_track(track, restart=True)
+            self._set_status(scene, "MODEL_READY", "Selected channel replacement queued")
             return
         self._ensure_selected_track(scene)
 
@@ -1053,7 +1096,7 @@ class RuntimeController:
             self._set_status(
                 scene,
                 "MODEL_READY",
-                "Selected WAV replacement queued" if restart else "Selected WAV unloaded",
+                "Selected channel replacement queued" if restart else "Selected channel unloaded",
             )
         with self.pending_lock:
             if (
@@ -1075,10 +1118,7 @@ class RuntimeController:
         prediction_delay: float | None = None,
     ) -> int | None:
         settings = scene.audio2face
-        span = selected_audio_frame_span(scene)
-        if span is None:
-            return None
-        frame_start, frame_end = span
+        frame_start, frame_end = track.source.frame_start, track.source.frame_end
         sample_rate = self.model_sample_rate
         if sample_rate is None:
             raise SidecarError("worker model sampling rate is unavailable")
@@ -1088,14 +1128,14 @@ class RuntimeController:
             frame,
             frame_start=frame_start,
             sample_rate=sample_rate,
-            fps=scene.render.fps,
-            fps_base=scene.render.fps_base,
+            fps=track.source.fps,
+            fps_base=track.source.fps_base,
             prediction_delay=(
                 settings.prediction_delay
                 if prediction_delay is None
                 else prediction_delay
             ),
-            audio_samples=track.wav_source.metadata.output_frames,
+            audio_samples=track.audio_source.metadata.output_frames,
         )
 
     def _evaluate_settings_timeline(
@@ -1103,15 +1143,17 @@ class RuntimeController:
         scene: bpy.types.Scene,
         track: SelectedTrack,
     ) -> tuple[SettingsTimeline, tuple[int, ...]]:
-        """Evaluate inference settings and presentation samples over the sound span."""
+        """Evaluate settings and presentation samples over the channel timeline."""
 
-        span = selected_audio_frame_span(scene)
-        if span is None:
-            raise SidecarError("selected WAV sound strip is unavailable")
-        frame_start, frame_end = span
+        frame_start, frame_end = track.source.frame_start, track.source.frame_end
         original_frame = int(scene.frame_current)
         original_subframe = float(scene.frame_subframe)
         settings = scene.audio2face
+        # Preview an uncommitted edit at its native integer frame. Fractional
+        # cursor values must not replace the FCurve's integer-frame samples.
+        authored_frame = original_frame if original_subframe == 0.0 else None
+        authored_settings = inference_settings(settings)
+        authored_prediction_delay = settings.prediction_delay
         # Returning to the original frame re-applies its existing FCurves. Keep
         # any UI value which is still waiting to be inserted as a new key.
         authored_values = tuple(
@@ -1135,9 +1177,18 @@ class RuntimeController:
                         prediction_delay=0.0,
                     ),
                 )
-                snapshots.append((sample, inference_settings(scene.audio2face)))
+                snapshots.append((
+                    sample,
+                    authored_settings if frame == authored_frame
+                    else inference_settings(scene.audio2face),
+                ))
                 frame_samples.append(
-                    cast(int, self._track_sample(scene, track, frame))
+                    cast(int, self._track_sample(
+                        scene, track, frame,
+                        prediction_delay=(
+                            authored_prediction_delay if frame == authored_frame else None
+                        ),
+                    ))
                 )
         finally:
             try:
@@ -1224,7 +1275,6 @@ class RuntimeController:
             or not scene.is_editable
             or not hasattr(scene, "audio2face")
             or scene.audio2face.input_mode != "SELECTED"
-            or not scene.audio2face.audio_path
         ):
             return
         track = self.selected_track
@@ -1236,6 +1286,8 @@ class RuntimeController:
         ):
             return
         try:
+            if self._selected_channel_snapshot(scene) != track.source:
+                return
             self._apply_selected_cache(scene, track)
         except (LiveStreamError, RuntimeError, ValueError) as exc:
             self._fail_selected_track(scene, track, str(exc))
@@ -1258,7 +1310,7 @@ class RuntimeController:
                     scene.audio2face.status == "ERROR"
                     and scene.audio2face.status_message == render_error
                 ):
-                    self._set_status(scene, "MODEL_READY", "Selected WAV is ready")
+                    self._set_status(scene, "MODEL_READY", "Selected channel is ready")
             return
         revision = track.render_revision + 1
         previous = (
@@ -1301,13 +1353,8 @@ class RuntimeController:
         self._require_worker_ready()
         settings = scene.audio2face
         if settings.input_mode != "SELECTED":
-            raise SidecarError("animation baking requires Selected Audio mode")
-        audio_path = self._selected_path(
-            bpy.path.abspath(settings.audio_path),
-            "selected WAV file",
-        )
-        if not audio_path.is_file():
-            raise SidecarError(f"audio file does not exist: {audio_path}")
+            raise SidecarError("animation baking requires Selected Channel mode")
+        source = self._selected_channel_snapshot(scene)
         model_schema = self.model_schema
         if model_schema is None:
             raise SidecarError("worker model metadata is unavailable")
@@ -1323,28 +1370,24 @@ class RuntimeController:
                 "none of the target objects has a Shape Key matching the model channels"
             )
 
-        frame_start, frame_end = configure_selected_audio(
-            scene,
-            str(audio_path),
-            first_frame=int(scene.audio2face.audio_first_frame),
-        )
+        frame_start, frame_end = source.frame_start, source.frame_end
         track = self.selected_track
         if track is not None and (
             track.scene_name != scene.name
-            or track.path != audio_path
+            or track.source != source
             or track.cancel_requested
         ):
-            raise SidecarError("wait for the selected WAV track to finish replacing")
+            raise SidecarError("wait for the selected channel track to finish replacing")
         if track is None:
             self._ensure_selected_track(scene)
             track = self.selected_track
         if (
             track is None
             or track.scene_name != scene.name
-            or track.path != audio_path
+            or track.source != source
             or track.cancel_requested
         ):
-            raise SidecarError("selected WAV track is not available")
+            raise SidecarError("selected channel track is not available")
 
         settings_timeline, frame_samples = self._evaluate_settings_timeline(
             scene, track
@@ -1866,8 +1909,8 @@ class RuntimeController:
         """Forward settings evaluated by Blender for the current native frame."""
 
         if scene.audio2face.input_mode == "SELECTED":
-            span = selected_audio_frame_span(scene)
-            if span is None or not span[0] <= int(scene.frame_current) <= span[1]:
+            span = selected_channel_frame_span(scene)
+            if not span[0] <= int(scene.frame_current) <= span[1]:
                 return
         self.refresh_inference_settings(scene)
 
@@ -2155,6 +2198,8 @@ class RuntimeController:
             track = self.selected_track
             if track is None or track.operation_id != pending.operation_id:
                 return
+            if track.cancel_requested:
+                return
             if result:
                 self._reject_worker_contract(
                     "worker returned a noncanonical track-prepare response"
@@ -2259,13 +2304,13 @@ class RuntimeController:
                         "TRACK_UPLOADING",
                         "TRACK_PREPARING",
                     }:
-                        self._set_status(scene, "MODEL_READY", "Selected WAV is ready")
+                        self._set_status(scene, "MODEL_READY", "Selected channel is ready")
                     elif (
                         render_error is not None
                         and settings.status == "ERROR"
                         and settings.status_message == render_error
                     ):
-                        self._set_status(scene, "MODEL_READY", "Selected WAV is ready")
+                        self._set_status(scene, "MODEL_READY", "Selected channel is ready")
                     self.request_selected_frame(scene)
             except (OSError, RuntimeError, ValueError) as exc:
                 if self.active_bake is not None:
@@ -2843,6 +2888,10 @@ class RuntimeController:
 
     def poll(self) -> None:
         self._poll_optimization_events()
+        track = self.selected_track
+        scene = self._scene(track.scene_name) if track is not None else bpy.context.scene
+        if scene is not None:
+            self.refresh_selected_channel(scene)
         self._refresh_invalidated_selected_settings()
         self._cancel_orphaned_operation()
         self._poll_pcm_ingress()
@@ -2983,7 +3032,7 @@ def _frame_change_post_handler(
     scene: bpy.types.Scene,
     _depsgraph: bpy.types.Depsgraph | None = None,
 ) -> None:
-    """Apply Selected Audio values after Blender evaluates the current frame."""
+    """Apply selected channel values after Blender evaluates the current frame."""
 
     controller = _CONTROLLER
     if controller is None or controller.evaluating_settings_timeline:
@@ -2997,11 +3046,12 @@ def _depsgraph_update_post_handler(
     scene: bpy.types.Scene,
     depsgraph: bpy.types.Depsgraph,
 ) -> None:
-    """Invalidate Selected settings when an Action used by the scene changes."""
+    """Refresh channel edits and invalidate changed scene animation settings."""
 
     controller = _CONTROLLER
     if controller is None or controller.evaluating_settings_timeline:
         return
+    controller.refresh_selected_channel(scene)
     animation_data = scene.animation_data
     if animation_data is None:
         return
@@ -3012,7 +3062,7 @@ def _depsgraph_update_post_handler(
         for strip in nla_track.strips
     )
     if any(
-        update.id == action
+        update.id.original == action
         for update in depsgraph.updates
         for action in actions
         if action is not None
