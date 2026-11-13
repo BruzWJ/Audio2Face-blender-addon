@@ -751,12 +751,10 @@ class LinuxProducerRunner(common.CommandRunner):
 
 def _parse_linux_image_identity(output: str, lock: Mapping[str, Any]) -> None:
     lines = output.splitlines()
-    if len(lines) != 4:
+    if len(lines) != 3:
         raise BuildError(f"Docker returned invalid producer image identity: {output!r}")
-    image_id, architecture, operating_system, raw_digests = lines
+    architecture, operating_system, raw_digests = lines
     producer = lock["linux_toolchain"]["producer_image"]
-    if image_id != f"sha256:{producer['config_sha256']}":
-        raise BuildError(f"Rocky producer config digest drifted: {image_id!r}")
     if architecture != producer["architecture"] or operating_system != "linux":
         raise BuildError(
             f"Rocky producer image platform drifted: {operating_system}/{architecture}"
@@ -804,7 +802,7 @@ def linux_producer_runner(
             "image",
             "inspect",
             "--format",
-            "{{.Id}}\n{{.Architecture}}\n{{.Os}}\n{{json .RepoDigests}}",
+            "{{.Architecture}}\n{{.Os}}\n{{json .RepoDigests}}",
             reference,
         ],
         env=environment,

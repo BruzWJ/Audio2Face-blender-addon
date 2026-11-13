@@ -80,9 +80,6 @@ def test_runtime_lock_has_exact_release_inputs() -> None:
             "2fefe8993465ffa179682aeb5f2104fae221330ffbb3acadbc7aa218921fa647"
         ),
         "architecture": "amd64",
-        "config_sha256": (
-            "20917bc29576fedbc00e9c5d0df20bee45b9952dae4936a26a0d623e6b023f4e"
-        ),
     }
     assert linux_toolchain["gxx_path"] == ("/opt/rh/gcc-toolset-11/root/usr/bin/g++")
     assert linux_toolchain["gxx_version"] == "11.2.1"
@@ -1361,7 +1358,6 @@ def test_linux_producer_image_identity_is_cryptographically_exact() -> None:
     producer = lock["linux_toolchain"]["producer_image"]
     identity = "\n".join(
         (
-            f"sha256:{producer['config_sha256']}",
             "amd64",
             "linux",
             json.dumps([producer["reference"]]),
@@ -1369,10 +1365,35 @@ def test_linux_producer_image_identity_is_cryptographically_exact() -> None:
     )
     linux_tool._parse_linux_image_identity(identity, lock)
 
-    with pytest.raises(runtime_tool.BuildError, match="config digest drifted"):
+    with pytest.raises(runtime_tool.BuildError, match="exact locked Rocky producer digest"):
         linux_tool._parse_linux_image_identity(
-            identity.replace(producer["config_sha256"], "0" * 64),
+            identity.replace(
+                producer["reference"], "quay.io/rockylinux/rockylinux@sha256:" + "0" * 64
+            ),
             lock,
+        )
+
+
+@pytest.mark.parametrize(
+    ("architecture", "operating_system"),
+    [("arm64", "linux"), ("amd64", "windows")],
+)
+def test_linux_producer_rejects_wrong_platform(
+    architecture: str,
+    operating_system: str,
+) -> None:
+    lock = runtime_tool.load_lock()
+    reference = lock["linux_toolchain"]["producer_image"]["reference"]
+    identity = "\n".join((architecture, operating_system, json.dumps([reference])))
+    with pytest.raises(runtime_tool.BuildError, match="platform drifted"):
+        linux_tool._parse_linux_image_identity(identity, lock)
+
+
+@pytest.mark.parametrize("digests", ["[]", "null", "{}", '"not-a-list"', "invalid-json"])
+def test_linux_producer_rejects_missing_or_malformed_digests(digests: str) -> None:
+    with pytest.raises(runtime_tool.BuildError):
+        linux_tool._parse_linux_image_identity(
+            f"amd64\nlinux\n{digests}", runtime_tool.load_lock()
         )
 
 

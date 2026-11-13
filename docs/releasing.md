@@ -101,6 +101,12 @@ an instance containing both `vcvarsall.bat` and the locked compiler. The Ubuntu
 image supplies Git, `curl`, `tar`, `xz`, GitHub CLI, and Docker Engine; the locked
 Rocky Linux producer container supplies the compiler and system headers.
 
+The producer is pulled and run by its locked manifest digest. Image validation
+checks that exact `RepoDigests` entry and `linux/amd64`, following Docker's
+[digest-pinning approach](https://docs.docker.com/reference/cli/docker/image/pull/#pull-an-image-by-digest-immutable-identifier).
+It does not use Docker's backend-dependent image ID; the manifest already
+identifies the configuration and layers by digest.
+
 Neither runner needs an NVIDIA GPU, CUDA Toolkit, TensorRT installation,
 Audio2Face installation, or either model repository. The runtime builder
 downloads and verifies every locked development/runtime input, and the model

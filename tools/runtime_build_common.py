@@ -513,7 +513,6 @@ def load_lock() -> dict[str, Any]:
         {
             "reference",
             "architecture",
-            "config_sha256",
         },
         "linux_toolchain.producer_image",
     )
@@ -525,7 +524,6 @@ def load_lock() -> dict[str, Any]:
         raise BuildError("producer_image.reference must pin the Rocky OCI digest")
     if producer["architecture"] != "amd64":
         raise BuildError("producer_image.architecture must be amd64")
-    _sha256(producer["config_sha256"], "producer_image.config_sha256")
 
     producer_packages = _object(linux_toolchain["packages"], "linux_toolchain.packages")
     _keys(
