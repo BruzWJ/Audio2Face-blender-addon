@@ -404,12 +404,6 @@ def test_reset_helpers_only_unset_their_owned_rna_properties(
     properties_module.reset_emotion_settings(settings)
     assert unset == list(properties_module.EMOTION_SETTING_FIELDS)
     assert "a2e_preferred_emotion_strength" not in unset
-    assert properties_module.TIMELINE_SETTING_FIELDS == (
-        *properties_module.AUDIO2FACE_SETTING_FIELDS,
-        *properties_module.EMOTION_SETTING_FIELDS,
-        "a2e_preferred_emotion_strength",
-        "prediction_delay",
-    )
 
 
 def test_schema_materializes_preferred_defaults_and_empty_mixed_output(

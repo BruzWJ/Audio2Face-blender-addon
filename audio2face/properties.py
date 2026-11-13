@@ -91,13 +91,6 @@ EMOTION_SETTING_FIELDS = (
     "a2e_live_blend_coef",
     "a2e_transition_smoothing",
 )
-INFERENCE_SETTING_FIELDS = (
-    *AUDIO2FACE_SETTING_FIELDS,
-    *EMOTION_SETTING_FIELDS,
-    "a2e_preferred_emotion_strength",
-)
-TIMELINE_SETTING_FIELDS = (*INFERENCE_SETTING_FIELDS, "prediction_delay")
-
 _AUDIO2FACE_FLOAT_RANGES = {
     "input_strength": (0.0, 3.0),
     "lower_face_smoothing": (0.0, 0.1),

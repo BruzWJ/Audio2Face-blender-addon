@@ -179,16 +179,15 @@ from the rendered settings timeline. Frames outside the combined scene/channel
 span are neutral. When an Action used by the scene changes, `depsgraph_update_post`
 queues a complete settings reevaluation on the existing main-thread timer, so
 an edit to a future FCurve cannot remain hidden by an unchanged current-frame
-value. If playback or baking is active, that invalidation remains pending while
-the prior cache continues. It also remains pending while a Blender modal
-operator is editing keyframes, so the add-on cannot change the global frame in
-the middle of a Graph Editor or Dope Sheet transform. The next main-loop poll
-runs the full frame sweep after the native operation stops; this is not a timed
-debounce. Before sweeping, the controller snapshots the current authored
-settings; after returning to the original frame, it restores any value which an
-existing FCurve re-evaluated. This keeps a value available for Blender's
-subsequent key insertion or update without altering the FCurve itself. At a paused
-integer frame, the captured settings and Prediction Delay also supply that
+value. Each scan evaluates a temporary scene copy through its inactive dependency
+graph, preserving native FCurve, NLA, and driver evaluation without seeking the
+playing scene or writing evaluated values back to shared objects. The copy is
+removed after sampling, including on failure. Parameter edits can therefore
+refresh the existing render during playback. Invalidation remains pending while
+baking or a Blender modal edit is active; the next main-loop poll samples the
+finished edit. Before sampling, the controller captures the current authored
+settings without changing them. At an integer frame, the captured settings and
+Prediction Delay also supply that
 frame's timeline entry, so a pending edit on a keyed control reaches inference
 instead of being deduplicated against the old curve. Other frames retain native
 FCurve evaluation; subframe cursors retain the integer-frame sampling contract.

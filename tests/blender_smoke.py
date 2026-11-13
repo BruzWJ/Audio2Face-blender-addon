@@ -867,9 +867,32 @@ def main() -> None:
             controller.refresh_inference_settings = original_refresh
             request = Mock(return_value="pending-preferred-edit")
             controller.client.request = request
+            probe = bpy.data.objects.new("Settings Scan Probe", None)
+            scene.collection.objects.link(probe)
+            for frame, value in ((7, 1.0), (9, 3.0)):
+                probe.location.x = value
+                probe.keyframe_insert(data_path="location", index=0, frame=frame)
+            scene.frame_set(8)
+            original_pose = tuple(probe.location)
+            original_scrub = scene.use_audio_scrub
+            scene.use_audio_scrub = True
+            original_tuning = (
+                settings.input_strength, settings.a2e_preferred_emotion_strength,
+            )
+            original_scene_frames: list[int] = []
+
+            def record_original_frame(changed_scene, _depsgraph):
+                if changed_scene == scene:
+                    original_scene_frames.append(scene.frame_current)
+
+            bpy.app.handlers.frame_change_post.append(record_original_frame)
+            original_counts = (len(bpy.data.scenes), len(bpy.data.actions))
+            original_action_users = scene.animation_data.action.users
             try:
                 baseline, _ = controller._evaluate_settings_timeline(scene, track)
                 track.render_timeline = track.published_timeline = baseline
+                bpy.ops.screen.animation_play()
+                assert bpy.context.screen.is_animation_playing
                 preferred_joy.value = 0.8
                 controller._refresh_invalidated_selected_settings()
                 assert request.call_count == 1
@@ -881,18 +904,42 @@ def main() -> None:
                     authored["emotion_driver"]["preferred"]["values"]["Joy"],
                     0.8, label="pending keyed Joy sent over silence",
                 )
-                scene.frame_set(9)
                 sample = controller._track_sample(scene, track, 9, prediction_delay=0.0)
                 following = runtime._settings_at_sample(track.render_timeline, sample)
                 _assert_close(
                     following["emotion_driver"]["preferred"]["values"]["Joy"],
                     0.9, label="following Preferred Joy key retained",
                 )
+                request.reset_mock()
+                settings.input_strength = 2.3
+                settings.a2e_preferred_emotion_strength = 0.4
+                controller._refresh_invalidated_selected_settings()
+                assert request.call_count == 1
+                for _sample, values in track.render_timeline.snapshots:
+                    _assert_close(values["audio2face"]["input_strength"], 2.3,
+                                  label="model tuning during playback")
+                    _assert_close(values["emotion_driver"]["preferred"]["strength"], 0.4,
+                                  label="emotion tuning during playback")
+                assert bpy.context.screen.is_animation_playing
+                assert (scene.frame_current, scene.frame_subframe) == (8, 0.0)
+                assert original_scene_frames == []
+                assert tuple(probe.location) == original_pose
+                assert scene.use_audio_scrub
+                assert (len(bpy.data.scenes), len(bpy.data.actions)) == original_counts
+                assert scene.animation_data.action.users == original_action_users
             finally:
+                if bpy.context.screen.is_animation_playing:
+                    bpy.ops.screen.animation_cancel(restore_frame=False)
+                bpy.app.handlers.frame_change_post.remove(record_original_frame)
+                probe_action = probe.animation_data.action
+                bpy.data.objects.remove(probe, do_unlink=True)
+                bpy.data.actions.remove(probe_action)
                 controller._release_selected_track()
                 controller.model_sample_rate = original_rate
                 controller.client.request = original_request
                 controller.pending.clear()
+                scene.use_audio_scrub = original_scrub
+                settings.input_strength, settings.a2e_preferred_emotion_strength = original_tuning
         finally:
             controller.refresh_inference_settings = original_refresh
             scene.animation_data_clear()

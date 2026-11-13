@@ -46,7 +46,6 @@ from .path_contract import require_unaliased_path
 from .preferences import get_preferences
 from .protocol import WORKER_PROFILE
 from .properties import (
-    TIMELINE_SETTING_FIELDS,
     apply_model_schema,
     inference_settings,
 )
@@ -305,11 +304,11 @@ MAX_STREAM_CHUNK_BYTES = 256 * 1024
 MAX_PENDING_STREAM_CHUNKS = 64
 
 
-def _native_frame_scan_blocked() -> bool:
-    """Return whether changing Blender's frame would disrupt a native operation."""
+def _native_modal_operation_active() -> bool:
+    """Defer sampling while a native modal edit is still changing its data."""
 
     return any(
-        window.screen.is_animation_playing or len(window.modal_operators) > 0
+        len(window.modal_operators) > 0
         for manager in bpy.data.window_managers
         for window in manager.windows
     )
@@ -1143,7 +1142,7 @@ class RuntimeController:
         scene: bpy.types.Scene,
         track: SelectedTrack,
     ) -> tuple[SettingsTimeline, tuple[int, ...]]:
-        """Evaluate settings and presentation samples over the channel timeline."""
+        """Sample native animation without seeking the scene used for playback."""
 
         frame_start, frame_end = track.source.frame_start, track.source.frame_end
         original_frame = int(scene.frame_current)
@@ -1154,24 +1153,24 @@ class RuntimeController:
         authored_frame = original_frame if original_subframe == 0.0 else None
         authored_settings = inference_settings(settings)
         authored_prediction_delay = settings.prediction_delay
-        # Returning to the original frame re-applies its existing FCurves. Keep
-        # any UI value which is still waiting to be inserted as a new key.
-        authored_values = tuple(
-            (name, getattr(settings, name)) for name in TIMELINE_SETTING_FIELDS
-        )
-        preferred_values = tuple(
-            item.value for item in settings.preferred_emotions
-        )
         snapshots: list[tuple[int, dict[str, object]]] = []
         frame_samples: list[int] = []
+        evaluation_scene = scene.copy()
         self.evaluating_settings_timeline = True
         try:
+            evaluation_scene.use_audio_scrub = False
             for frame in range(frame_start, frame_end + 1):
-                scene.frame_set(frame, subframe=0.0)
+                evaluation_scene.frame_set(frame, subframe=0.0)
+                # An inactive depsgraph evaluates FCurves, NLA and drivers
+                # without writing back to shared objects or the playing scene.
+                # Do not activate it with a context override/view-layer update.
+                evaluated_scene = evaluation_scene.evaluated_get(
+                    evaluation_scene.view_layers[0].depsgraph,
+                )
                 sample = cast(
                     int,
                     self._track_sample(
-                        scene,
+                        evaluated_scene,
                         track,
                         frame,
                         prediction_delay=0.0,
@@ -1180,11 +1179,11 @@ class RuntimeController:
                 snapshots.append((
                     sample,
                     authored_settings if frame == authored_frame
-                    else inference_settings(scene.audio2face),
+                    else inference_settings(evaluated_scene.audio2face),
                 ))
                 frame_samples.append(
                     cast(int, self._track_sample(
-                        scene, track, frame,
+                        evaluated_scene, track, frame,
                         prediction_delay=(
                             authored_prediction_delay if frame == authored_frame else None
                         ),
@@ -1192,21 +1191,9 @@ class RuntimeController:
                 )
         finally:
             try:
-                scene.frame_set(original_frame, subframe=original_subframe)
+                bpy.data.scenes.remove(evaluation_scene)
             finally:
-                try:
-                    for name, value in authored_values:
-                        if getattr(settings, name) != value:
-                            setattr(settings, name, value)
-                    for item, value in zip(
-                        settings.preferred_emotions,
-                        preferred_values,
-                        strict=True,
-                    ):
-                        if item.value != value:
-                            item.value = value
-                finally:
-                    self.evaluating_settings_timeline = False
+                self.evaluating_settings_timeline = False
         return _settings_timeline(snapshots), tuple(frame_samples)
 
     def _settings_timeline_matches_current_frame(
@@ -1941,7 +1928,7 @@ class RuntimeController:
         track = self.selected_track
         if (
             self.active_bake is not None
-            or _native_frame_scan_blocked()
+            or _native_modal_operation_active()
             or track is None
             or track.scene_name != scene_name
             or not track.prepared
@@ -2209,7 +2196,7 @@ class RuntimeController:
             try:
                 bake = self.active_bake
                 if bake is None:
-                    if _native_frame_scan_blocked():
+                    if _native_modal_operation_active():
                         self.invalidate_selected_settings(scene)
                         return
                     if self.invalidated_selected_scene == scene.name:

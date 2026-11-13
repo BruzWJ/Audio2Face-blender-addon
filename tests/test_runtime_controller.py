@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import importlib.util
 import struct
 import sys
@@ -109,11 +110,14 @@ class _Scene:
         self.frame_end = 250
         self.frame_current = 1
         self.frame_subframe = 0.0
+        self.use_audio_scrub = True
         self.render = SimpleNamespace(fps=24, fps_base=1.0)
         self.sequence_editor = SimpleNamespace(strips=[], channels=[])
         self.animation_data = None
         self.frame_set_calls: list[tuple[int, float]] = []
-        self.frame_evaluator = lambda _frame: None
+        self.frame_evaluator = lambda _scene, _frame: None
+        self.view_layers = [SimpleNamespace(depsgraph=object())]
+        self._inactive = False
 
     def as_pointer(self) -> int:
         return id(self)
@@ -122,7 +126,25 @@ class _Scene:
         self.frame_current = frame
         self.frame_subframe = subframe
         self.frame_set_calls.append((frame, subframe))
-        self.frame_evaluator(frame)
+        if self._inactive:
+            self._evaluated = copy.copy(self)
+            self._evaluated.audio2face = copy.deepcopy(self.audio2face)
+            self.frame_evaluator(self._evaluated, frame)
+        else:
+            self.frame_evaluator(self, frame)
+
+    def copy(self) -> _Scene:
+        scene = copy.copy(self)
+        scene.name += ".copy"
+        scene.audio2face = copy.deepcopy(self.audio2face)
+        scene.frame_set_calls = []
+        scene._inactive = True
+        sys.modules["bpy"].data.scenes.append(scene)
+        return scene
+
+    def evaluated_get(self, depsgraph: object) -> _Scene:
+        assert depsgraph is self.view_layers[0].depsgraph
+        return self._evaluated
 
 
 class _SoundStrip:
@@ -294,10 +316,6 @@ def runtime_module(monkeypatch: pytest.MonkeyPatch) -> tuple[ModuleType, ModuleT
     monkeypatch.setitem(sys.modules, preferences.__name__, preferences)
 
     properties = ModuleType("audio2face.properties")
-    properties.TIMELINE_SETTING_FIELDS = (  # type: ignore[attr-defined]
-        "skin_strength",
-        "prediction_delay",
-    )
     properties.apply_model_schema = lambda *_args, **_kwargs: None  # type: ignore[attr-defined]
     properties.inference_settings = lambda *_args, **_kwargs: _inference_settings_payload()  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, properties.__name__, properties)
@@ -2214,10 +2232,12 @@ def test_channel_edits_replace_audio_with_silence_and_back(
     assert scene.frame_set_calls == []
 
 
+@pytest.mark.parametrize("playing", [False, True])
 def test_empty_channel_uploads_zero_pcm_through_the_selected_track_protocol(
     runtime_module: tuple[ModuleType, ModuleType],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    playing: bool,
 ) -> None:
     runtime, bpy = runtime_module
     controller, track, requests = _start_selected_track(
@@ -2241,6 +2261,9 @@ def test_empty_channel_uploads_zero_pcm_through_the_selected_track_protocol(
     assert bpy.context.scene.frame_set_calls == []
     previous_requests = requests.copy()
     original_frame = bpy.context.scene.frame_current
+    bpy.data.window_managers = [SimpleNamespace(windows=[SimpleNamespace(
+        screen=SimpleNamespace(is_animation_playing=playing), modal_operators=[],
+    )])]
     controller._handle_response({"id": f"request-{len(requests)}", "result": {}})
 
     assert track.prepared is True
@@ -2271,8 +2294,9 @@ def test_silent_frames_scan_preferred_emotion_and_present_inferred_rows(
     elif layout == "internal_gap":
         scene.sequence_editor.strips[:] = [_SoundStrip(10, 10), _SoundStrip(12, 12)]
     settings.preferred_emotions = [SimpleNamespace(value=0.0)]
-    scene.frame_evaluator = lambda frame: setattr(
-        settings.preferred_emotions[0], "value", {10: 0.1, 11: 0.2, 12: 0.3}.get(frame, 0.0)
+    scene.frame_evaluator = lambda evaluated, frame: setattr(
+        evaluated.audio2face.preferred_emotions[0], "value",
+        {10: 0.1, 11: 0.2, 12: 0.3}.get(frame, 0.0),
     )
 
     monkeypatch.setattr(runtime, "inference_settings", _settings_with_skin_and_emotion)
@@ -2429,7 +2453,7 @@ def test_settings_timeline_uses_changed_leaf_patches_and_null_replacements(
     assert runtime._settings_at_sample(timeline, 20) == final
 
 
-def test_selected_settings_timeline_evaluates_native_frames_and_restores_subframe(
+def test_selected_settings_timeline_evaluates_copy_without_seeking_source(
     runtime_module: tuple[ModuleType, ModuleType],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2444,11 +2468,13 @@ def test_selected_settings_timeline_evaluates_native_frames_and_restores_subfram
     _install_selected_audio_span(scene, 10, 13)
     track = _activate_track(runtime, controller, scene, audio_samples=8_001)
 
-    def evaluate_frame(frame: int) -> None:
-        settings.skin_strength = 1.0 if frame < 12 else 0.5
+    def evaluate_frame(evaluated: _Scene, frame: int) -> None:
+        assert evaluated.use_audio_scrub is False
+        values = evaluated.audio2face
+        values.skin_strength = 1.0 if frame < 12 else 0.5
         if frame == 22:
-            settings.skin_strength = 0.75
-        settings.prediction_delay = 0.5
+            values.skin_strength = 0.75
+        values.prediction_delay = 0.5
 
     scene.frame_evaluator = evaluate_frame
     monkeypatch.setattr(runtime, "inference_settings", _settings_with_skin)
@@ -2465,16 +2491,39 @@ def test_selected_settings_timeline_evaluates_native_frames_and_restores_subfram
         },
     )
     assert frame_samples == (8_000, 8_000, 8_000, 8_000)
-    assert scene.frame_set_calls == [
-        (10, 0.0),
-        (11, 0.0),
-        (12, 0.0),
-        (13, 0.0),
-        (22, 0.375),
-    ]
+    assert scene.frame_set_calls == []
+    assert bpy.data.scenes == [scene]
     assert scene.frame_current == 22
     assert scene.frame_subframe == 0.375
     assert settings.skin_strength == 0.75
+    assert scene.use_audio_scrub is True
+    assert controller.evaluating_settings_timeline is False
+
+
+def test_settings_scan_failure_removes_copy_without_changing_source(
+    runtime_module: tuple[ModuleType, ModuleType],
+) -> None:
+    runtime, bpy = runtime_module
+    scene, settings = _local_scene(bpy)
+    scene.frame_current, scene.frame_subframe = 7, 0.5
+    settings.skin_strength = 0.75
+    controller = runtime.RuntimeController()
+    controller.model_sample_rate = 48_000
+    track = _activate_track(runtime, controller, scene)
+
+    def fail_evaluation(evaluated: _Scene, _frame: int) -> None:
+        evaluated.audio2face.skin_strength = 0.0
+        raise ValueError("animation evaluation failed")
+
+    scene.frame_evaluator = fail_evaluation
+    with pytest.raises(ValueError, match="animation evaluation failed"):
+        controller._evaluate_settings_timeline(scene, track)
+
+    assert bpy.data.scenes == [scene]
+    assert scene.frame_set_calls == []
+    assert (scene.frame_current, scene.frame_subframe) == (7, 0.5)
+    assert settings.skin_strength == 0.75
+    assert scene.use_audio_scrub is True
     assert controller.evaluating_settings_timeline is False
 
 
@@ -2494,9 +2543,9 @@ def test_pending_settings_and_prediction_delay_apply_only_at_current_integer_fra
     controller.model_sample_rate = 48_000
     track = _activate_track(runtime, controller, scene, audio_samples=6_000)
 
-    def evaluate_frame(frame: int) -> None:
-        settings.skin_strength = (frame + scene.frame_subframe) / 10.0
-        settings.prediction_delay = 0.0
+    def evaluate_frame(evaluated: _Scene, frame: int) -> None:
+        evaluated.audio2face.skin_strength = (frame + evaluated.frame_subframe) / 10.0
+        evaluated.audio2face.prediction_delay = 0.0
 
     scene.frame_evaluator = evaluate_frame
     monkeypatch.setattr(runtime, "inference_settings", _settings_with_skin)
@@ -2512,13 +2561,19 @@ def test_pending_settings_and_prediction_delay_apply_only_at_current_integer_fra
 
 
 @pytest.mark.parametrize("layout", ["audio", "empty", "no_editor", "internal_gap"])
+@pytest.mark.parametrize("playing", [False, True])
 def test_selected_setting_scan_previews_pending_edits_before_keyframe_update(
     runtime_module: tuple[ModuleType, ModuleType],
     monkeypatch: pytest.MonkeyPatch,
     layout: str,
+    playing: bool,
 ) -> None:
     runtime, bpy = runtime_module
     scene, settings = _local_scene(bpy)
+    screen = SimpleNamespace(is_animation_playing=playing)
+    bpy.data.window_managers = [SimpleNamespace(windows=[SimpleNamespace(
+        screen=screen, modal_operators=[],
+    )])]
     settings.skin_strength = 0.5
     settings.preferred_emotions = [SimpleNamespace(value=0.2)]
     controller = runtime.RuntimeController()
@@ -2557,10 +2612,11 @@ def test_selected_setting_scan_previews_pending_edits_before_keyframe_update(
     curve_prediction_delay = 0.5
     curve_preferred_value = 0.2
 
-    def evaluate_frame(_frame: int) -> None:
-        settings.skin_strength = curve_value
-        settings.prediction_delay = curve_prediction_delay
-        settings.preferred_emotions[0].value = curve_preferred_value
+    def evaluate_frame(evaluated: _Scene, _frame: int) -> None:
+        values = evaluated.audio2face
+        values.skin_strength = curve_value
+        values.prediction_delay = curve_prediction_delay
+        values.preferred_emotions[0].value = curve_preferred_value
         # Blender invokes the RNA update callback while applying an animated
         # PropertyGroup value. It reaches this same controller method.
         controller.refresh_inference_settings(scene)
@@ -2604,6 +2660,7 @@ def test_selected_setting_scan_previews_pending_edits_before_keyframe_update(
         },
     ]
     assert controller.invalidated_selected_scene is None
+    assert screen.is_animation_playing is playing
 
     # The user now inserts/updates the key using the value which survived the
     # background scan. Blender's Action update queues the final FCurve state.
@@ -2613,16 +2670,8 @@ def test_selected_setting_scan_previews_pending_edits_before_keyframe_update(
     controller.invalidate_selected_settings(scene)
     controller._refresh_invalidated_selected_settings()
 
-    assert scene.frame_set_calls == [
-        (1, 0.0),
-        (2, 0.0),
-        (3, 0.0),
-        (2, 0.0),
-        (1, 0.0),
-        (2, 0.0),
-        (3, 0.0),
-        (2, 0.0),
-    ]
+    assert scene.frame_set_calls == []
+    assert bpy.data.scenes == [scene]
     assert [method for method, _params in requests] == ["track_render", "track_render"]
     assert [params["revision"] for _method, params in requests] == [1, 2]
     assert requests[1][1]["settings_timeline"] == [
@@ -2635,6 +2684,52 @@ def test_selected_setting_scan_previews_pending_edits_before_keyframe_update(
     assert controller.invalidated_selected_scene is None
     assert track.render_error is None
     assert settings.status != "ERROR"
+
+
+def test_playing_unkeyed_edit_survives_frame_advance_without_repeated_renders(
+    runtime_module: tuple[ModuleType, ModuleType],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, bpy = runtime_module
+    scene, settings = _local_scene(bpy)
+    scene.frame_end = 4
+    settings.preferred_emotions = [SimpleNamespace(value=0.2)]
+    controller = runtime.RuntimeController()
+    controller.model_sample_rate = 48_000
+    runtime._CONTROLLER = controller
+    track = _activate_track(runtime, controller, scene)
+    monkeypatch.setattr(runtime, "inference_settings", _settings_with_skin_and_emotion)
+    _publish_settings_timeline(
+        runtime, track, _timeline(runtime, _settings_with_skin_and_emotion(settings)),
+    )
+    screen = SimpleNamespace(is_animation_playing=True)
+    bpy.data.window_managers = [SimpleNamespace(windows=[SimpleNamespace(
+        screen=screen, modal_operators=[],
+    )])]
+    requests: list[tuple[str, dict[str, object]]] = []
+    controller.client.request = lambda method, params: (
+        requests.append((method, params)) or f"request-{len(requests)}"
+    )
+
+    settings.skin_strength = 0.25
+    settings.preferred_emotions[0].value = 0.9
+    controller.refresh_inference_settings(scene)
+    for frame in (2, 3):
+        scene.frame_set(frame)
+        runtime._frame_change_post_handler(scene)
+    controller._refresh_invalidated_selected_settings()
+    scene.frame_set(4)
+    runtime._frame_change_post_handler(scene)
+    controller._refresh_invalidated_selected_settings()
+
+    assert [method for method, _params in requests] == ["track_render"]
+    assert requests[0][1]["settings_timeline"] == [
+        {"sample": 0, "settings": _settings_with_skin_and_emotion(settings)},
+    ]
+    assert scene.frame_set_calls == [(2, 0.0), (3, 0.0), (4, 0.0)]
+    assert screen.is_animation_playing is True
+    assert controller.invalidated_selected_scene is None
+    assert bpy.data.scenes == [scene]
 
 
 def test_setting_edits_supersede_render_revisions_and_ignore_stale_output(
@@ -2851,8 +2946,8 @@ def test_action_edit_rebuilds_future_curve_changes_before_native_frames(
 
     curve_changed = False
 
-    def evaluate_frame(frame: int) -> None:
-        settings.skin_strength = (
+    def evaluate_frame(evaluated: _Scene, frame: int) -> None:
+        evaluated.audio2face.skin_strength = (
             0.5 if frame == 1 else (0.25 if curve_changed else 1.5)
         )
 
@@ -2901,16 +2996,12 @@ def test_action_edit_rebuilds_future_curve_changes_before_native_frames(
     assert requests == []
     assert len(scene.frame_set_calls) == frame_set_count
 
-    screen.is_animation_playing = False
-    controller._refresh_invalidated_selected_settings()
-
-    assert controller.invalidated_selected_scene == scene.name
-    assert requests == []
-    assert len(scene.frame_set_calls) == frame_set_count
-
     window.modal_operators.clear()
     controller._refresh_invalidated_selected_settings()
 
+    assert screen.is_animation_playing is True
+    assert len(scene.frame_set_calls) == frame_set_count
+    assert bpy.data.scenes == [scene]
     assert [method for method, _params in requests] == ["track_render"]
     assert requests[0][1]["settings_timeline"][1] == {
         "sample": 2_000,
@@ -3818,8 +3909,8 @@ def test_bake_samples_the_exact_published_cache_on_blender_frames(
         11: 1.0 / 24.0,
         12: -1.0 / 24.0,
     }
-    scene.frame_evaluator = lambda frame: setattr(
-        settings,
+    scene.frame_evaluator = lambda evaluated, frame: setattr(
+        evaluated.audio2face,
         "prediction_delay",
         prediction_delays.get(frame, 0.0),
     )
@@ -3875,12 +3966,8 @@ def test_bake_samples_the_exact_published_cache_on_blender_frames(
     assert controller.selected_track is track
     assert scene.frame_current == 6
     assert scene.frame_subframe == 0.375
-    assert scene.frame_set_calls == [
-        (10, 0.0),
-        (11, 0.0),
-        (12, 0.0),
-        (6, 0.375),
-    ]
+    assert scene.frame_set_calls == []
+    assert bpy.data.scenes == [scene]
     assert track.audio_source.close_calls == 0
     assert settings.status == "MODEL_READY"
 
