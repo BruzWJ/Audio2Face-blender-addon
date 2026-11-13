@@ -59,6 +59,11 @@ labels to configure. The `-latest` names intentionally follow GitHub's current
 stable images; the Windows job installs its locked compiler and SDK instead of
 depending on the compiler version preinstalled on that moving image.
 
+The prepare and native build jobs select Python `3.11` through
+[`actions/setup-python`](https://github.com/actions/setup-python/blob/main/docs/advanced-usage.md#specifying-a-python-version),
+allowing an available patch for each runner image. The host Python runs the
+release scripts; the native compiler and SDK versions remain locked.
+
 GitHub specifies 14 GB of SSD storage for a standard runner. The standard
 images also contain development stacks that this release never consumes, so
 each native job removes an explicit allowlist before selecting its one Python:
@@ -119,7 +124,7 @@ files are deliberately not part of the extension package.
    the dated draft and retains its numeric ID. GitHub generates the notes from
    the previous published release.
 5. Each native job checks out the same frozen SHA, reclaims its standard runner,
-   selects Python 3.11.9, and builds the locked runtime. Windows first installs
+   selects Python 3.11, and builds the locked runtime. Windows first installs
    and verifies the exact Visual Studio 2022 components listed above.
 6. The native jobs download the official portable Blender 5.2.0 archives,
    verify their pinned SHA-256 digests, discard the downloaded archives after

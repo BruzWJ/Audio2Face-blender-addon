@@ -34,7 +34,7 @@ jobs:
       - name: Select release Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
-          python-version: "3.11.9"
+          python-version: "3.11"
 
       - name: Validate source and derive package identity
         id: identity
@@ -653,7 +653,7 @@ jobs:
       - name: Select release Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
-          python-version: "3.11.9"
+          python-version: "3.11"
 
       - name: Install locked Visual Studio 2022 build tools
         shell: pwsh
@@ -865,7 +865,7 @@ jobs:
       - name: Select release Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
-          python-version: "3.11.9"
+          python-version: "3.11"
 
       - name: Verify standard Ubuntu release host
         shell: bash
